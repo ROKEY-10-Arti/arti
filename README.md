@@ -26,3 +26,8 @@
 - **미들웨어:** ROS 2, Nav2, SLAM
 - **비전:** YOLO 기반 사람 인식·추적, AprilTag 작품 마킹
 - **UI:** 키오스크 PC·앱 UI
+
+## 개발 문서
+- [개발 환경 세팅](docs/setup.md)
+- [요구사항 요약 (개발용)](docs/requirements.md)
+- [트러블슈팅 기록](docs/troubleshooting/README.md)

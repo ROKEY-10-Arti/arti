@@ -1,0 +1,84 @@
+# 개발 환경 세팅 (팀원용)
+
+Ubuntu 24.04 + ROS 2 Jazzy + TurtleBot 4 패키지가 설치된 PC를 기준으로 한다.
+위에서부터 한 단계씩 진행하고, 단계마다 **확인** 명령으로 결과를 본다.
+
+## 1. `~/.bashrc`에 추가
+
+`~/.bashrc` 맨 아래에 붙인다. 이미 비슷한 줄이 있으면 중복으로 넣지 않는다.
+
+```bash
+# --- ROS 2 Jazzy + TurtleBot 4 ---
+source /opt/ros/jazzy/setup.bash
+[ -f ~/turtlebot4_ws/install/setup.bash ] && source ~/turtlebot4_ws/install/setup.bash
+
+# --- 로봇과 통신 (ROS_DOMAIN_ID, Discovery Server) ---
+# 파일 내용은 `cat /etc/turtlebot4_discovery/setup.bash`로 확인
+[ -f /etc/turtlebot4_discovery/setup.bash ] && source /etc/turtlebot4_discovery/setup.bash
+
+# --- direnv: 프로젝트 폴더에 들어가면 환경 자동 로드 ---
+eval "$(direnv hook bash)"    # 반드시 다른 설정보다 뒤에 둔다
+
+# --- 편의 명령 ---
+alias pb='colcon build --symlink-install && source install/setup.bash'   # 워크스페이스 루트에서 빌드
+alias ros-restart='ros2 daemon stop; ros2 daemon start'                   # 토픽이 안 보일 때 먼저 시도
+```
+
+적용과 확인:
+
+```bash
+source ~/.bashrc
+echo $ROS_DOMAIN_ID $RMW_IMPLEMENTATION    # 예: 1 rmw_fastrtps_cpp
+```
+
+## 2. direnv 설치
+
+```bash
+sudo apt install direnv
+direnv version
+```
+
+## 3. 저장소 받기
+
+```bash
+mkdir -p ~/project && cd ~/project
+git clone https://github.com/ROKEY-10-Arti/arti.git
+cd arti
+```
+
+## 4. 로컬 환경변수 파일 만들기
+
+`env.bash`는 사람마다 다를 수 있으므로 git에 올리지 않는다.
+
+```bash
+cp env.bash.example env.bash
+nano env.bash
+```
+
+- `ROS_DOMAIN_ID`는 **로봇 discovery 설정과 같은 값**으로 맞춘다 (`echo $ROS_DOMAIN_ID`로 본 값).
+  다르면 로봇 토픽이 보이지 않는다 → [기록](troubleshooting/env/2026-11-16-domain-id-mismatch.md)
+- 로봇 네임스페이스(`ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`)는 담당 로봇에 맞춘다.
+
+## 5. direnv 허용
+
+저장소에 들어 있는 `.envrc`가 `install/setup.bash`와 `env.bash`를 자동으로 불러온다.
+보안을 위해 처음 한 번, 그리고 `.envrc`가 바뀔 때마다 허용해야 한다.
+
+```bash
+direnv allow
+```
+
+## 6. 빌드와 확인
+
+```bash
+pb
+cd ~ && cd ~/project/arti           # 다시 들어오면 direnv가 환경을 다시 불러온다
+echo $ROS_DOMAIN_ID $ARTI_ROBOT1_NS
+ros2 pkg list | grep arti            # arti_bringup, arti_interfaces 가 보이면 성공
+```
+
+## 문제가 생기면
+
+- `direnv: error .envrc is blocked` → `direnv allow`
+- 로봇 토픽이 안 보임 → `ROS_DOMAIN_ID` 확인 → `ros-restart`
+- 해결한 내용은 [`troubleshooting/`](troubleshooting/README.md)에 기록한다.
