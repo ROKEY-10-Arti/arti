@@ -9,15 +9,12 @@
 
 | 폴더 | 범위 |
 |---|---|
-| `env/` | 개발 PC 환경: 빌드(colcon), source, 의존성, `ROS_DOMAIN_ID`·네트워크·DDS 통신 |
+| `env/` | 개발 PC 환경: 빌드(colcon), source, venv, 의존성, `ROS_DOMAIN_ID`·네트워크·DDS 통신 |
 | `robot/` | TurtleBot 4 본체: 배터리, 도킹, Create3, 센서 하드웨어, 로봇 쪽 설정 |
-| `interfaces/` | `arti_interfaces` (msg/srv/action) |
-| `bringup/` | `arti_bringup` (launch, 파라미터) |
-| `navigation/` | `arti_navigation` (Nav2, 지도, localization) |
-| `perception/` | `arti_perception` (YOLO, AprilTag, 카메라) |
-| `follow/` | `arti_follow` |
-| `docent/` | `arti_docent` |
-| `fleet/` | `arti_fleet` |
+| `common/` | `src/common/` 패키지: interfaces, bringup(localization·nav2), 지도·공용 좌표 |
+| `follow/` | `src/follow/` 사용자 추종 |
+
+`src/`의 역할 폴더와 이름을 맞춘다. 새 역할 폴더가 생기면 여기에도 같은 이름으로 만든다.
 
 여러 노드·패키지에 걸친 문제는 **원인이 있던 쪽** 폴더에 둔다.
 원인을 모르면 증상이 보인 쪽에 두고, 원인을 찾으면 파일을 옮긴다.

@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>arti_navigation</name>
+  <name>arti_common</name>
   <version>0.0.0</version>
-  <description>Arti Nav2 config, maps, and course guidance</description>
+  <description>Arti shared map, locations config, and utilities</description>
   <maintainer email="arti@todo.invalid">ROKEY-10-Arti</maintainer>
   <license>Apache-2.0</license>
 

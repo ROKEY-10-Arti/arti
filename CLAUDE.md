@@ -1,6 +1,6 @@
 # arti
 
-TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (ROKEY 10기 지능1 팀 프로젝트). 기능 개요는 `README.md`, 개발용 요구사항(수치·제약·기능→패키지 매핑)은 `docs/requirements.md` 참고. 원본 기획은 팀 노션.
+TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (ROKEY 10기 지능1 팀 프로젝트). 기능 개요는 `README.md`, 개발용 요구사항(수치·제약·기능→패키지 매핑)은 `docs/common/requirements.md` 참고. 원본 기획은 팀 노션.
 
 ## 진행 방식
 
@@ -24,24 +24,23 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 - 로봇 네임스페이스: `/robot1`, `/robot4` (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
 - Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
-- `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/setup.md`.
+- `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/common/setup.md`, 주행 띄우기는 `docs/common/navigation.md`.
 - `env.bash`는 로컬 전용(gitignore). `env.bash.example`을 복사해서 `ROS_DOMAIN_ID`, 로봇 네임스페이스 설정.
 
-## 패키지 구성 (계획)
+## 패키지 구성
 
-| 패키지 | 빌드 | 역할 | 상태 |
-|---|---|---|---|
-| arti_interfaces | ament_cmake | 커스텀 msg/srv/action (작품 정보, 로봇 배정, 상태) | 생성 (빈 패키지) |
-| arti_bringup | ament_python | launch, 로봇별 파라미터 (/robot1, /robot4) | 생성 (빈 패키지) |
-| arti_navigation | ament_python | Nav2 설정, 지도, 코스 안내 (NavigateToPose) | 생성 (지도 `maps/rokey_map` 포함) |
-| arti_perception | ament_python | YOLO 사람 추적, AprilTag 작품 인식 | 예정 |
-| arti_follow | ament_python | 자유 관람: 대상과 약 80cm 유지 | 예정 |
-| arti_docent | ament_python | 작품 앞 체류 판단 → 해설 재생/중단 | 예정 |
-| arti_fleet | ament_python | 배터리 기준 배정, 대기열, 통행 순서, 도킹, 이상 감지·직원 호출, 비상 정지 | 예정 |
+역할(노션 간트 차트)별 폴더. 두 역할 이상이 쓰는 것은 `src/common/`. 규칙은 `src/README.md`.
 
-키오스크/관제 UI는 Figma로 설계 중이며 패키지 형태는 미정.
+| 폴더 | 패키지 | 빌드 | 역할 | 상태 |
+|---|---|---|---|---|
+| common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | 빈 패키지 |
+| common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | 빈 패키지 |
+| common | arti_common | ament_python | 공용 지도 `maps/rokey_map`, 공용 좌표 config, 유틸 | 지도 포함 |
+| follow | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | 빈 패키지 |
 
-패키지는 해당 기능을 시작할 때 하나씩 추가한다.
+예정 역할 폴더 (필요해지면 추가): `course/`(코스주행, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).
+역할 패키지끼리 직접 import하지 않는다.
+문서도 같은 구분: `docs/common/`, `docs/follow/` (`docs/README.md`). 역할 설계(노드·토픽·파라미터)가 정해지면 해당 역할 README 표에 적는다.
 
 ## 미정
 

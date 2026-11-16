@@ -2,7 +2,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = 'arti_navigation'
+package_name = 'arti_common'
 
 setup(
     name=package_name,
@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='ROKEY-10-Arti',
     maintainer_email='arti@todo.invalid',
-    description='Arti Nav2 config, maps, and course guidance',
+    description='Arti shared map, locations config, and utilities',
     license='Apache-2.0',
     extras_require={
         'test': [

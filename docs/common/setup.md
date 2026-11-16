@@ -56,7 +56,7 @@ nano env.bash
 ```
 
 - `ROS_DOMAIN_ID`는 **로봇 discovery 설정과 같은 값**으로 맞춘다 (`echo $ROS_DOMAIN_ID`로 본 값).
-  다르면 로봇 토픽이 보이지 않는다 → [기록](troubleshooting/env/2026-11-16-domain-id-mismatch.md)
+  다르면 로봇 토픽이 보이지 않는다 → [기록](../troubleshooting/env/2026-11-16-domain-id-mismatch.md)
 - 로봇 네임스페이스는 `/robot1`, `/robot4`다 (`ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`). 예시 파일 값 그대로 두면 된다.
 
 ## 5. arti 전용 venv 만들기
@@ -67,7 +67,7 @@ bash scripts/make_venv.sh      # ~/venvs/arti_venv 생성 + requirements.txt 설
 
 - 시스템 패키지(ROS, rclpy)를 볼 수 있게 `--system-site-packages`로 만든다.
 - pip로 받을 패키지는 `requirements.txt`에 버전을 고정해서 추가하고, 스크립트를 다시 실행한다.
-- **pytest, colcon은 pip로 설치하지 않는다** (ROS와 충돌 → [기록](troubleshooting/env/2026-11-16-colcon-test-pytest-venv.md)).
+- **pytest, colcon은 pip로 설치하지 않는다** (ROS와 충돌 → [기록](../troubleshooting/env/2026-11-16-colcon-test-pytest-venv.md)).
 - 위치를 바꾸려면 `env.bash`에 `export ARTI_VENV=...`를 넣는다.
 
 ## 6. direnv 허용
@@ -93,4 +93,4 @@ ros2 pkg list | grep arti            # arti_bringup, arti_interfaces 가 보이�
 
 - `direnv: error .envrc is blocked` → `direnv allow`
 - 로봇 토픽이 안 보임 → `ROS_DOMAIN_ID` 확인 → `ros-restart`
-- 해결한 내용은 [`troubleshooting/`](troubleshooting/README.md)에 기록한다.
+- 해결한 내용은 [`troubleshooting/`](../troubleshooting/README.md)에 기록한다.
