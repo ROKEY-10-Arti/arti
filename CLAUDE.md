@@ -21,8 +21,10 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 ## 환경
 
 - Ubuntu 24.04, ROS 2 Jazzy. `~/turtlebot4_ws`는 `.bashrc`에서 이미 source됨.
+- 로봇 네임스페이스: `/robot1`, `/robot4` (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
-- `.envrc`(direnv, 커밋됨)가 들어올 때 `install/setup.bash` + `env.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/setup.md`.
+- Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
+- `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/setup.md`.
 - `env.bash`는 로컬 전용(gitignore). `env.bash.example`을 복사해서 `ROS_DOMAIN_ID`, 로봇 네임스페이스 설정.
 
 ## 패키지 구성 (계획)
@@ -30,7 +32,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 | 패키지 | 빌드 | 역할 | 상태 |
 |---|---|---|---|
 | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (작품 정보, 로봇 배정, 상태) | 생성 (빈 패키지) |
-| arti_bringup | ament_python | launch, 로봇별 파라미터 (robot1/robot2) | 생성 (빈 패키지) |
+| arti_bringup | ament_python | launch, 로봇별 파라미터 (/robot1, /robot4) | 생성 (빈 패키지) |
 | arti_navigation | ament_python | Nav2 설정, 지도, 코스 안내 (NavigateToPose) | 생성 (지도 `maps/rokey_map` 포함) |
 | arti_perception | ament_python | YOLO 사람 추적, AprilTag 작품 인식 | 예정 |
 | arti_follow | ament_python | 자유 관람: 대상과 약 80cm 유지 | 예정 |
@@ -43,5 +45,5 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 
 ## 미정
 
-- 팀 `ROS_DOMAIN_ID` (현재 로봇 discovery 설정은 1, `env.bash.example`은 0 → `docs/troubleshooting/env/2026-11-16-domain-id-mismatch.md`), 실제 로봇 네임스페이스
+- 팀 `ROS_DOMAIN_ID` (현재 로봇 discovery 설정은 1, `env.bash.example`은 0 → `docs/troubleshooting/env/2026-11-16-domain-id-mismatch.md`)
 - package.xml maintainer (현재 자리표시자 `arti@todo.invalid`)

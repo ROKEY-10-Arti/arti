@@ -1,0 +1,9 @@
+# arti 전용 pip 패키지 (ROS 패키지는 apt/rosdep으로, 여기에는 pip로만 받는 것)
+# venv는 --system-site-packages로 만들기 때문에 rclpy, numpy, opencv(apt) 등은 그대로 보인다.
+#
+# 주의: pytest, colcon-*는 여기에 넣지 않는다.
+#   pip 최신 pytest는 ROS Jazzy launch_testing과 충돌한다
+#   → docs/troubleshooting/env/2026-11-16-colcon-test-pytest-venv.md
+#
+# 패키지를 추가할 때는 버전을 고정한다. 예:
+# ultralytics==8.4.208

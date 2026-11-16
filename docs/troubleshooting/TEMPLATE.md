@@ -5,7 +5,7 @@ author: 이름
 status: 해결 | 미해결 | 우회
 packages: [arti_xxx]          # 관련 패키지
 nodes: [node_name]            # 관련 노드 (없으면 [])
-robot: robot1 | robot2 | 공통 | 해당없음
+robot: robot1 | robot4 | 공통 | 해당없음
 ---
 
 ## 증상

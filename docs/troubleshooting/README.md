@@ -46,3 +46,4 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 날짜 | 폴더 | 제목 | 상태 | 작성 |
 |---|---|---|---|---|
 | 2026-11-16 | env | [env.bash의 ROS_DOMAIN_ID가 로봇 설정을 덮어씀](env/2026-11-16-domain-id-mismatch.md) | 해결 | choongman.choi |
+| 2026-11-16 | env | [colcon test가 launch_testing 플러그인 에러로 실패](env/2026-11-16-colcon-test-pytest-venv.md) | 해결 | choongman.choi |
