@@ -21,7 +21,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 ## 환경
 
 - Ubuntu 24.04, ROS 2 Jazzy. `~/turtlebot4_ws`는 `.bashrc`에서 이미 source됨.
-- 로봇 네임스페이스: `/robot1`, `/robot4` (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
+- 팀 공통 `ROS_DOMAIN_ID=1` (로봇 discovery 설정과 같음). 로봇 네임스페이스: `/robot1`, `/robot4` (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
 - Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
 - `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/common/setup.md`, 주행 띄우기는 `docs/common/navigation.md`.
@@ -44,5 +44,4 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 
 ## 미정
 
-- 팀 `ROS_DOMAIN_ID` (현재 로봇 discovery 설정은 1, `env.bash.example`은 0 → `docs/troubleshooting/env/2026-11-16-domain-id-mismatch.md`)
 - package.xml maintainer (현재 자리표시자 `arti@todo.invalid`)

@@ -2,7 +2,7 @@
 title: env.bash의 ROS_DOMAIN_ID가 로봇 설정을 덮어써서 로봇 토픽이 안 보임
 date: 2026-11-16
 author: choongman.choi
-status: 해결 (로컬 env.bash = 1, 팀 공통 값은 결정 대기)
+status: 해결
 packages: []
 nodes: []
 robot: 공통
@@ -38,7 +38,7 @@ ros2 topic list          # /robot1/... 토픽이 안 보임
 nano env.bash    # export ROS_DOMAIN_ID=1
 ```
 
-팀 공통 값이 정해지면 `env.bash.example`도 함께 고친다.
+팀 공통 값을 1로 정하고 `env.bash.example`도 1로 고쳤다 (2026-11-16). 그 전에 `env.bash`를 복사한 사람은 직접 1로 바꿔야 한다.
 
 ## 확인 방법
 

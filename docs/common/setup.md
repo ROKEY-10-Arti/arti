@@ -55,7 +55,7 @@ cp env.bash.example env.bash
 nano env.bash
 ```
 
-- `ROS_DOMAIN_ID`는 **로봇 discovery 설정과 같은 값**으로 맞춘다 (`echo $ROS_DOMAIN_ID`로 본 값).
+- `ROS_DOMAIN_ID`는 팀 공통 값 **1**이다 (로봇 discovery 설정과 같음). 예시 파일 값 그대로 두면 된다.
   다르면 로봇 토픽이 보이지 않는다 → [기록](../troubleshooting/env/2026-11-16-domain-id-mismatch.md)
 - 로봇 네임스페이스는 `/robot1`, `/robot4`다 (`ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`). 예시 파일 값 그대로 두면 된다.
 
