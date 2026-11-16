@@ -29,6 +29,7 @@
 | 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
 | 출력 | `cmd_vel` | TwistStamped | 주행 (Nav2 안 씀) |
 | 출력 | `follow/state` | String | 상태가 바뀔 때마다 |
+| 출력 | `follow/debug` | MarkerArray | `debug_viz:=true`일 때. 추정 위치·목표·DWA 후보/고른 경로·바닥 물체·상태 (RViz) |
 
 | 상태 | 언제 | 동작 (플로우차트) |
 |---|---|---|
@@ -48,6 +49,13 @@
 ```
 
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
+- **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
+  → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m), RViz는 `rviz:=true`.
+  인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `video_source:=`, `drive:=false`, `test:=false`, `tracker:=false`, `rviz:=true`
+- 테스트 로그(기본 켬): 2초마다 데이터 흐름 요약(토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유)과
+  끊긴 순간마다 `[늦음]`·`[제어 밀림]`·`[이유]`·`[시간]` 로그. `~/arti_logs/follow/<날짜_시각>/`에 노드 로그,
+  `follow_timing.csv`(0.1 s마다 한 줄), `run_info.txt`(인자, PC NTP 상태) 저장. 영상은 저장하지 않는다
+- 인식 노드는 네임스페이스를 붙여 띄워야 한다. 안 붙이면 설치본에서 설정 파일을 못 찾아 `/top_cam/...`(네임스페이스 없음)을 구독 → 영상이 안 와서 인식 창이 까맣다
 - 확인한 것 (가상 LiDAR, 2026-11-16): 0.25 m/s 직진 시 0.80~0.85 m 유지, 길 위 바닥 물체(10 cm) 회피,
   상자 뒤로 사라지면 SEARCH → 돌아가서 재발견, 인식이 끊기면 SEARCH(이동→회전) → WAIT → 재인식 시 FOLLOW,
   map이 odom과 어긋나 있어도(1 m, 17°) map 좌표 입력으로 동일하게 추종

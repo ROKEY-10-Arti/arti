@@ -7,6 +7,9 @@
       tf, tf_static               좌표 변환
       follow/enable (Bool)        false면 cmd_vel을 보내지 않음 (작품 설명 중, 도킹 등)
 출력  cmd_vel (TwistStamped), follow/state (String)
+      follow/debug (MarkerArray)  debug_viz일 때 RViz 확인용 (launch/follow_test.launch.py)
+진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
+      diag_csv를 주면 제어 주기마다 한 줄씩 CSV로 저장 (launch/follow_test.launch.py)
 
 상태 (플로우차트 순서)
   IDLE    처음, 좌표 기다림
@@ -22,10 +25,13 @@
 주행: 장애물로 격자를 만들어 칸마다 목표까지 '돌아가는 거리'를 구하고(BFS),
       (v, w) 후보를 sim_time 동안 굴려 보며 안 부딪히고 끝점의 그 거리가 가장 작은 것을 고른다(DWA).
 """
+import csv
 import math
+import signal
+import time
 
 import cv2
-from geometry_msgs.msg import PointStamped, TwistStamped
+from geometry_msgs.msg import Point, PointStamped, TwistStamped
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -33,9 +39,10 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, ColorRGBA, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
+from visualization_msgs.msg import Marker, MarkerArray
 
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link',
@@ -72,7 +79,33 @@ PARAMS = {
     'floor_max_height': 0.3,        #   (위는 LiDAR가 봄)
     'floor_min_points': 3,          # 10 cm 칸에 점이 이만큼 모여야 물체 (흩어진 잡음 제거)
     'depth_keep': 1.0,              # depth 장애물을 이 시간 동안 기억 [s]
+    'start_enabled': True,          # 시작할 때 cmd_vel을 보낼지 (false면 follow/enable true가 올 때까지 계산만)
+    'debug_viz': False,             # follow/debug(MarkerArray)로 판단 과정을 RViz에 보여줌
+    'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
+    'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
+    'diag_csv': '',                 # 제어 주기마다 한 줄씩 저장할 CSV 경로 ('' = 저장 안 함)
+    'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
 }
+
+
+CSV_COLUMNS = ['t', 'tick_gap_s', 'step_ms', 'field_ms', 'state', 'reason', 'enabled', 'v', 'w',
+               'scan_age_s', 'person_age_s', 'depth_age_s', 'person_x', 'person_y', 'person_dist']
+
+
+class Diag:
+    """진단 통계: 이름별로 (개수, 합, 최대, 최소)를 모았다가 take()로 꺼내고 비운다."""
+
+    def __init__(self):
+        self.s, self.start = {}, time.monotonic()
+
+    def add(self, key, value=1.0):
+        c = self.s.setdefault(key, [0, 0.0, -math.inf, math.inf])
+        c[0], c[1], c[2], c[3] = c[0] + 1, c[1] + value, max(c[2], value), min(c[3], value)
+
+    def take(self):
+        s, span = self.s, time.monotonic() - self.start
+        self.s, self.start = {}, time.monotonic()
+        return s, span
 
 
 def wrap(a):
@@ -109,10 +142,7 @@ class PersonKF:
         self.x, self.P, self.t = F @ self.x, F @ self.P @ F.T + self.q * g @ g.T, t
 
     def update(self, z, t):
-        """좌표 하나 반영. 이상값으로 버렸으면 False."""
-        if self.x is None:
-            self.reset(z, t)
-            return True
+        """좌표 하나 반영 (reset 뒤에만 호출). 이상값으로 버렸으면 False (예측은 반영됨)."""
         self.predict(t)
         y = np.asarray(z, float) - self.x[:2]
         S = self.P[:2, :2] + self.r * np.eye(2)
@@ -124,7 +154,7 @@ class PersonKF:
             return True
         K = self.P[:, :2] @ np.linalg.inv(S)
         self.x = self.x + K @ y
-        self.P = (np.eye(4) - K[:, :2] @ np.eye(2, 4)) @ self.P
+        self.P = (np.eye(4) - K @ np.eye(2, 4)) @ self.P    # np.eye(2, 4) = H (상태에서 위치만 꺼냄)
         self.rejects = 0
         return True
 
@@ -135,16 +165,28 @@ class VisitorFollower(Node):
         super().__init__('visitor_follower')
         self.p = {q.name: q.value for q in self.declare_parameters('', list(PARAMS.items()))}
         self.tf = Buffer()
-        self.person, self.person_vel, self.seen = None, np.zeros(2), -1e9   # odom 좌표(필터), 속도, 받은 시각
+        self.seen = -1e9                            # 관람객 좌표를 마지막으로 받은 시각
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
         self.lost_at, self.turn, self.spin_at, self.spin_speed, self.holding = 0.0, 1.0, None, 0.0, False
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
         self.floor_pts, self.floor_time = np.zeros((0, 2)), -1e9
         self.cam_k = self.cam_tf = None
-        self.state, self.enabled, self.cmd = None, True, (0.0, 0.0)
+        self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
+        self.dbg = {}                               # 이번 주기의 판단 과정 (debug_viz, diag)
+        self.diag = Diag() if self.p['diag'] or self.p['diag_csv'] else None
+        self.arrive, self.last_tick, self.last_cmd = {}, None, None
+        self.gap_avg, self.last_reason = {}, None    # 토픽별 평소 수신 간격, 지난 주기 이유 (diag_events)
+        self.csv_file = self.csv = None
+        if self.p['diag_csv']:
+            self.csv_file = open(self.p['diag_csv'], 'w', newline='', encoding='utf-8')
+            self.csv = csv.writer(self.csv_file)
+            self.csv.writerow(CSV_COLUMNS)
+        if self.diag is not None:
+            self.get_logger().info('파라미터 ' + ', '.join(f'{k}={v}' for k, v in self.p.items()))
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        sub = self.create_subscription
+        def sub(kind, topic, fn, qos):               # 진단 켜면 수신 간격·지연·콜백 시간을 잰다
+            return self.create_subscription(kind, topic, self.timed(topic, fn), qos)
         # tf는 네임스페이스 안(/robot1/tf)에 있으므로 상대 이름으로 받아 Buffer에 넣는다
         sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], 100)
         sub(TFMessage, 'tf_static', lambda m: [self.tf.set_transform_static(t, 'tf') for t in m.transforms],
@@ -158,8 +200,11 @@ class VisitorFollower(Node):
         sub(Bool, 'follow/enable', self.on_enable, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
+        self.dbg_pub = self.create_publisher(MarkerArray, 'follow/debug', 10) if self.p['debug_viz'] else None
         self.set_state('IDLE')
         self.create_timer(self.p['control_period'], self.control)
+        if self.diag is not None and self.p['diag']:
+            self.create_timer(self.p['diag_period'], self.report)
 
     # ---------- 입력 ----------
 
@@ -171,9 +216,13 @@ class VisitorFollower(Node):
         for t in ([stamp] if stamp is not None else []) + [Time()]:
             try:
                 tr = self.tf.lookup_transform(target, source, t).transform
+                if t is not stamp and stamp is not None and self.diag is not None:
+                    self.diag.add('tf_fallback:' + source)      # 그 시각 TF가 없어 최신 값으로 대신함
                 return tr.translation.x, tr.translation.y, yaw_of(tr.rotation)
             except Exception:
                 pass
+        if self.diag is not None:
+            self.diag.add('tf_fail:' + source)
         return None
 
     def on_person(self, msg):
@@ -182,16 +231,19 @@ class VisitorFollower(Node):
             return
         q = apply(f, np.array([[msg.point.x, msg.point.y]]))[0]
         now = self.now()
-        if self.person is None or now - self.seen >= self.p['lost_timeout']:
+        if self.kf.x is None or now - self.seen >= self.p['lost_timeout']:
             self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
-        elif not self.kf.update(q, now):
-            self.seen = now                         # 이상값은 버리지만 사람은 보이는 중
-            return
-        self.person, self.person_vel = self.kf.x[:2].copy(), self.kf.x[2:].copy()
-        speed = np.linalg.norm(self.person_vel)
-        if speed > self.p['max_person_speed']:
-            self.person_vel *= self.p['max_person_speed'] / speed
+        else:
+            self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
         self.seen = now
+
+    def person(self):
+        """관람객 추정 위치(kf.t 시각, odom)와 속도. 속도는 max_person_speed로 자름."""
+        pos, vel = self.kf.x[:2].copy(), self.kf.x[2:].copy()
+        speed = np.linalg.norm(vel)
+        if speed > self.p['max_person_speed']:
+            vel *= self.p['max_person_speed'] / speed
+        return pos, vel
 
     def on_scan(self, msg):
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
@@ -242,16 +294,29 @@ class VisitorFollower(Node):
     # ---------- 상태 (플로우차트) ----------
 
     def control(self):
+        t0 = time.monotonic()
+        self.dbg = {}
+        self.step()
+        if self.dbg_pub is not None:
+            self.publish_debug()
+        if self.diag is not None:
+            self.record(t0)
+
+    def step(self):
         p, now = self.p, self.now()
         pose = self.lookup(p['odom_frame'], p['base_frame'])
         if pose is None or now - self.scan_time > p['scan_timeout']:
+            self.dbg['reason'] = 'no_pose' if pose is None else 'scan_timeout'
             return self.drive(0.0, 0.0)             # 센서 없음 → 정지
         here = np.array(pose[:2])
+        self.dbg['here'] = here
 
-        if self.person is not None and now - self.seen < p['lost_timeout']:
+        if self.kf.x is not None and now - self.seen < p['lost_timeout']:
             self.set_state('FOLLOW')                # 80 cm 유지하며 이동
-            person = self.person + self.person_vel * (now - self.kf.t)          # 필터 위치를 지금 시각으로
-            ahead = person + self.person_vel * p['lead_time']
+            last, vel = self.person()
+            person = last + vel * (now - self.kf.t)     # 필터 위치를 지금 시각으로
+            ahead = person + vel * p['lead_time']
+            self.dbg['person'] = person
             to = ahead - here
             d = np.linalg.norm(to)
             stop = p['target_distance'] + p['distance_tolerance']
@@ -260,31 +325,40 @@ class VisitorFollower(Node):
             elif d > p['target_distance'] + p['restart_margin']:
                 self.holding = False
             if not self.holding:
-                return self.drive(*self.dwa(pose, ahead - to / d * p['target_distance'], ahead))
+                goal = ahead - to / d * p['target_distance']
+                self.dbg['goal'], self.dbg['reason'] = goal, 'follow'
+                return self.drive(*self.dwa(pose, goal, ahead))
+            self.dbg['reason'] = 'hold'             # 0.85 m 안 → 서서 바라봄
             turn = wrap(math.atan2(*(person - here)[::-1]) - pose[2])        # 충분히 가까움 → 감속해 서서 바라보기
             w = float(np.clip(1.5 * turn, -p['max_angular'], p['max_angular']))
             if abs(turn) < p['face_deadband']:
                 w = 0.0
             return self.drive(*self.ramp(0.0, w))
         self.holding = False
-        if self.person is None:
+        if self.kf.x is None:
+            self.dbg['reason'] = 'idle'
             return self.drive(*self.ramp(0.0, 0.0))  # IDLE
 
+        last, vel = self.person()
+        self.dbg['person'] = last
         if self.state == 'FOLLOW':                  # 방금 놓침 → 마지막으로 가던 방향 기억
             self.lost_at, self.spin_at = now, None
-            d = self.person + self.person_vel - here
+            d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
         t = now - self.lost_at
         if t < p['search_time']:
             self.set_state('SEARCH')
-            if self.spin_at is None and np.linalg.norm(self.person - here) > 0.5 and t < p['search_move_time']:
-                return self.drive(*self.dwa(pose, self.person, self.person))  # 최종 좌표로 이동
+            if self.spin_at is None and np.linalg.norm(last - here) > 0.5 and t < p['search_move_time']:
+                self.dbg['goal'], self.dbg['reason'] = last, 'search_move'
+                return self.drive(*self.dwa(pose, last, last))  # 최종 좌표로 이동
             if self.spin_at is None:
                 self.spin_at = now                  # 도착(또는 이동 시간 끝) → 남은 시간 안에 한 바퀴 (가속분 5 % 여유)
                 left = max(p['search_time'] - t, 1e-3)
                 self.spin_speed = float(np.clip(1.05 * 2 * math.pi / left, p['search_spin'], p['max_angular']))
+            self.dbg['reason'] = 'search_spin'
             return self.drive(*self.ramp(0.0, self.turn * self.spin_speed))  # 마지막 방향 쪽으로 회전
         self.set_state('WAIT' if t < p['search_time'] + p['wait_time'] else 'LOST')
+        self.dbg['reason'] = self.state.lower()
         self.drive(*self.ramp(0.0, 0.0))
 
     # ---------- 주행 ----------
@@ -315,11 +389,15 @@ class VisitorFollower(Node):
         # 여유를 지키는 경로, 또는 이미 붙어 있을 때 더 가까워지지 않는 경로(빠져나오기). 로봇 반지름 안은 금지
         r = p['robot_radius']
         safe = (clear > r + p['safety_margin']) | ((clear > r) & (clear >= here_clear - 0.005))
+        self.dbg['cands'] = (xs, ys, safe)
         if not safe.any():                          # 막힘 → 제자리에서 대상 쪽으로
+            self.dbg['blocked'] = True
             turn = wrap(math.atan2(face[1] - y0, face[0] - x0) - th0)
             return 0.0, float(np.clip(1.5 * turn, -p['max_angular'], p['max_angular']))
 
+        t0 = time.monotonic()
         field, origin = self.field(np.asarray(goal, float), np.array([x0, y0]), obs)
+        self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
         ex, ey, eth = xs[:, -1], ys[:, -1], th[:, -1]
         cost = self.sample(field, origin, ex, ey) \
             + p['w_clearance'] * np.clip(p['clearance_zone'] - clear, 0, None) \
@@ -328,6 +406,7 @@ class VisitorFollower(Node):
             cost += p['w_heading'] * np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))
         cost[~safe] = np.inf
         i = int(np.argmin(cost))
+        self.dbg['path'] = np.stack([xs[i], ys[i]], 1)
         return float(V[i]), float(W[i])
 
     def field(self, goal, here, obs):
@@ -392,6 +471,183 @@ class VisitorFollower(Node):
         msg.header.frame_id = self.p['base_frame']
         msg.twist.linear.x, msg.twist.angular.z = v, w
         self.cmd_pub.publish(msg)
+        if self.diag is not None:
+            t = time.monotonic()
+            if self.last_cmd is not None:
+                self.diag.add('cmd_vel.gap', t - self.last_cmd)
+            self.last_cmd = t
+
+    def publish_debug(self):
+        """RViz 확인용 MarkerArray (odom). 이번 주기에 없는 항목은 지운다.
+
+        초록 공 = 칼만 필터로 추정한 관람객, 초록 원 = 유지 거리(0.8 m), 노란 공 = 로봇이 가려는 목표,
+        회색/빨간 선 = DWA 후보 (안전/충돌), 파란 굵은 선 = 고른 경로, 빨간 점 = depth 바닥 물체, 글자 = 상태
+        """
+        d, stamp, frame = self.dbg, self.get_clock().now().to_msg(), self.p['odom_frame']
+
+        def marker(i, kind, rgba, scale, pts=None, pos=None, z=0.05):
+            m = Marker()
+            m.header.frame_id, m.header.stamp = frame, stamp
+            m.ns, m.id, m.type = 'follow', i, kind
+            m.pose.orientation.w = 1.0
+            if pts is None and pos is None:
+                m.action = Marker.DELETE
+                return m
+            m.scale.x = m.scale.y = m.scale.z = scale
+            m.color = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
+            if pos is not None:
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = float(pos[0]), float(pos[1]), z
+            if pts is not None:
+                m.points = [Point(x=float(x), y=float(y), z=z) for x, y in pts]
+            return m
+
+        person, goal = d.get('person'), d.get('goal')
+        ring = None
+        if person is not None:
+            a = np.linspace(0, 2 * np.pi, 37)
+            ring = person + self.p['target_distance'] * np.stack([np.cos(a), np.sin(a)], 1)
+        floor = self.floor_pts if self.now() - self.floor_time < self.p['depth_keep'] else []
+        ms = [
+            marker(0, Marker.SPHERE, (0.1, 0.9, 0.2, 0.9), 0.3, pos=person, z=0.15),
+            marker(1, Marker.LINE_STRIP, (0.1, 0.9, 0.2, 0.6), 0.02, pts=ring),
+            marker(2, Marker.SPHERE, (1.0, 0.85, 0.0, 0.9), 0.15, pos=goal, z=0.1),
+            marker(3, Marker.LINE_STRIP, (0.2, 0.5, 1.0, 1.0), 0.04, pts=d.get('path')),
+            marker(4, Marker.POINTS, (1.0, 0.1, 0.1, 1.0), 0.05, pts=floor if len(floor) else None),
+            marker(5, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0, 1.0), 0.2,
+                   pos=d.get('here'), z=0.6),
+        ]
+        ms[5].text = self.state or ''
+        cands = marker(6, Marker.LINE_LIST, (1.0, 1.0, 1.0, 1.0), 0.005)
+        if 'cands' in d:                            # 후보마다 선분들, 안전하면 회색 위험하면 빨강
+            xs, ys, safe = d['cands']
+            cands = marker(6, Marker.LINE_LIST, (1.0, 1.0, 1.0, 1.0), 0.005, pts=[])
+            grey, red = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.4), ColorRGBA(r=1.0, g=0.2, b=0.2, a=0.4)
+            for x, y, ok in zip(xs, ys, safe):
+                seg = np.repeat(np.stack([x, y], 1), 2, 0)[1:-1]     # 0-1, 1-2, 2-3 ... 쌍
+                cands.points += [Point(x=float(a), y=float(b), z=0.02) for a, b in seg]
+                cands.colors += [grey if ok else red] * len(seg)
+        ms.append(cands)
+        self.dbg_pub.publish(MarkerArray(markers=ms))
+
+    # ---------- 진단 (끊김 원인 찾기) ----------
+
+    def timed(self, name, fn):
+        """구독 콜백을 감싸서 수신 간격(gap), 지연(lat = 받은 시각 - header.stamp), 콜백 시간(cb)을 잰다."""
+        def cb(msg):
+            if self.diag is None:
+                return fn(msg)
+            t0 = time.monotonic()
+            if name in self.arrive:
+                gap = t0 - self.arrive[name]
+                self.diag.add(name + '.gap', gap)
+                avg = self.gap_avg.get(name)
+                if self.p['diag_events'] and avg is not None and gap > max(3 * avg, 0.25) and name != 'tf_static':
+                    self.get_logger().warn(f'[늦음] {name}: {gap:.2f} s 만에 도착 (평소 {avg:.2f} s)')
+                self.gap_avg[name] = gap if avg is None else 0.9 * avg + 0.1 * min(gap, 3 * avg)
+            self.arrive[name] = t0
+            stamp = getattr(getattr(msg, 'header', None), 'stamp', None)
+            if stamp is not None and (stamp.sec or stamp.nanosec):
+                self.diag.add(name + '.lat', self.now() - (stamp.sec + stamp.nanosec * 1e-9))
+            fn(msg)
+            self.diag.add(name + '.cb', time.monotonic() - t0)
+        return cb
+
+    def record(self, t0):
+        """제어 한 주기를 통계와 CSV에 남긴다."""
+        d, now, t1 = self.dbg, self.now(), time.monotonic()
+        gap = t1 - self.last_tick if self.last_tick is not None else 0.0
+        self.last_tick = t1
+        step_ms = (t1 - t0) * 1000
+        self.diag.add('control.gap', gap)
+        self.diag.add('control.ms', step_ms)
+        if 'field_ms' in d:
+            self.diag.add('field.ms', d['field_ms'])
+        reason = d.get('reason', '')
+        if d.get('blocked'):
+            reason += '+blocked'
+        self.diag.add('reason:' + reason)
+        if self.p['diag_events']:
+            period = self.p['control_period']
+            if gap > 1.5 * period:
+                self.get_logger().warn(f'[제어 밀림] 주기 {gap:.3f} s (목표 {period}), 이번 계산 {step_ms:.1f} ms')
+            if reason != self.last_reason:
+                bad = reason.startswith(('no_pose', 'scan_timeout')) or 'blocked' in reason
+                def ago(t):
+                    return f'{now - t:.2f} s 전' if t > 0 else '아직 없음'
+                self.say(bad, f'[이유] {self.last_reason} → {reason}  상태 {self.state}, '
+                              f'v={self.cmd[0]:.2f} w={self.cmd[1]:.2f}, scan {ago(self.scan_time)}, '
+                              f'좌표 {ago(self.seen)}')
+        self.last_reason = reason
+        if self.csv is None:
+            return
+        person = d.get('person')
+
+        def age(t):
+            return round(now - t, 3) if t > 0 else ''
+        self.csv.writerow([
+            round(now, 3), round(gap, 3), round(step_ms, 1), round(d.get('field_ms', 0.0), 1),
+            self.state, reason, int(self.enabled), round(self.cmd[0], 3), round(self.cmd[1], 3),
+            age(self.scan_time), age(self.seen), age(self.floor_time),
+            '' if person is None else round(float(person[0]), 3),
+            '' if person is None else round(float(person[1]), 3),
+            '' if person is None or 'here' not in d else round(float(np.linalg.norm(person - d['here'])), 3)])
+        self.csv_file.flush()
+
+    def report(self):
+        """diag_period마다 요약 로그. 끊김과 관련 있어 보이는 값은 WARN으로."""
+        s, span = self.diag.take()
+        log, period = self.get_logger(), self.p['control_period']
+
+        def stat(key, scale=1.0):
+            n, total, mx, _ = s.get(key, (0, 0.0, 0.0, 0.0))
+            return n, (total / n * scale if n else 0.0), mx * scale
+        topics = sorted({k.rsplit('.', 1)[0] for k in s if k.endswith('.cb')})
+        for name in topics:
+            n, _, _ = stat(name + '.cb')
+            _, _, gap = stat(name + '.gap')
+            _, lat, lat_max = stat(name + '.lat')
+            _, cb, cb_max = stat(name + '.cb', 1000)
+            text = (f'[입력] {name}: {n / span:.1f} Hz, 간격 최대 {gap:.2f} s, 지연 평균/최대 {lat:.3f}/{lat_max:.3f} s, '
+                    f'콜백 평균/최대 {cb:.1f}/{cb_max:.1f} ms')
+            slow = gap > 3 * span / max(n, 1) or lat_max > 0.3 or cb_max > period * 1000 / 2
+            self.say(slow, text)
+            if name + '.lat' in s:                  # 가장 빨리 온 메시지의 지연 ≈ 두 컴퓨터 시계 차이 + 최소 전송 시간
+                lat_min = s[name + '.lat'][3]
+                if abs(lat_min) > 0.05:
+                    ahead = '로봇 시계가 빠름 (stamp가 미래)' if lat_min < 0 else '로봇 시계가 느리거나 전송이 늦음'
+                    self.say(True, f'[시간] {name}: 최소 지연 {lat_min * 1000:.0f} ms → {ahead}. '
+                                   f'PC·로봇 시간 동기화(chrony/NTP) 확인')
+        expected = ['scan', 'target_person/point_map', 'tf']
+        if self.p['use_depth']:
+            expected.append('oakd/stereo/image_raw/compressedDepth')
+        for name in [t for t in expected if t not in topics]:
+            log.warn(f'[입력] {name}: {span:.1f} s 동안 한 번도 안 옴')
+        n, _, gap = stat('control.gap')
+        _, ms, ms_max = stat('control.ms')
+        _, fms, fms_max = stat('field.ms')
+        text = (f'[제어] {n / span:.1f} Hz (목표 {1 / period:.0f}), 주기 최대 {gap:.3f} s, '
+                f'계산 평균/최대 {ms:.1f}/{ms_max:.1f} ms (그중 field {fms:.1f}/{fms_max:.1f} ms)')
+        self.say(gap > 1.5 * period or ms_max > 0.8 * period * 1000, text)
+        nc, _, cgap = stat('cmd_vel.gap')
+        reasons = {k.split(':', 1)[1]: v[0] for k, v in s.items() if k.startswith('reason:')}
+        sent = f'cmd_vel 간격 최대 {cgap:.3f} s' if nc else 'cmd_vel 안 보냄 (enabled=false)'
+        text = f'[출력] {sent}, 이유별 주기 수 {reasons}'
+        bad = any(r.startswith(('no_pose', 'scan_timeout')) or 'blocked' in r for r in reasons)
+        self.say(bad or cgap > 1.5 * period, text)
+        tf = {k: v[0] for k, v in s.items() if k.startswith('tf_')}
+        if tf:
+            log.warn(f'[TF] 그 시각 값 없음(fallback)/실패 횟수 {tf}')
+
+    def say(self, warn, text):
+        # rclpy는 한 줄(호출 위치)에서 INFO/WARN을 섞어 쓰면 에러를 내서 따로 부른다
+        if warn:
+            self.get_logger().warn(text)
+        else:
+            self.get_logger().info(text)
+
+    def close(self):
+        if self.csv_file is not None:
+            self.csv_file.close()
 
     def set_state(self, state):
         if state != self.state:
@@ -407,9 +663,10 @@ def main():
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
     finally:
         node.drive(0.0, 0.0)
+        node.close()
         node.destroy_node()
         rclpy.shutdown()
 

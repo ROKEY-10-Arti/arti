@@ -47,3 +47,5 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-16 | follow | [visitor_follower 주행 테스트 중 로봇이 앞 벽 쪽으로 감](follow/2026-11-16-visitor-follower-wall-approach.md) | 미해결 | jsy0605 |
 | 2026-11-16 | follow | [rqt_image_view에 visitor_follower 디버그 화면이 안 나옴](follow/2026-11-16-debug-image-not-shown.md) | 해결 | jsy0605 |
 | 2026-11-16 | follow | [실제 인식 좌표로 추종하면 흔들리고 섰다 갔다 하며, 놓친 뒤 회전 탐색을 안 함](follow/2026-11-16-follow-shaky-no-search.md) | 미해결 | jsy0605 |
+| 2026-11-16 | follow | [웹캠 인식 창이 까맣고 사람 좌표가 /robot4로 나옴 (인식 모듈 네임스페이스)](follow/2026-11-16-tracker-namespace-black-webcam.md) | 해결 | jsy0605 |
+| 2026-11-16 | follow | [사람 좌표는 오는데 로봇이 안 움직임 (localization 꺼져서 map→odom 없음)](follow/2026-11-16-no-map-odom-follower-idle.md) | 해결 | jsy0605 |
