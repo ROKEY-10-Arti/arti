@@ -124,7 +124,7 @@ class InitialPoseNode(Node):
         sub_count = self.pub.get_subscription_count()
         if sub_count == 0 and (time.monotonic() - self._start_time) < 10.0:
             self.get_logger().info(
-                f'AMCL 구독자({self.pose_topic}) 대기 중... (먼저 loc 4 ~/maps/gallery.yaml 실행 필요)',
+                f'AMCL 구독자({self.pose_topic}) 대기 중... (먼저 localization.launch.py map:=$ARTI_MAP 실행 필요)',
                 throttle_duration_sec=2.0,
             )
             return

@@ -83,7 +83,7 @@ ros2 launch person_tracker bringup.launch.py video_source:=2
 ### ② 터미널별 개별 실행 (디버깅 / 분리 실행용)
 ```bash
 # [터미널 1] 맵 로컬라이제이션
-ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=$(ros2 pkg prefix person_tracker)/share/person_tracker/maps/gallery.yaml
+ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=$ARTI_MAP   # 지도는 arti 저장소 루트 maps/rokey_map.yaml
 
 # [터미널 2] AMCL 초기 위치 발행 (기본 config/phone_camera.yaml의 initial_pose 사용, 파라미터 덮어쓰기 가능)
 ros2 run person_tracker init_pose

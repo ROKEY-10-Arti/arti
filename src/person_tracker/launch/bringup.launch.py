@@ -4,7 +4,7 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -185,12 +185,13 @@ def generate_launch_description():
     src_cfg = os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml')
     share_cfg = os.path.join(pkg_share, 'config', 'phone_camera.yaml')
     default_cfg = src_cfg if os.path.isfile(src_cfg) else share_cfg
-    default_map = os.path.join(pkg_share, 'maps', 'gallery.yaml')
+    # 지도는 arti 저장소 루트 maps/ 한 곳에서 관리 (.envrc가 $ARTI_MAP 설정)
+    default_map = EnvironmentVariable('ARTI_MAP')
 
     return LaunchDescription([
         DeclareLaunchArgument('config_file', default_value=default_cfg, description='공통 카메라/초기위치 YAML 경로'),
         DeclareLaunchArgument('namespace', default_value='', description='비워두면 config_file의 namespace 사용 (기본: /robot4)'),
-        DeclareLaunchArgument('map', default_value=default_map, description='저장된 맵 YAML 경로'),
+        DeclareLaunchArgument('map', default_value=default_map, description='저장된 맵 YAML 경로 (기본: $ARTI_MAP)'),
         DeclareLaunchArgument('video_source', default_value='', description='비워두면 config_file의 video_source 사용 (0: 웹캠, URL: DroidCam)'),
         DeclareLaunchArgument('use_oakd', default_value='false', description='true면 camera_pub 대신 터틀봇 기본 OAK-D preview 토픽 사용'),
         DeclareLaunchArgument('run_camera', default_value='true', description='false면 다른 PC가 발행한 top_cam 토픽만 구독하고 로컬 카메라/TF는 생략'),
