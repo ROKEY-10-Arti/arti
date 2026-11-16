@@ -7,6 +7,7 @@
     video_source:=0          노트북 웹캠 번호, 또는 휴대폰 DroidCam URL (http://<폰IP>:4747/video)
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false              진단 로그·파일 저장 끄기
+    bag:=false               test일 때 ros2 bag 녹화 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
     rviz:=true               RViz도 띄움 (기본은 인식 창 하나만 보임)
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
@@ -26,6 +27,8 @@
                           + 끊긴 순간마다 [늦음] [제어 밀림] [이유] [시간]
     follow_timing.csv     제어 주기(0.1 s)마다 한 줄
     run_info.txt          실행 인자, PC 시간 동기화(NTP) 상태
+    bag/                  ros2 bag (mcap). BAG_TOPICS만 녹화 — 카메라 영상·depth는 빼고 좌표·거리·명령만
+                          다시 보기: ros2 bag info <run_dir>/bag,  ros2 bag play <run_dir>/bag
 """
 import datetime
 import os
@@ -34,11 +37,22 @@ import tempfile
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction,
-                            TimerAction)
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo,
+                            OpaqueFunction, TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
+
+
+# ros2 bag으로 녹화할 토픽 (네임스페이스 뒤 이름).
+# 관람객 영상은 저장하지 않는다(개인정보 요구사항) → top_cam 이미지, oakd 이미지·depth는 넣지 않는다.
+# 카메라 토픽을 녹화하려면 팀 합의 후에.
+BAG_TOPICS = [
+    'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
+    'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
+    'target_person/marker', 'top_cam/pose_in_map',
+    'cmd_vel', 'follow/state', 'follow/enable', 'follow/debug',  # visitor_follower 입출력
+]
 
 
 def pc_time_sync():
@@ -85,11 +99,17 @@ def make_nodes(context):
         os.makedirs(run_dir, exist_ok=True)
         sync = pc_time_sync()
         with open(os.path.join(run_dir, 'run_info.txt'), 'w', encoding='utf-8') as f:
-            f.write(f'namespace={ns}\ndrive={drive}\ntracker={arg("tracker")}\n'
+            f.write(f'namespace={ns}\ndrive={drive}\ntracker={arg("tracker")}\nbag={arg("bag")}\n'
                     f'video_source={arg("video_source")}\nPC 시간 동기화(NTP): {sync}\n')
         params.update({'diag': True, 'diag_events': True,
                        'diag_csv': os.path.join(run_dir, 'follow_timing.csv')})
         env['ROS_LOG_DIR'] = run_dir                # 노드 로그 파일이 여기에 생김
+        if arg('bag').lower() == 'true':
+            topics = [f'{ns}/{t}' for t in BAG_TOPICS]
+            actions.append(ExecuteProcess(
+                cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', os.path.join(run_dir, 'bag'),
+                     '--topics', *topics],
+                output='log'))
         actions.append(LogInfo(msg=f'[테스트] 주행 {"켬" if drive else "끔"}, PC 시간 동기화 {sync}, '
                                    f'로그 저장 위치: {run_dir}'))
 
@@ -123,6 +143,8 @@ def generate_launch_description():
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true',
                               description='진단 로그를 켜고 log_dir에 저장'),
+        DeclareLaunchArgument('bag', default_value='true',
+                              description='test일 때 ros2 bag으로 BAG_TOPICS 녹화 (카메라 영상 제외)'),
         DeclareLaunchArgument('tracker', default_value='true',
                               description='사람 인식 모듈(person_tracker)도 같이 띄우기'),
         DeclareLaunchArgument('rviz', default_value='false', description='RViz도 띄우기 (기본은 인식 창만)'),
