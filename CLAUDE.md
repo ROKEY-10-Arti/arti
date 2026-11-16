@@ -39,6 +39,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | 빈 패키지 |
 | common | arti_common | ament_python | 공용 좌표 config, 유틸 | 빈 패키지 |
 | (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일) |
+| (src 바로 아래) | person_tracker | ament_python | 사람 인식: 탑캠 YOLO 추적·재식별 + LiDAR → `target_person/point_map` (jsbzzz/turtlebot_project에서 가져옴) | `multi_tracker_node`, `camera_pub`, `top_cam_tf` 등 |
 
 예정 역할 폴더 (필요해지면 추가): `course/`(코스주행, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).
 역할 패키지끼리 직접 import하지 않는다.

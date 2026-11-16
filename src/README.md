@@ -11,7 +11,9 @@ src/
 │   ├── arti_interfaces    커스텀 msg/srv/action
 │   ├── arti_bringup       로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4)
 │   └── arti_common        공용 좌표(config/: 작품·만남·충전 위치, 구역), 공용 Python 유틸
-└── arti_follow/       사용자 추종 로봇 (패키지) — 관람객 등록·재식별, 위치 추정, 80cm 추종, 분실 처리
+├── arti_follow/       사용자 추종 로봇 (패키지) — 관람객 등록·재식별, 위치 추정, 80cm 추종, 분실 처리
+└── person_tracker/    사람 인식 (패키지) — 탑캠 YOLO 추적·재식별 + LiDAR → target_person/point_map
+                       (jsbzzz/turtlebot_project에서 가져옴, 모델은 yolo26n-pose.pt만 포함)
 ```
 
 ## 규칙

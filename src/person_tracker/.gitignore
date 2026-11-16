@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+build/
+install/
+log/
+*.pt
+!models/
+# multi_tracker_node 기본 모델만 저장소에 포함 (나머지는 ultralytics가 자동 다운로드)
+!models/yolo26n-pose.pt

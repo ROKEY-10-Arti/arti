@@ -9,6 +9,7 @@
 
 # --- 사람 인식 (arti_follow: visitor_perception) ---
 ultralytics==8.4.208      # rokey_venv와 같은 버전 (torch, opencv-python 함께 설치됨)
+lap==0.5.12               # person_tracker 추적 매칭 (src/person_tracker/requirements.txt)
 
 # --- ROS 호환 ---
 numpy<2                   # ROS Jazzy cv_bridge는 시스템 numpy 1.26 기준 빌드 → numpy 2면 import 에러
