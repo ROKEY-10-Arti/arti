@@ -35,6 +35,24 @@ ros2 action send_goal /robot1/undock irobot_create_msgs/action/Undock "{}"
 ros2 action send_goal /robot1/dock irobot_create_msgs/action/Dock "{}"
 
 
+# ===== 3-1. 관람객 추종 주행 (visitor_follower) =====
+# 로봇이 움직임 — 언도킹, 주변 확인 후. Nav2에 목표를 보내지 말 것(cmd_vel이 섞임). Ctrl+C 하면 정지 후 종료
+# 관람객 좌표는 인식 모듈이 /robot1/target_person/point_map (PointStamped, map 좌표) 으로 보낸다
+# localization(1번 터미널 1)이 떠 있어야 함 (map→odom 변환)
+
+ros2 run arti_follow visitor_follower --ros-args -r __ns:=/robot1
+# 처음엔 느리게: 뒤에 -p max_linear:=0.15 -p max_angular:=0.8
+# 로봇 안 움직이게 로그만: 뒤에 -r cmd_vel:=cmd_vel_dryrun
+# 바닥 물체 회피 끄기: 뒤에 -p use_depth:=false
+
+# 인식 모듈 없이 시험: map 위 한 점에 관람객이 서 있다고 보냄 → 로봇이 그 점 0.8 m 앞까지 가서 멈춤
+#   x, y는 rviz "Publish Point"로 찍거나 ros2 topic echo /robot1/clicked_point 로 확인한 map 좌표
+ros2 topic pub -r 5 /robot1/target_person/point_map geometry_msgs/msg/PointStamped "{header: {frame_id: map}, point: {x: 1.0, y: 0.0}}"
+
+# 확인
+ros2 topic echo /robot1/follow/state
+ros2 topic pub --once /robot1/follow/enable std_msgs/msg/Bool "{data: false}"   # 주행 멈춤 (true로 재개)
+
 # ===== 4. 토픽이 안 보일 때 =====
 
 echo $ROS_DOMAIN_ID $ROS_DISCOVERY_SERVER

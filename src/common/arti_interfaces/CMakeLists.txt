@@ -7,13 +7,13 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 
-# 첫 msg/srv/action 파일을 추가할 때 아래 주석을 풀고 파일 목록을 채운다.
-# package.xml에도 rosidl_default_generators(buildtool_depend),
-# rosidl_default_runtime(exec_depend), <member_of_group>rosidl_interface_packages</member_of_group> 추가 필요.
-# find_package(rosidl_default_generators REQUIRED)
-# rosidl_generate_interfaces(${PROJECT_NAME}
-#   "msg/Artwork.msg"
-# )
+# msg/srv/action 파일을 추가하면 아래 목록에 적는다.
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/VisitorDetection.msg"
+  DEPENDENCIES std_msgs
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

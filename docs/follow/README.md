@@ -13,6 +13,49 @@
 작품 반원 구역에서 5초 멈추면 해설하고, 대상을 놓치면 분실 처리, 배터리 부족·종료 구역이면 도킹한다.
 상태는 중앙 서버가 아니라 **로봇 노드가 직접** 관리한다. 웹(Flask)은 다른 팀이고 ROS 2로 데이터만 주고받는다.
 
+## 추종 주행 노드: `visitor_follower` (한 파일)
+
+`src/arti_follow/arti_follow/visitor_follower.py`. 플로우차트 "추적 모듈"의 **움직임**만 맡는다.
+팀 결정(11/16): 관람객 좌표는 **인식 모듈이 LiDAR로 구해서 `/robot1/target_person/point_map`(map 좌표)으로 준다** → 이 노드는 좌표를 받아 주행만 한다.
+**localization(AMCL)이 `/robot1`로 떠 있어야 한다** (map→odom 변환).
+장애물은 LiDAR(벽·기둥)와 **OAK-D Depth(바닥에 떨어진 물체)**로 보고 돌아서 간다.
+
+| 방향 | 토픽 | 타입 | 내용 |
+|---|---|---|---|
+| 입력 | `target_person/point_map` | PointStamped (`frame_id: map`) | 관람객 좌표 (인식 모듈). TF로 odom 좌표로 바꿔 씀 |
+| 입력 | `scan` | LaserScan | 벽·기둥 등 장애물 |
+| 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 바닥 물체 (base_link 높이 5~30 cm, 1.2 m 안) |
+| 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
+| 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
+| 출력 | `cmd_vel` | TwistStamped | 주행 (Nav2 안 씀) |
+| 출력 | `follow/state` | String | 상태가 바뀔 때마다 |
+
+| 상태 | 언제 | 동작 (플로우차트) |
+|---|---|---|
+| IDLE | 처음 | 좌표 기다림 |
+| FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
+| SEARCH | 좌표가 1 s 안 옴 | 최종 좌표로 이동(최대 4 s) → 멈춰서 남은 시간 안에 한 바퀴 회전 탐색 (합쳐서 10 s) |
+| WAIT | 탐색 10 s 지남 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
+| LOST | 대기도 지남 | 정지 — 재등록은 인식 모듈·상태 노드 |
+
+좌표가 다시 들어오면 어느 상태에서든 FOLLOW.
+
+```
+좌표: 칼만 필터(등속)로 위치·속도를 매끄럽게, 예측에서 너무 먼 좌표는 버림
+목표: 관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
+회피: LiDAR + Depth 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(BFS)
+      → (v, w) 후보를 1.5 s 굴려 보고, 안 부딪히면서(로봇 반지름 0.2 + 여유 0.05) 끝점의 그 거리가 가장 작은 것 (DWA)
+```
+
+- 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
+- 확인한 것 (가상 LiDAR, 2026-11-16): 0.25 m/s 직진 시 0.80~0.85 m 유지, 길 위 바닥 물체(10 cm) 회피,
+  상자 뒤로 사라지면 SEARCH → 돌아가서 재발견, 인식이 끊기면 SEARCH(이동→회전) → WAIT → 재인식 시 FOLLOW,
+  map이 odom과 어긋나 있어도(1 m, 17°) map 좌표 입력으로 동일하게 추종
+- 실측 (로봇 정지, 도크 앞): depth는 1 m 너머에서 높이 잡음이 ±0.1~0.3 m → 바닥 물체는 1.2 m 안, 10 cm 칸에 점 3개 이상만 씀.
+  **현장에서 앞이 빈 바닥일 때 바닥 물체 점이 안 잡히는지 먼저 확인**한다 (잡히면 `floor_min_height` 올리기, 끄려면 `use_depth:=false`)
+- 플로우차트와 다른 점: `navigate_to_pose`·`goal_update`·`spin` 액션 대신 노드가 직접 `cmd_vel`로 같은 순서를 수행
+- 한계: 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다. depth 3.2 Hz라 바닥 물체 반응이 늦을 수 있다
+
 ## 하드웨어 (SRD 기준)
 
 - 상판 노트북 웹캠(top_cam, Victus 15: 1280×720, 화각 88°): 사람 인식·재식별

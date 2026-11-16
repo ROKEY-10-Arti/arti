@@ -28,6 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'visitor_follower = arti_follow.visitor_follower:main',
         ],
     },
 )
