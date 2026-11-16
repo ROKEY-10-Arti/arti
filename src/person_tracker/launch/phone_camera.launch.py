@@ -33,7 +33,7 @@ def _launch_setup(context, *args, **kwargs):
         val = LaunchConfiguration(arg_name).perform(context)
         return val if val != '' else str(fallback)
 
-    ns = _pick('namespace', cfg.get('namespace', '/robot4'))
+    ns = _pick('namespace', os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '/robot4'))
     video_source = _pick('video_source', cfg.get('video_source', '0'))
 
     raw_topic = _pick('raw_topic', topics_cfg.get('raw_topic', '/top_cam/image_raw'))
@@ -122,7 +122,7 @@ def generate_launch_description():
     default_cfg = src_cfg if os.path.isfile(src_cfg) else share_cfg
     args = [
         DeclareLaunchArgument('config_file', default_value=default_cfg, description='카메라 좌표 설정 YAML 경로'),
-        DeclareLaunchArgument('namespace', default_value='', description='비워두면 YAML의 namespace 사용'),
+        DeclareLaunchArgument('namespace', default_value='', description='비워두면 $ARTI_ROBOT_NS, 그것도 없으면 YAML의 namespace'),
         DeclareLaunchArgument('video_source', default_value='', description='비워두면 YAML의 video_source 사용'),
         DeclareLaunchArgument('raw_topic', default_value='', description='비워두면 YAML의 raw_topic 사용'),
         DeclareLaunchArgument('compressed_topic', default_value='', description='비워두면 YAML의 compressed_topic 사용'),

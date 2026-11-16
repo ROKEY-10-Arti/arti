@@ -144,7 +144,7 @@ class TopCamTFNode(Node):
 
         ns = self.get_namespace()
         if ns == '/':
-            cfg_ns = str(cfg.get('namespace', '/robot4')).rstrip('/')
+            cfg_ns = str(os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '/robot4')).rstrip('/')
             ns_prefix = cfg_ns
         else:
             ns_prefix = ns.rstrip('/')

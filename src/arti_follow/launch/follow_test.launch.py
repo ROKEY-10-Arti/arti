@@ -9,7 +9,7 @@
     test:=false              진단 로그·파일 저장 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
     rviz:=true               RViz도 띄움 (기본은 인식 창 하나만 보임)
-    namespace:=/robot1       기본은 $ARTI_ROBOT1_NS
+    namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
 뜨는 것
@@ -73,7 +73,7 @@ def make_nodes(context):
 
     ns = '/' + arg('namespace').strip('/')
     if ns == '/':
-        raise RuntimeError('namespace가 비었음 (예: namespace:=/robot1)')
+        raise RuntimeError('namespace가 비었음 → 저장소 폴더 안에서 실행($ARTI_ROBOT_NS)하거나 namespace:=/robot1')
     test = arg('test').lower() == 'true'
     drive = arg('drive').lower() == 'true'
     params = {'start_enabled': drive, 'debug_viz': True}
@@ -117,7 +117,7 @@ def make_nodes(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value=EnvironmentVariable(
-            'ARTI_ROBOT1_NS', default_value='/robot1'), description='로봇 네임스페이스'),
+            'ARTI_ROBOT_NS', default_value=''), description='로봇 네임스페이스 (기본: $ARTI_ROBOT_NS)'),
         DeclareLaunchArgument('video_source', default_value='0',
                               description='인식 카메라: 웹캠 번호 또는 DroidCam URL'),
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),

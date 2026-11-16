@@ -77,7 +77,7 @@ def resolve_image_topic(ns: str, use_compressed: bool, custom_topic: str = '') -
                 import yaml
                 with open(cfg_path, 'r', encoding='utf-8') as f:
                     cfg = yaml.safe_load(f) or {}
-                cfg_ns = str(cfg.get('namespace', '')).rstrip('/')
+                cfg_ns = str(os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '')).rstrip('/')
                 topics_cfg = cfg.get('topics', {})
                 key = 'compressed_topic' if use_compressed else 'raw_topic'
                 topic_path = str(topics_cfg.get(key, sub_suffix))

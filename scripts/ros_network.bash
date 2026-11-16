@@ -11,6 +11,9 @@
 #   ARTI_DISCOVERY_SERVERS  "서버ID:로봇IP ..."  이 PC가 맡은 로봇만 적는다
 #                           예) robot1 담당 "1:192.168.107.101"
 #                           서버ID = 로봇의 discovery server ID (turtlebot4-setup → ROS Setup → Discovery Server)
+#
+# 여기서 만드는 값
+#   ARTI_ROBOT_NS           이 PC가 맡은 로봇 네임스페이스 (/robot<서버ID>). launch들의 namespace 기본값
 
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp   # Discovery Server는 Fast DDS 전용
 export ROS_SUPER_CLIENT=True                 # PC에서 ros2 topic list 등으로 모든 토픽이 보이게
@@ -40,6 +43,8 @@ for _entry in ${ARTI_DISCOVERY_SERVERS:-}; do
       continue
     fi
     _arti_ds[$_id]="$_ip:11811"
+    # 이 PC가 맡은 로봇 = 첫 번째 항목 (서버ID = 로봇 번호, 1 → /robot1). env.bash에서 직접 정하면 그 값 우선
+    [ -z "${ARTI_ROBOT_NS:-}" ] && export ARTI_ROBOT_NS="/robot$_id"
   else
     echo "[arti] ARTI_DISCOVERY_SERVERS 항목 무시: '$_entry' (형식: 서버ID:IP)" >&2
   fi

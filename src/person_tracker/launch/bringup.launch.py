@@ -37,7 +37,7 @@ def _launch_setup(context, *args, **kwargs):
         return val if val != '' else str(fallback)
 
     ns_arg = LaunchConfiguration('namespace').perform(context).strip()
-    ns = ns_arg if ns_arg else str(cfg.get('namespace', '/robot4')).strip()
+    ns = ns_arg or os.environ.get('ARTI_ROBOT_NS') or str(cfg.get('namespace', '/robot4')).strip()
     if not ns.startswith('/'):
         ns = '/' + ns
     ns = ns.rstrip('/') or '/robot4'
@@ -190,7 +190,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('config_file', default_value=default_cfg, description='공통 카메라/초기위치 YAML 경로'),
-        DeclareLaunchArgument('namespace', default_value='', description='비워두면 config_file의 namespace 사용 (기본: /robot4)'),
+        DeclareLaunchArgument('namespace', default_value='', description='비워두면 $ARTI_ROBOT_NS, 그것도 없으면 config_file의 namespace'),
         DeclareLaunchArgument('map', default_value=default_map, description='저장된 맵 YAML 경로 (기본: $ARTI_MAP)'),
         DeclareLaunchArgument('video_source', default_value='', description='비워두면 config_file의 video_source 사용 (0: 웹캠, URL: DroidCam)'),
         DeclareLaunchArgument('use_oakd', default_value='false', description='true면 camera_pub 대신 터틀봇 기본 OAK-D preview 토픽 사용'),

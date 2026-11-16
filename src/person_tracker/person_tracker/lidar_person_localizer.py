@@ -104,7 +104,7 @@ class LidarPersonLocalizer:
 
         ns = node.get_namespace()
         if ns == '/':
-            cfg_ns = str(cfg.get('namespace', '/robot4')).rstrip('/')
+            cfg_ns = str(os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '/robot4')).rstrip('/')
             self.ns_prefix = cfg_ns
         else:
             self.ns_prefix = ns.rstrip('/')

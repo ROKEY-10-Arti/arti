@@ -4,7 +4,7 @@
 #   상단 캠 전용 이름(top_cam)으로 분리되어 있습니다.
 # ==============================================================================
 
-namespace: "/robot4"
+namespace: "/robot4"   # $ARTI_ROBOT_NS가 있으면 그 값이 우선 (arti 저장소 env.bash로 자동 설정)
 video_source: "0"   # "0": 노트북 웹캠 | 스마트폰 DroidCam 예: "http://192.168.107.100:4747/video"
 
 topics:
