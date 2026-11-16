@@ -1,0 +1,26 @@
+# colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# 로컬 전용 설정 (env.bash.example을 복사해서 사용)
+env.bash
+
+# 에디터/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 대용량 산출물
+*.bag
+rosbag2_*/
+*.pt
+*.onnx
