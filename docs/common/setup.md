@@ -57,6 +57,9 @@ nano env.bash
 
 - `ROS_DOMAIN_ID`는 팀 공통 값 **1**이다 (로봇 discovery 설정과 같음). 예시 파일 값 그대로 두면 된다.
   다르면 로봇 토픽이 보이지 않는다 → [기록](../troubleshooting/env/2026-11-16-domain-id-mismatch.md)
+- `ARTI_DISCOVERY_SERVERS`에 로봇 discovery server를 `서버ID:IP`로 적는다. robot4 IP가 정해지면 추가한다.
+  저장소 폴더에서는 이 값으로 `ROS_DISCOVERY_SERVER`, `RMW_IMPLEMENTATION`, `ROS_SUPER_CLIENT`가 자동 설정된다 (`scripts/ros_network.bash`).
+  값을 바꾼 뒤에는 `ros2 daemon stop; ros2 daemon start` (= `ros-restart`)를 한 번 해야 반영된다.
 - 로봇 네임스페이스는 `/robot1`, `/robot4`다 (`ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`). 예시 파일 값 그대로 두면 된다.
 
 ## 5. arti 전용 venv 만들기
@@ -85,6 +88,7 @@ direnv allow
 pb
 cd ~ && cd ~/project/arti           # 다시 들어오면 direnv가 환경을 다시 불러온다
 echo $ROS_DOMAIN_ID $ARTI_ROBOT1_NS
+echo $ROS_DISCOVERY_SERVER            # 예: ;192.168.107.101:11811;
 which python3                       # ~/venvs/arti_venv/bin/python3
 ros2 pkg list | grep arti            # arti_bringup, arti_interfaces 가 보이면 성공
 ```
