@@ -5,5 +5,11 @@
 #   pip 최신 pytest는 ROS Jazzy launch_testing과 충돌한다
 #   → docs/troubleshooting/env/2026-11-16-colcon-test-pytest-venv.md
 #
-# 패키지를 추가할 때는 버전을 고정한다. 예:
-# ultralytics==8.4.208
+# 패키지를 추가할 때는 버전을 고정한다.
+
+# --- 사람 인식 (arti_follow: visitor_perception) ---
+ultralytics==8.4.208      # rokey_venv와 같은 버전 (torch, opencv-python 함께 설치됨)
+
+# --- ROS 호환 ---
+numpy<2                   # ROS Jazzy cv_bridge는 시스템 numpy 1.26 기준 빌드 → numpy 2면 import 에러
+setuptools<80             # colcon-core 0.21 요구사항 (torch가 최신 setuptools를 끌고 옴 → ament_python 빌드 깨질 수 있음)
