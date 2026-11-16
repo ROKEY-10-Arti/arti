@@ -30,13 +30,14 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 
 ## 패키지 구성
 
+공용 지도는 패키지 밖 저장소 루트 `maps/rokey_map.yaml` (`.envrc`가 `$ARTI_MAP`으로 설정).
 역할(노션 간트 차트)별 폴더. 두 역할 이상이 쓰는 것은 `src/common/`. 규칙은 `src/README.md`.
 
 | 폴더 | 패키지 | 빌드 | 역할 | 상태 |
 |---|---|---|---|---|
 | common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | 빈 패키지 |
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | 빈 패키지 |
-| common | arti_common | ament_python | 공용 지도 `maps/rokey_map`, 공용 좌표 config, 유틸 | 지도 포함 |
+| common | arti_common | ament_python | 공용 좌표 config, 유틸 | 빈 패키지 |
 | (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | 빈 패키지 |
 
 예정 역할 폴더 (필요해지면 추가): `course/`(코스주행, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).

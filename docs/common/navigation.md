@@ -5,14 +5,14 @@
 TurtleBot 4 기본 launch로 지도 위에서 주행을 띄우는 순서다. 터미널 3개를 열고 **각 터미널에서 먼저 `cd ~/project/arti`** 를 한다 (direnv가 환경을 켠다).
 로봇은 언도크된 상태여야 한다.
 
-지도는 `arti_common` 패키지(`src/common/arti_common/maps/`)의 `rokey_map.yaml`을 쓴다 (빌드 후 설치 경로).
+지도는 저장소 루트 `maps/rokey_map.yaml`을 쓴다. 저장소 폴더 안에서는 `$ARTI_MAP`이 이 경로다 (`.envrc`가 설정, 빌드 불필요).
 
 ## robot1
 
 ```bash
 # 1. localization (AMCL + map_server) — "Creating bond timer..."가 보이면 다음 단계
 ros2 launch turtlebot4_navigation localization.launch.py namespace:=$ARTI_ROBOT1_NS \
-  map:=$(ros2 pkg prefix arti_common)/share/arti_common/maps/rokey_map.yaml
+  map:=$ARTI_MAP
 
 # 2. rviz — 상단 "2D Pose Estimate"로 로봇 초기 위치 지정
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=$ARTI_ROBOT1_NS
@@ -27,7 +27,7 @@ ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT1_NS
 
 ```bash
 ros2 launch turtlebot4_navigation localization.launch.py namespace:=$ARTI_ROBOT2_NS \
-  map:=$(ros2 pkg prefix arti_common)/share/arti_common/maps/rokey_map.yaml
+  map:=$ARTI_MAP
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=$ARTI_ROBOT2_NS
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT2_NS
 ```

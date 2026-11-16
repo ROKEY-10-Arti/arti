@@ -3,12 +3,14 @@
 역할(간트 차트의 작업)별로 폴더를 나눈다. 두 역할 이상이 쓰는 것은 `common/`에 둔다.
 colcon은 하위 폴더까지 찾아서 빌드하므로 폴더를 나눠도 `pb` 한 번으로 모두 빌드된다.
 
+공용 지도는 패키지가 아니라 저장소 루트 `maps/`에 있다.
+
 ```
 src/
 ├── common/            모두가 쓰는 것
 │   ├── arti_interfaces    커스텀 msg/srv/action
 │   ├── arti_bringup       로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4)
-│   └── arti_common        공용 지도(maps/), 공용 좌표(config/: 작품·만남·충전 위치, 구역), 공용 Python 유틸
+│   └── arti_common        공용 좌표(config/: 작품·만남·충전 위치, 구역), 공용 Python 유틸
 └── arti_follow/       사용자 추종 로봇 (패키지) — 관람객 등록·재식별, 위치 추정, 80cm 추종, 분실 처리
 ```
 

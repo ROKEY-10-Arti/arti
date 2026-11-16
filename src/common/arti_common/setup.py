@@ -14,13 +14,12 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
-        ('share/' + package_name + '/maps', glob('maps/*.pgm') + glob('maps/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='ROKEY-10-Arti',
     maintainer_email='arti@todo.invalid',
-    description='Arti shared map, locations config, and utilities',
+    description='Arti shared locations config and utilities',
     license='Apache-2.0',
     extras_require={
         'test': [

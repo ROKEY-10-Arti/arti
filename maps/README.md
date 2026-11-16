@@ -6,4 +6,5 @@
 
 - `.yaml`의 `image:`는 상대 경로다. 두 파일은 항상 같은 폴더에 둔다.
 - 지도를 새로 만들면 파일명에 날짜나 장소를 붙여 추가하고, 이 표에 한 줄 적는다.
-- 설치 후 경로: `$(ros2 pkg prefix arti_common)/share/arti_common/maps/rokey_map.yaml`
+- 위치: 저장소 루트 `maps/` (패키지가 아니라서 빌드 없이 바로 쓴다).
+- 저장소 폴더 안에서는 `$ARTI_MAP` = `<저장소>/maps/rokey_map.yaml` (`.envrc`가 설정).
