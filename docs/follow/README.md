@@ -1,7 +1,7 @@
 # 사용자 추종 (follow)
 
 - 로봇: **`/robot1`** (`env.bash`의 `ARTI_ROBOT1_NS`). 코스주행은 `/robot4`
-- 패키지: `src/follow/arti_follow` (인터페이스는 `src/common/arti_interfaces`)
+- 패키지: `src/arti_follow` (인터페이스는 `src/common/arti_interfaces`)
 - 일정 (노션 간트): 11/16 ~ 11/18 코딩 → 11/19 ~ 11/20 테스트
 - **작업 목록: [tasks.md](tasks.md)** (노션 T01~T46)
 - 관련 요구사항: [common/requirements.md](../common/requirements.md)

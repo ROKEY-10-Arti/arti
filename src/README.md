@@ -9,8 +9,7 @@ src/
 │   ├── arti_interfaces    커스텀 msg/srv/action
 │   ├── arti_bringup       로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4)
 │   └── arti_common        공용 지도(maps/), 공용 좌표(config/: 작품·만남·충전 위치, 구역), 공용 Python 유틸
-└── follow/            사용자 추종 로봇
-    └── arti_follow        관람객 등록·재식별, 위치 추정, 80cm 추종, 분실 처리
+└── arti_follow/       사용자 추종 로봇 (패키지) — 관람객 등록·재식별, 위치 추정, 80cm 추종, 분실 처리
 ```
 
 ## 규칙

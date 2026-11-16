@@ -1,0 +1,49 @@
+# arti 실행 명령 모음 — 한 줄씩 그대로 복사해서 터미널에 붙여넣기
+# (리눅스 터미널 붙여넣기: Ctrl+Shift+V)
+# 지도: arti_common/maps/rokey_map.yaml (두 로봇 공용)
+# follow 로봇 = /robot1
+
+
+# ===== 0. 처음 한 번 / 코드 받은 뒤 =====
+
+cd ~/project/arti
+pb
+
+
+# ===== 1. robot1 주행 띄우기 (터미널 3개, 순서대로) =====
+
+# [터미널 1] localization — "Creating bond timer..." 나오면 다음
+ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot1 map:=$HOME/project/arti/install/arti_common/share/arti_common/maps/rokey_map.yaml
+
+# [터미널 2] rviz — 상단 "2D Pose Estimate"로 로봇 초기 위치 찍기
+ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot1
+
+# [터미널 3] nav2 — 초기 위치 찍은 뒤 실행
+ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot1
+
+
+# ===== 2. 잘 떴는지 확인 =====
+
+ros2 topic echo /robot1/amcl_pose --once
+ros2 action list | grep navigate_to_pose
+ros2 topic hz /robot1/scan
+
+
+# ===== 3. 로봇 도킹 / 언도킹 (로봇이 움직임 — 주변 확인 후) =====
+
+ros2 action send_goal /robot1/undock irobot_create_msgs/action/Undock "{}"
+ros2 action send_goal /robot1/dock irobot_create_msgs/action/Dock "{}"
+
+
+# ===== 4. 토픽이 안 보일 때 =====
+
+echo $ROS_DOMAIN_ID $ROS_DISCOVERY_SERVER
+ros2 daemon stop; ros2 daemon start
+ros2 topic list | grep robot1
+
+
+# ===== 5. robot4 (코스주행) — 필요할 때만 =====
+
+ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=$HOME/project/arti/install/arti_common/share/arti_common/maps/rokey_map.yaml
+ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot4
+ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4

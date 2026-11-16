@@ -1,5 +1,7 @@
 # 주행 띄우기 (localization → nav2 → rviz)
 
+복사용 한 줄 명령은 저장소 루트의 `COMMANDS.txt`에 있다.
+
 TurtleBot 4 기본 launch로 지도 위에서 주행을 띄우는 순서다. 터미널 3개를 열고 **각 터미널에서 먼저 `cd ~/project/arti`** 를 한다 (direnv가 환경을 켠다).
 로봇은 언도크된 상태여야 한다.
 

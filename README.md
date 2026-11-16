@@ -30,6 +30,7 @@
 ## 개발 문서
 문서 목차와 폴더 구조는 [docs/README.md](docs/README.md)에 있습니다.
 - [개발 환경 세팅](docs/common/setup.md)
+- [명령어 모음 (복사용)](COMMANDS.txt)
 - [주행 띄우기 (localization, nav2, rviz)](docs/common/navigation.md)
 - [요구사항 요약 (개발용)](docs/common/requirements.md)
 - [트러블슈팅 기록](docs/troubleshooting/README.md)
