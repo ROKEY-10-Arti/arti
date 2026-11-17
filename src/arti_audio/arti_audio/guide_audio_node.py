@@ -6,8 +6,9 @@
   guide_message   (std_msgs/String)                       : 안내 키 (guide_lines.yaml의 guides)
 
 흐름
-  artwork_id → 작품 정보 출처(지금 샘플 YAML, 나중에 DB)에서 description
-             → 읽을 문장 → edge-tts로 mp3 합성(캐시) → 재생 명령(pw-play) → 스피커
+  artwork_id → 작품 정보 출처(지금 샘플 YAML, 나중에 DB)에서 description   (content.py)
+             → edge-tts로 mp3 합성(캐시)                                    (tts.py)
+             → 재생 명령(pw-play) → 스피커                                   (player.py)
 
 규칙
   - 안내 음성이 오면 진행 중인 설명은 끊는다 (result.reason = preempted).
@@ -17,11 +18,8 @@
   - 시작할 때 안내 문구와 (가능하면) 작품 설명을 미리 합성해 둔다 → 첫 재생 지연을 줄인다.
 """
 
-import asyncio
-import hashlib
 import os
 import shlex
-import subprocess
 import threading
 import time
 
@@ -33,131 +31,14 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
-import yaml
+
+from arti_audio.content import artwork_text, GuideLines, YamlArtworkSource
+from arti_audio.player import Player
+from arti_audio.tts import TtsCache
 
 POLL_SEC = 0.05          # 취소·끊김 확인 주기
 FEEDBACK_SEC = 0.5       # 진행률 발행 주기
-STOP_TIMEOUT_SEC = 0.2   # terminate 후 이 시간 안에 안 끝나면 kill (확인 주기 0.05 + 0.2 < 0.3초)
 MP3_BITRATE_BPS = 48000  # edge-tts 출력 비트레이트 (진행률 추정용)
-
-
-# ---------- 읽을 문장 준비 (안내 문구 YAML, 작품 정보) ----------
-
-def _load_yaml(path):
-    with open(path, encoding='utf-8') as f:
-        return yaml.safe_load(f) or {}
-
-
-class GuideLines:
-    """guide_lines.yaml: TTS 설정, 안내 키 → 문장."""
-
-    def __init__(self, path):
-        data = _load_yaml(path)
-        tts = data.get('tts') or {}
-        self.voice = tts.get('voice', 'ko-KR-SunHiNeural')
-        self.rate = tts.get('rate', '+0%')
-        self.guides = {str(k): str(v).strip() for k, v in (data.get('guides') or {}).items()}
-
-    def artwork_text(self, artwork):
-        """작품 정보에서 읽을 문장 = description 그대로 (제목·작가는 읽지 않는다)."""
-        text = str(artwork.get('description') or '').strip()
-        if not text:
-            raise ValueError('작품 description이 비어 있음')
-        return text
-
-
-class YamlArtworkSource:
-    """작품 정보 출처 (지금은 artworks_sample.yaml). DB가 정해지면 get·all_artworks가 같은 클래스로 교체."""
-
-    def __init__(self, path):
-        rows = _load_yaml(path).get('artworks') or []
-        self._artworks = {str(r['artwork_id']): r for r in rows if r.get('artwork_id')}
-
-    def get(self, artwork_id):
-        return self._artworks.get(artwork_id)
-
-    def all_artworks(self):
-        return dict(self._artworks)
-
-
-# ---------- 문장 → mp3 합성 (edge-tts) + 파일 캐시 ----------
-
-class TtsCache:
-    """같은 (목소리, 빠르기, 문장)은 한 번만 합성. 파일 이름이 이 셋의 해시라 문장이 바뀌면 새로 만든다.
-    합성에는 인터넷이 필요하다 (작품·안내 문장만 보낸다. 관람객 정보는 보내지 않는다)."""
-
-    def __init__(self, cache_dir, voice, rate, timeout_sec=10):
-        self.cache_dir = os.path.expanduser(cache_dir)
-        self.voice = voice
-        self.rate = rate
-        self.timeout_sec = timeout_sec
-        self._locks = {}
-        self._locks_guard = threading.Lock()
-        os.makedirs(self.cache_dir, exist_ok=True)
-
-    def path_for(self, text):
-        key = f'{self.voice}|{self.rate}|{text}'.encode('utf-8')
-        return os.path.join(self.cache_dir, hashlib.sha1(key).hexdigest()[:20] + '.mp3')
-
-    def cached(self, text):
-        """이미 합성된 파일 경로, 없으면 None."""
-        path = self.path_for(text)
-        return path if os.path.isfile(path) else None
-
-    def synthesize(self, text):
-        """합성해서 파일 경로를 돌려준다 (이미 있으면 바로). 실패하면 예외."""
-        path = self.path_for(text)
-        with self._locks_guard:
-            lock = self._locks.setdefault(path, threading.Lock())
-        with lock:  # 같은 문장을 두 스레드가 동시에 합성하지 않게
-            if os.path.isfile(path):
-                return path
-            import edge_tts  # arti venv에 있음 (requirements.txt)
-            tmp = path + '.part'
-            comm = edge_tts.Communicate(
-                text, self.voice, rate=self.rate,
-                connect_timeout=self.timeout_sec, receive_timeout=self.timeout_sec * 3)
-            try:
-                asyncio.run(comm.save(tmp))
-                if os.path.getsize(tmp) == 0:
-                    raise RuntimeError('합성 결과가 빈 파일')
-                os.replace(tmp, path)  # 다 만든 뒤에 이름을 바꿔서 반쪽 파일을 재생하지 않게
-            finally:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-        return path
-
-
-# ---------- 재생 ----------
-
-class Player:
-    """음성 파일 하나를 외부 명령으로 재생하는 프로세스 래퍼."""
-
-    def __init__(self, cmd, path):
-        self.proc = subprocess.Popen(
-            cmd + [path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-    def poll(self):
-        return self.proc.poll()
-
-    def is_playing(self):
-        return self.proc.poll() is None
-
-    def stop(self):
-        if self.proc.poll() is not None:
-            return
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=STOP_TIMEOUT_SEC)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait()
-
-    def stderr_text(self):
-        try:
-            return self.proc.stderr.read().decode(errors='replace').strip()
-        except (OSError, ValueError):
-            return ''
 
 
 class GuideAudioNode(Node):
@@ -165,11 +46,14 @@ class GuideAudioNode(Node):
     def __init__(self):
         super().__init__('guide_audio_node')
         config = os.path.join(get_package_share_directory('arti_audio'), 'config')
-        self.declare_parameter('guide_lines_file', '')
-        self.declare_parameter('artworks_file', '')
-        self.declare_parameter('tts_cache_dir', '~/.cache/arti_audio/tts')
-        self.declare_parameter('tts_timeout_sec', 10)
-        self.declare_parameter('prefetch', True)
+        # 파라미터 (바꿀 때는 -p 이름:=값). 파일 경로를 비우면 설치된 share/arti_audio/config/의 파일
+        self.declare_parameter('guide_lines_file', '')      # TTS 목소리·빠르기, 안내 문구 (guide_lines.yaml)
+        self.declare_parameter('artworks_file', '')         # 작품 정보 (artworks_sample.yaml, 나중에 DB)
+        self.declare_parameter('tts_cache_dir', '~/.cache/arti_audio/tts')   # 합성한 mp3 (저장소 밖)
+        self.declare_parameter('tts_timeout_sec', 10)       # 합성 서버 접속 제한 [s] (받기는 3배)
+        self.declare_parameter('prefetch', True)            # 시작할 때 안내·작품 설명을 미리 합성
+        # 재생 명령 (뒤에 파일 경로가 붙는다). 기본은 PipeWire 기본 출력(노트북 스피커)
+        #   음량 "pw-play --volume 0.8", 출력 장치(에어팟 등) "pw-play --target <sink 이름>" (wpctl status)
         self.declare_parameter('player_cmd', 'pw-play')
 
         p = self.get_parameter
@@ -208,7 +92,7 @@ class GuideAudioNode(Node):
         texts = [('guide', k, t) for k, t in self.lines.guides.items()]
         try:
             for aid, artwork in self.source.all_artworks().items():
-                texts.append(('artwork', aid, self.lines.artwork_text(artwork)))
+                texts.append(('artwork', aid, artwork_text(artwork)))
         except Exception as e:  # 작품 정보가 이상해도 노드는 계속
             self.get_logger().warn(f'작품 정보 읽기 실패 (미리 합성 건너뜀): {e}')
         made, failed = 0, []
@@ -270,12 +154,17 @@ class GuideAudioNode(Node):
             f'설명 끝: {goal_handle.request.artwork_id} ({reason})')
         return ExplainArtwork.Result(completed=completed, reason=reason)
 
-    def _interrupted(self, goal_handle, stop):
-        """취소·끊김이면 (how, reason), 아니면 None."""
-        if goal_handle.is_cancel_requested:
-            return 'canceled', 'canceled'
-        if stop.is_set():
-            return 'abort', 'preempted'
+    def _wait(self, goal_handle, stop, busy, tick=None):
+        """busy()가 참인 동안 POLL_SEC마다 기다린다 (tick이 있으면 매번 부름).
+        취소·끊김이면 바로 (how, reason), 끝까지 기다렸으면 None."""
+        while busy():
+            if goal_handle.is_cancel_requested:
+                return 'canceled', 'canceled'
+            if stop.is_set():
+                return 'abort', 'preempted'
+            if tick is not None:
+                tick()
+            time.sleep(POLL_SEC)
         return None
 
     def _execute(self, goal_handle):
@@ -293,7 +182,7 @@ class GuideAudioNode(Node):
         # 1) 작품 정보 → 읽을 문장
         try:
             artwork = self.source.get(artwork_id)
-            text = self.lines.artwork_text(artwork) if artwork else None
+            text = artwork_text(artwork) if artwork else None
         except Exception as e:
             self.get_logger().error(f'작품 정보 읽기 실패 ({artwork_id}): {e}')
             text = None
@@ -316,25 +205,21 @@ class GuideAudioNode(Node):
 
             worker = threading.Thread(target=work, daemon=True)
             worker.start()
-            while worker.is_alive():
-                hit = self._interrupted(goal_handle, stop)
-                if hit:  # 합성은 뒤에서 마저 끝나 캐시에 남는다
-                    return self._finish(goal_handle, hit[0], False, hit[1])
-                time.sleep(POLL_SEC)
+            hit = self._wait(goal_handle, stop, worker.is_alive)
+            if hit:  # 합성은 뒤에서 마저 끝나 캐시에 남는다
+                return self._finish(goal_handle, hit[0], False, hit[1])
             if 'error' in out:
                 self.get_logger().error(
                     f'음성 합성 실패 ({artwork_id}, 인터넷 확인): {out["error"]}')
                 return self._finish(goal_handle, 'abort', False, 'tts_error')
             path = out['path']
 
-        # 3) 안내 음성이 끝나거나 멈출 때까지 기다린다 (새 안내가 오면 그것까지, 기다리는 중에도 취소 확인)
-        while self._guide_playing():
-            hit = self._interrupted(goal_handle, stop)
-            if hit:
-                return self._finish(goal_handle, hit[0], False, hit[1])
-            time.sleep(POLL_SEC)
+        # 3) 안내 음성이 끝나거나 멈출 때까지 기다린다 (새 안내가 오면 그것까지)
+        hit = self._wait(goal_handle, stop, self._guide_playing)
+        if hit:
+            return self._finish(goal_handle, hit[0], False, hit[1])
 
-        # 4) 재생
+        # 4) 재생 (진행률은 파일 크기로 추정한 길이 기준)
         player = self._start_player(path)
         if player is None:
             return self._finish(goal_handle, 'abort', False, 'player_error')
@@ -342,20 +227,20 @@ class GuideAudioNode(Node):
 
         duration = max(os.path.getsize(path) * 8.0 / MP3_BITRATE_BPS, 0.1)  # 대략
         t0 = time.monotonic()
-        last_fb = 0.0
+        last_fb = [0.0]
         feedback = ExplainArtwork.Feedback()
-        while player.is_playing():
-            hit = self._interrupted(goal_handle, stop)
-            if hit:
-                player.stop()
-                return self._finish(goal_handle, hit[0], False, hit[1])
+
+        def send_progress():
             now = time.monotonic()
-            if now - last_fb >= FEEDBACK_SEC:
+            if now - last_fb[0] >= FEEDBACK_SEC:
                 feedback.progress = float(min((now - t0) / duration, 1.0))
                 goal_handle.publish_feedback(feedback)
-                last_fb = now
-            time.sleep(POLL_SEC)
+                last_fb[0] = now
 
+        hit = self._wait(goal_handle, stop, player.is_playing, send_progress)
+        if hit:
+            player.stop()
+            return self._finish(goal_handle, hit[0], False, hit[1])
         if player.poll() != 0:
             self.get_logger().error(
                 f'재생 실패 (종료 코드 {player.poll()}): {player.stderr_text()}')

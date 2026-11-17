@@ -5,11 +5,9 @@ guide_audio_node 실행.
 ros2 launch arti_audio guide_audio.launch.py                  # 네임스페이스 = $ARTI_ROBOT_NS
 ros2 launch arti_audio guide_audio.launch.py namespace:=/robot1
 ros2 launch arti_audio guide_audio.launch.py player_cmd:="pw-play --volume 0.6"
+다른 파라미터(작품 파일, 캐시 위치 등)는 guide_audio_node.py의 declare_parameter 참고
 """
 
-import os
-
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
@@ -17,7 +15,6 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    params = os.path.join(get_package_share_directory('arti_audio'), 'config', 'guide_audio.yaml')
     return LaunchDescription([
         DeclareLaunchArgument(
             'namespace', default_value=EnvironmentVariable('ARTI_ROBOT_NS', default_value=''),
@@ -28,5 +25,5 @@ def generate_launch_description():
         Node(
             package='arti_audio', executable='guide_audio_node',
             namespace=LaunchConfiguration('namespace'), output='screen',
-            parameters=[params, {'player_cmd': LaunchConfiguration('player_cmd')}]),
+            parameters=[{'player_cmd': LaunchConfiguration('player_cmd')}]),
     ])
