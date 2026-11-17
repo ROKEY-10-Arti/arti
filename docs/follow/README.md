@@ -62,8 +62,8 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
-  → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
-  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `video_source:=`, `drive:=false`, `test:=false`, `bag:=false`, `tracker:=false`
+  → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
+  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`, `bag:=false`, `tracker:=camera|none`
 - 테스트 로그(기본 켬): 2초마다 데이터 흐름 요약(토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유)과
   끊긴 순간마다 `[늦음]`·`[제어 밀림]`·`[이유]`·`[시간]` 로그. `~/arti_logs/follow/<날짜_시각>/`에 노드 로그,
   `follow_timing.csv`(0.1 s마다 한 줄), `run_info.txt`(인자, PC NTP 상태) 저장. 영상은 저장하지 않는다
@@ -77,8 +77,8 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
   (`artwork_zone/reset`(Empty)으로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`
-- **인식 노드만 빼고 실행**: `ros2 launch arti_follow tour.launch.py tracker_node:=false` → `multi_tracker_node`만 뺌 (카메라는 띄움).
-  관람객 좌표(`target_person/point_map`)는 다른 PC의 인식 노드·bag 재생·`ros2 topic pub`에서 와야 한다. `tour.launch.py tracker_node:=false`와 같음
+- **인식 노드만 빼고 실행**: `ros2 launch arti_follow tour.launch.py tracker:=camera` → `multi_tracker_node`만 뺌 (카메라는 띄움).
+  관람객 좌표(`target_person/point_map`)는 다른 PC의 인식 노드·bag 재생·`ros2 topic pub`에서 와야 한다.
 - **구역 RViz로 보기**: `ros2 launch arti_follow zone_view.launch.py` (localization의 `<ns>/map` 위에), 로봇 없이 `standalone:=true`(지도 파일로 `/zone_view` map_server).
   `zone_viz`가 `artwork_zone/markers`(파랑 = 작품, 주황 = 출구·키오스크, 화살표 = 정면) 발행. "Publish Point"로 클릭 → `<ns>/clicked_point`로 좌표 재기
 - 인식 노드는 네임스페이스를 붙여 띄워야 한다. 안 붙이면 설치본에서 설정 파일을 못 찾아 `/top_cam/...`(네임스페이스 없음)을 구독 → 영상이 안 와서 인식 창이 까맣다
