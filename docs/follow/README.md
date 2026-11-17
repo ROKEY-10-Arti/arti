@@ -27,18 +27,31 @@
 | 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 바닥 물체 (base_link 높이 5~30 cm, 1.2 m 안) |
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
+| 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 관람 시작. 취소하면 관람 끝. feedback `state`, result `reason` |
+| 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
+| 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
+| 출력 | `guide_message` | String | 관람객 인식 때 `recognized` → arti_audio가 "인식되었습니다…" |
 | 출력 | `cmd_vel` | TwistStamped | 주행 (Nav2 안 씀) |
 | 출력 | `follow/state` | String | 상태가 바뀔 때마다 |
 
 | 상태 | 언제 | 동작 (플로우차트) |
 |---|---|---|
-| IDLE | 처음 | 좌표 기다림 |
+| READY | 처음 | `arti/start_tour` 액션 기다림. `cmd_vel`을 보내지 않음 |
+| UNDOCK | 액션 받음 | 도크에 붙어 있으면 undock (도크 밖이면 건너뜀) |
+| LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
+| START_FACE | 위치 잡힘 | 제자리 회전으로 출발 방향(undock yaw 180°)을 봄 |
+| WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 첫 좌표 → "인식되었습니다" 안내 |
 | FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 1 s 안 옴 | 최종 좌표로 이동(최대 4 s) → 멈춰서 남은 시간 안에 한 바퀴 회전 탐색 (합쳐서 10 s) |
 | WAIT | 탐색 10 s 지남 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
-| LOST | 대기도 지남 | 정지 — 재등록은 인식 모듈·상태 노드 |
+| LOST | 대기도 지남 | 정지, 액션 끝(`reason: lost`) — 재등록은 인식 모듈·상태 노드, 다시 시작은 액션을 새로 |
 
-좌표가 다시 들어오면 어느 상태에서든 FOLLOW.
+SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW. 액션을 취소하면 언제든 정지 → READY.
+
+```bash
+ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{}" --feedback   # 관람 시작 (Ctrl+C = 취소)
+```
 
 ```
 좌표: 칼만 필터(등속)로 위치·속도를 매끄럽게, 예측에서 너무 먼 좌표는 버림
@@ -50,7 +63,7 @@
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
   → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
-  인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `video_source:=`, `drive:=false`, `test:=false`, `bag:=false`, `tracker:=false`
+  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `video_source:=`, `drive:=false`, `test:=false`, `bag:=false`, `tracker:=false`
 - 테스트 로그(기본 켬): 2초마다 데이터 흐름 요약(토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유)과
   끊긴 순간마다 `[늦음]`·`[제어 밀림]`·`[이유]`·`[시간]` 로그. `~/arti_logs/follow/<날짜_시각>/`에 노드 로그,
   `follow_timing.csv`(0.1 s마다 한 줄), `run_info.txt`(인자, PC NTP 상태) 저장. 영상은 저장하지 않는다

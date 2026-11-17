@@ -1,7 +1,9 @@
 """추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + 자세한 로그 저장.
 
     ros2 launch arti_follow follow_test.launch.py
-    → 인식 창에서 따라갈 사람을 마우스로 클릭하면 로봇이 따라간다
+    → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
+      인식 창에서 따라갈 사람을 마우스로 클릭하면 "인식되었습니다" 안내 후 따라간다
+      ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{}" --feedback
 
 옵션
     video_source:=0          노트북 웹캠 번호, 또는 휴대폰 DroidCam URL (http://<폰IP>:4747/video)
@@ -10,6 +12,7 @@
     bag:=false               test일 때 ros2 bag 녹화 끄기
     tracker:=false           인식 모듈(카메라 + 인식 노드)은 따로 띄울 때
     tracker_node:=false      카메라는 띄우고 인식 노드(multi_tracker_node)만 뺄 때
+    auto_start:=true         액션 없이 켜자마자 관람 시작
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -49,7 +52,7 @@ BAG_TOPICS = [
     'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
-    'cmd_vel', 'follow/state', 'follow/enable',                  # visitor_follower 입출력
+    'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
     'artwork_zone/state', 'artwork_zone/reset', 'guide_message',  # 작품 구역·음성 (tour.launch.py)
 ]
 
@@ -91,7 +94,7 @@ def make_nodes(context):
         raise RuntimeError('namespace가 비었음 → 저장소 폴더 안에서 실행($ARTI_ROBOT_NS)하거나 namespace:=/robot1')
     test = arg('test').lower() == 'true'
     drive = arg('drive').lower() == 'true'
-    params = {'start_enabled': drive}
+    params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true'}
     env, actions = {}, []
 
     if test:
@@ -140,6 +143,8 @@ def generate_launch_description():
                               description='사람 인식 모듈(person_tracker)도 같이 띄우기'),
         DeclareLaunchArgument('tracker_node', default_value='true',
                               description='false면 카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌'),
+        DeclareLaunchArgument('auto_start', default_value='false',
+                              description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow',
                               description='테스트 로그를 저장할 폴더'),
         OpaqueFunction(function=make_nodes),

@@ -1,10 +1,12 @@
 """관람 안내 한 번에: 추종(follow_test.launch.py) + 작품 구역 판정(artwork_zone) + 음성(arti_audio guide_audio_node).
 
     ros2 launch arti_follow tour.launch.py
-    → 인식 창에서 따라갈 사람을 클릭하면 로봇이 따라가고,
+    → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
+      인식 창에서 따라갈 사람을 클릭하면 "인식되었습니다" 안내 후 로봇이 따라가고,
       관람객이 작품 앞 반원 구역에서 5초 멈추면 설명, 출구·키오스크 구역에 들어가면 안내 음성
 
 옵션 (follow_test.launch.py 옵션은 그대로 넘어감)
+    auto_start:=true         액션 없이 켜자마자 관람 시작
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false / bag:=false 진단 로그·bag 녹화 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
@@ -32,7 +34,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
-FOLLOW_ARGS = ['drive', 'test', 'bag', 'tracker', 'tracker_node', 'video_source', 'log_dir']
+FOLLOW_ARGS = ['auto_start', 'drive', 'test', 'bag', 'tracker', 'tracker_node', 'video_source', 'log_dir']
 
 
 def generate_launch_description():
@@ -54,6 +56,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value=EnvironmentVariable('ARTI_ROBOT_NS', default_value=''),
                               description='로봇 네임스페이스 (기본: $ARTI_ROBOT_NS)'),
+        DeclareLaunchArgument('auto_start', default_value='false',
+                              description='true면 start_tour 액션 없이 켜자마자 관람 시작'),
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true', description='진단 로그를 켜고 log_dir에 저장'),
         DeclareLaunchArgument('bag', default_value='true', description='test일 때 ros2 bag 녹화 (카메라 영상 제외)'),
