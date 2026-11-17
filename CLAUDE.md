@@ -30,7 +30,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 
 ## 패키지 구성
 
-공용 지도는 패키지 밖 저장소 루트 `maps/rokey_map.yaml` (`.envrc`가 `$ARTI_MAP`으로 설정).
+공용 지도는 패키지 밖 저장소 루트 `maps/gallery.yaml` (`.envrc`가 `$ARTI_MAP`으로 설정).
 역할(노션 간트 차트)별 폴더. 두 역할 이상이 쓰는 것은 `src/common/`. 규칙은 `src/README.md`.
 
 | 폴더 | 패키지 | 빌드 | 역할 | 상태 |

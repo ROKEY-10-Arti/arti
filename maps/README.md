@@ -2,9 +2,9 @@
 
 | 파일 | 내용 |
 |---|---|
-| `rokey_map.pgm` / `rokey_map.yaml` | 실습장 SLAM 지도 (2026-11-16 노션에서 가져옴). 72 x 126 px, 해상도 0.05 m → 약 3.6 m x 6.3 m |
+| `gallery.pgm` / `gallery.yaml` | 갤러리 지도 (2026-11-17, 이전 `rokey_map` 대신). 66 x 121 px, 해상도 0.05 m → 약 3.3 m x 6.05 m, origin (-2.921, -0.600) |
 
 - `.yaml`의 `image:`는 상대 경로다. 두 파일은 항상 같은 폴더에 둔다.
 - 지도를 새로 만들면 파일명에 날짜나 장소를 붙여 추가하고, 이 표에 한 줄 적는다.
 - 위치: 저장소 루트 `maps/` (패키지가 아니라서 빌드 없이 바로 쓴다).
-- 저장소 폴더 안에서는 `$ARTI_MAP` = `<저장소>/maps/rokey_map.yaml` (`.envrc`가 설정).
+- 저장소 폴더 안에서는 `$ARTI_MAP` = `<저장소>/maps/gallery.yaml` (`.envrc`가 설정).

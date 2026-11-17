@@ -5,7 +5,7 @@
 TurtleBot 4 기본 launch로 지도 위에서 주행을 띄우는 순서다. 터미널 3개를 열고 **각 터미널에서 먼저 `cd ~/project/arti`** 를 한다 (direnv가 환경을 켠다).
 로봇은 언도크된 상태여야 한다.
 
-지도는 저장소 루트 `maps/rokey_map.yaml`을 쓴다. 저장소 폴더 안에서는 `$ARTI_MAP`이 이 경로다 (`.envrc`가 설정, 빌드 불필요).
+지도는 저장소 루트 `maps/gallery.yaml`을 쓴다. 저장소 폴더 안에서는 `$ARTI_MAP`이 이 경로다 (`.envrc`가 설정, 빌드 불필요).
 
 ## robot1
 
@@ -35,7 +35,7 @@ ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT2_NS
 ## 두 로봇이 같은 지도를 쓴다는 것
 
 ```
-rokey_map.yaml ──┬─> /robot1/map_server ─> /robot1/map ─> /robot1/amcl ─> /robot1/amcl_pose (map 좌표)
+gallery.yaml ────┬─> /robot1/map_server ─> /robot1/map ─> /robot1/amcl ─> /robot1/amcl_pose (map 좌표)
                  └─> /robot4/map_server ─> /robot4/map ─> /robot4/amcl ─> /robot4/amcl_pose (map 좌표)
 ```
 
@@ -57,5 +57,5 @@ ros2 action list | grep navigate_to_pose      # /robot1/navigate_to_pose 가 보
 ## 메모
 
 - 원래 명령은 `~/rokey_ws/NAV_COMMANDS.txt` (지도 경로만 arti 패키지로 바꿈).
-- `~/rokey_ws/maps/rokey_map`과 이 지도는 **origin이 다른 별개 지도**다. 섞어 쓰지 않는다.
+- `~/rokey_ws/maps/rokey_map`, 예전에 쓰던 `rokey_map`(11/17까지)과 이 지도는 **origin이 다른 별개 지도**다. 섞어 쓰지 않는다.
 - 나중에 `arti_bringup` launch 파일로 묶을 예정.

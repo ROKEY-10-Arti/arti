@@ -27,7 +27,7 @@
 - [x] **T02** 네트워크 · PM/통합 · **충만·정욱** ~11/16 — 로봇 PC + 로봇 1대 ROS 네트워크. `ROS_DOMAIN_ID`·discovery, 네임스페이스(rqt_graph), `/cmd_vel` 타입(Twist vs TwistStamped) 확인 → **완료 (간트 11/17)**
 - [ ] **T07** 시간 동기화 · PM/통합 · **정욱** ~11/16 — chrony로 로봇 PC 기준 시간 맞춤 (어긋나면 tf2·RGB–Depth 동기화 실패)
 - [ ] **T08** 실행 환경 통일 · PM/통합 · **충만** ~11/16 — 같은 브랜치·`best.pt`·yaml. 카메라 device_id, calib 파일, 네임스페이스는 파라미터 파일로 분리
-- [x] **T03** 맵 · AMR-1 · **정욱** ~11/16 — SLAM 맵 작성, RViz로 localization 검증 → **완료: 기존 `rokey_map` 사용**
+- [x] **T03** 맵 · AMR-1 · **정욱** ~11/16 — SLAM 맵 작성, RViz로 localization 검증 → **완료: 기존 `rokey_map` 사용 → 11/17 갤러리 지도 `gallery`로 바꿈**
 - [ ] **T06** `init_pose.yaml` · AMR-1 · **정욱** ~11/16 — 로봇별 언독 직후 초기 위치·도킹 앞 좌표를 `amcl_pose`로 기록 → 로봇 2대 중 **1대(robot1)만** 사용, 그 로봇의 초기·도킹 위치만 `init_pose.yaml`에
 - [ ] **T04** `artworks.yaml` · MM-2 · **정욱** ~11/16 — 작품별 좌표·정면 방향·반원 반경·음성 파일, 종료 구역, RViz 마커로 구역 확인
   - [ ] **T04-1** 작품 정보·반원 구역 입력 · **정욱** ~11/16
