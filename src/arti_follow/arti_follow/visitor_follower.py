@@ -12,6 +12,8 @@
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
+      arti/tour_end (Empty)                        관람이 끝나면(취소·LOST·실패) 한 번 → 인식 모듈·artwork_zone이
+                                                   그 관람객 데이터(re-ID 특징, 좌표 기록 등)를 지운다. 로봇 1대 = 관람객 1명
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
@@ -58,7 +60,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Empty, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 import yaml
@@ -224,6 +226,7 @@ class VisitorFollower(Node):
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
+        self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
@@ -548,10 +551,13 @@ class VisitorFollower(Node):
         self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')
 
     def end_tour(self, state, reason):
-        """관람 끝: 정지하고 state로 (READY 또는 LOST). reason은 액션 result."""
+        """관람 끝: 정지하고 state로 (READY 또는 LOST). reason은 액션 result.
+        이 관람객 데이터(필터 위치·속도)를 지우고 arti/tour_end로 다른 노드도 지우게 한다."""
         self.active, self.end_reason = False, reason
         self.drive(0.0, 0.0)
-        self.get_logger().info(f'관람 끝 ({reason})')
+        self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
+        self.tour_end_pub.publish(Empty())
+        self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
         self.set_state(state)
 
     def run_tour(self, goal):

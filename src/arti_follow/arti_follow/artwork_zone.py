@@ -1,7 +1,8 @@
 """작품 구역 판정 → 작품 설명·안내 음성 (T32 정지·구역 판정·설명).
 
 입력  target_person/point_map (PointStamped, frame_id map)  인식 모듈이 준 관람객 좌표
-      artwork_zone/reset (std_msgs/Empty)                   '이미 설명한 작품' 목록 비우기 (새 관람객)
+      arti/tour_end (std_msgs/Empty)                        관람 끝(visitor_follower) → 이 관람객 데이터 삭제
+                                                            (좌표 기록, 설명한 작품, 안내 구역 기록, 진행 중 설명 취소)
 출력  explain_artwork (arti_interfaces/action/ExplainArtwork)  액션 클라이언트 → arti_audio guide_audio_node
       guide_message (std_msgs/String)                         안내 구역(출구·키오스크) 안내 키
       artwork_zone/state (std_msgs/String)                    지금 판단 (바뀔 때만): idle, dwell art_01 3.2s, explaining art_01 ...
@@ -106,7 +107,7 @@ class ArtworkZone(Node):
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.state_pub = self.create_publisher(String, 'artwork_zone/state', 10)
         self.create_subscription(PointStamped, 'target_person/point_map', self.on_person, 10)
-        self.create_subscription(Empty, 'artwork_zone/reset', self.on_reset, 10)
+        self.create_subscription(Empty, 'arti/tour_end', self.on_tour_end, 10)
         self.create_timer(self.p['check_period'], self.tick)
 
     def now(self):
@@ -124,9 +125,16 @@ class ArtworkZone(Node):
             self.track.popleft()
         self.seen = now
 
-    def on_reset(self, _msg):
-        self.get_logger().info(f'설명한 작품 목록 비움 (전에는 {sorted(self.explained)})')
+    def on_tour_end(self, _msg):
+        """로봇 1대 = 관람객 1명. 관람이 끝나면 그 사람 데이터를 남기지 않는다."""
+        if self.active:
+            self.cancel('관람 끝')
+        self.track.clear()
         self.explained.clear()
+        self.inside.clear()
+        self.guided_at.clear()
+        self.seen = -1e9
+        self.get_logger().info('관람 끝 → 관람객 데이터(좌표 기록, 설명한 작품, 안내 기록) 삭제')
 
     # ---------- 판정 ----------
 

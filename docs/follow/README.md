@@ -32,6 +32,7 @@
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
 | 출력 | `guide_message` | String | 관람객 인식 때 `recognized` → arti_audio가 "인식되었습니다…" |
+| 출력 | `arti/tour_end` | Empty | 관람 끝(취소·LOST·실패)에 한 번. 로봇 1대 = 관람객 1명 → 인식 모듈(re-ID 특징·타겟)·`artwork_zone`(좌표 기록·설명한 작품)·이 노드(필터)가 그 관람객 데이터를 지운다 (개인정보) |
 | 출력 | `cmd_vel` | TwistStamped | 주행 (Nav2 안 씀) |
 | 출력 | `follow/state` | String | 상태가 바뀔 때마다 |
 
@@ -74,7 +75,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   옵션은 follow_test와 같고 `audio:=false`(음성 노드 따로), `player_cmd:=`, `zones_file:=` 추가.
   구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
   관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
-  (`artwork_zone/reset`(Empty)으로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
+  (관람이 끝나면 `arti/tour_end`로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`
 - **인식 노드만 빼고 실행**: `ros2 launch arti_follow tour.launch.py tracker:=camera` → `multi_tracker_node`만 뺌 (카메라는 띄움).
   관람객 좌표(`target_person/point_map`)는 다른 PC의 인식 노드·bag 재생·`ros2 topic pub`에서 와야 한다.

@@ -17,7 +17,7 @@
     target_person/point_map → artwork_zone → explain_artwork(action) → guide_audio_node → 스피커
                                            → guide_message(String)   ↗
     artwork_zone/state       지금 판단 (idle, moving, dwell ..., explaining art_01)
-    artwork_zone/reset       설명한 작품 목록 비우기 (새 관람객)
+    arti/tour_end            관람 끝(visitor_follower) → 인식 모듈·artwork_zone이 관람객 데이터 삭제
 """
 import os
 
