@@ -38,7 +38,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 | common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | `VisitorDetection` msg, `ExplainArtwork` action |
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | 빈 패키지 |
 | common | arti_common | ament_python | 공용 좌표 config, 유틸 | `config/artworks.yaml` (작품 4·출구·키오스크 반원 구역) |
-| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일), `artwork_zone`(작품 반원 구역 5초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`, 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
+| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일), `artwork_zone`(작품 반원 구역 5초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`(인식 노드만 뺀 `tour_no_tracker.launch.py`), 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
 | (src 바로 아래) | person_tracker | ament_python | 사람 인식: 탑캠 YOLO 추적·재식별 + LiDAR → `target_person/point_map` (jsbzzz/turtlebot_project에서 가져옴) | `multi_tracker_node`, `camera_pub`, `top_cam_tf` 등 |
 | (src 바로 아래) | arti_audio | ament_python | 작품 설명·안내 음성 (T35). 작품 정보(artwork_id·artwork_title·artist·location·theme·description·x·y, 지금 `config/artworks_sample.yaml`, 나중에 DB)와 안내 문구(`config/guide_lines.yaml`)를 실행 중에 edge-tts로 합성(캐시 `~/.cache/arti_audio/tts`) → 스피커(`pw-play`) 재생 | `guide_audio_node` (`explain_artwork` 액션, `guide_message` 토픽) |
 

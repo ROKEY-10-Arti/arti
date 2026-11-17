@@ -8,7 +8,8 @@
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false              진단 로그·파일 저장 끄기
     bag:=false               test일 때 ros2 bag 녹화 끄기
-    tracker:=false           인식 모듈은 따로 띄울 때
+    tracker:=false           인식 모듈(카메라 + 인식 노드)은 따로 띄울 때
+    tracker_node:=false      카메라는 띄우고 인식 노드(multi_tracker_node)만 뺄 때
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -63,8 +64,8 @@ def pc_time_sync():
         return f'확인 실패 ({e})'
 
 
-def tracker_actions(ns, video_source):
-    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스)."""
+def tracker_actions(ns, video_source, with_node=True):
+    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스). with_node=False면 카메라만."""
     try:
         share = get_package_share_directory('person_tracker')
     except PackageNotFoundError:
@@ -76,6 +77,8 @@ def tracker_actions(ns, video_source):
                    name='multi_person_tracker_node', namespace=ns, output='screen',
                    parameters=[{'show_info_window': False,      # 화면은 인식 영상 창 하나만
                                 'show_distance': True}])        # 박스마다 거리(m)
+    if not with_node:
+        return [camera]
     return [camera, TimerAction(period=2.0, actions=[tracker])]     # 카메라가 먼저 켜지게
 
 
@@ -97,7 +100,8 @@ def make_nodes(context):
         os.makedirs(run_dir, exist_ok=True)
         sync = pc_time_sync()
         with open(os.path.join(run_dir, 'run_info.txt'), 'w', encoding='utf-8') as f:
-            f.write(f'namespace={ns}\ndrive={drive}\ntracker={arg("tracker")}\nbag={arg("bag")}\n'
+            f.write(f'namespace={ns}\ndrive={drive}\ntracker={arg("tracker")}\ntracker_node={arg("tracker_node")}\n'
+                    f'bag={arg("bag")}\n'
                     f'video_source={arg("video_source")}\nPC 시간 동기화(NTP): {sync}\n')
         params.update({'diag': True, 'diag_events': True,
                        'diag_csv': os.path.join(run_dir, 'follow_timing.csv')})
@@ -112,7 +116,7 @@ def make_nodes(context):
                                    f'로그 저장 위치: {run_dir}'))
 
     if arg('tracker').lower() == 'true':
-        actions += tracker_actions(ns, arg('video_source'))
+        actions += tracker_actions(ns, arg('video_source'), arg('tracker_node').lower() == 'true')
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
@@ -134,6 +138,8 @@ def generate_launch_description():
                               description='test일 때 ros2 bag으로 BAG_TOPICS 녹화 (카메라 영상 제외)'),
         DeclareLaunchArgument('tracker', default_value='true',
                               description='사람 인식 모듈(person_tracker)도 같이 띄우기'),
+        DeclareLaunchArgument('tracker_node', default_value='true',
+                              description='false면 카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌'),
         DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow',
                               description='테스트 로그를 저장할 폴더'),
         OpaqueFunction(function=make_nodes),

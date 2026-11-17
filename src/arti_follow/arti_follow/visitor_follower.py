@@ -12,7 +12,7 @@
 
 상태 (플로우차트 순서)
   START_FACE  시작하자마자 제자리 회전으로 출발 지점(arti_common init_pose.yaml의 robots.<ns>.undock) 쪽을 봄
-              (로봇이 이미 그 위에 있으면 dock → undock 방향). 다 돌거나 face_timeout 지나면 IDLE.
+              (로봇이 이미 그 위에 있으면 그 점의 yaw_deg, 없으면 dock → undock 방향). 다 돌거나 face_timeout 지나면 IDLE.
               그 사이 관람객 좌표가 들어오면 바로 FOLLOW
   IDLE    좌표 기다림
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
@@ -227,9 +227,11 @@ class VisitorFollower(Node):
             self.get_logger().warn(f'출발 지점을 못 읽음 ({path}, {self.get_namespace()}: {e!r}) → 시작 회전 안 함')
             return None
         dock = robot.get('dock')
-        self.get_logger().info(f'시작 회전: 출발 지점 {self.p["start_point"]} ({target["x"]}, {target["y"]}) 쪽을 봄')
+        yaw = math.radians(float(target['yaw_deg'])) if 'yaw_deg' in target else None
+        self.get_logger().info(f'시작 회전: 출발 지점 {self.p["start_point"]} ({target["x"]}, {target["y"]}) 쪽을 봄'
+                               + (f', 그 위에 있으면 {target["yaw_deg"]}°' if yaw is not None else ''))
         return ((float(target['x']), float(target['y'])),
-                (float(dock['x']), float(dock['y'])) if dock else None)
+                (float(dock['x']), float(dock['y'])) if dock else None, yaw)
 
     # ---------- 입력 ----------
 
@@ -391,7 +393,7 @@ class VisitorFollower(Node):
         p = self.p
         if self.face_until is None:
             self.face_until = now + p['face_timeout']
-        (tx, ty), dock = self.face_target
+        (tx, ty), dock, start_yaw = self.face_target
         pose = self.lookup(p['map_frame'], p['base_frame'])
         if pose is None or now > self.face_until:
             if now > self.face_until:
@@ -401,7 +403,9 @@ class VisitorFollower(Node):
             self.dbg['reason'] = 'start_face_wait'
             return self.drive(*self.ramp(0.0, 0.0))
         x, y, yaw = pose
-        if math.hypot(tx - x, ty - y) < 0.15 and dock is not None:    # 이미 출발 지점 위 → dock에서 나가는 방향
+        if math.hypot(tx - x, ty - y) < 0.15 and start_yaw is not None:  # 이미 출발 지점 위 → 그 점의 방향
+            want = start_yaw
+        elif math.hypot(tx - x, ty - y) < 0.15 and dock is not None:    # 방향이 없으면 dock에서 나가는 방향
             want = math.atan2(ty - dock[1], tx - dock[0])
         else:
             want = math.atan2(ty - y, tx - x)

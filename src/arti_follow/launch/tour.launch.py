@@ -8,6 +8,7 @@
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false / bag:=false 진단 로그·bag 녹화 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
+    tracker_node:=false      카메라만 띄우고 인식 노드는 뺄 때 (tour_no_tracker.launch.py)
     video_source:=0          웹캠 번호 또는 DroidCam URL
     audio:=false             음성 노드는 따로 띄울 때 (구역 판정만)
     player_cmd:="pw-play --volume 0.6"   재생 명령 (출력 장치·음량)
@@ -31,7 +32,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
-FOLLOW_ARGS = ['drive', 'test', 'bag', 'tracker', 'video_source', 'log_dir']
+FOLLOW_ARGS = ['drive', 'test', 'bag', 'tracker', 'tracker_node', 'video_source', 'log_dir']
 
 
 def generate_launch_description():
@@ -57,6 +58,8 @@ def generate_launch_description():
         DeclareLaunchArgument('test', default_value='true', description='진단 로그를 켜고 log_dir에 저장'),
         DeclareLaunchArgument('bag', default_value='true', description='test일 때 ros2 bag 녹화 (카메라 영상 제외)'),
         DeclareLaunchArgument('tracker', default_value='true', description='사람 인식 모듈도 같이 띄우기'),
+        DeclareLaunchArgument('tracker_node', default_value='true',
+                              description='false면 카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌'),
         DeclareLaunchArgument('video_source', default_value='0', description='웹캠 번호 또는 DroidCam URL'),
         DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow', description='테스트 로그 폴더'),
         DeclareLaunchArgument('audio', default_value='true', description='음성 노드(guide_audio_node)도 같이 띄우기'),
