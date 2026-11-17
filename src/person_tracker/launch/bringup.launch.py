@@ -182,9 +182,7 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('person_tracker')
-    src_cfg = os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml')
-    share_cfg = os.path.join(pkg_share, 'config', 'phone_camera.yaml')
-    default_cfg = src_cfg if os.path.isfile(src_cfg) else share_cfg
+    default_cfg = os.path.join(pkg_share, 'config', 'phone_camera.yaml')
     # 지도는 arti 저장소 루트 maps/ 한 곳에서 관리 (.envrc가 $ARTI_MAP 설정)
     default_map = EnvironmentVariable('ARTI_MAP')
 

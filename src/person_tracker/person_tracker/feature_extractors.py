@@ -32,6 +32,8 @@ class PartFeatureBank:
 class BaseFeatureExtractor:
     """태스크별 특징 추출기의 공통 베이스 클래스 (Strategy Pattern)"""
 
+    ALLOW_CROSS_PART = True
+
     @staticmethod
     def calc_hsv_hist(hsv_roi: np.ndarray, mask_roi: np.ndarray) -> Optional[np.ndarray]:
         if hsv_roi.size == 0 or mask_roi.size == 0:
@@ -87,41 +89,93 @@ class BaseFeatureExtractor:
     ) -> Optional[PartFeatureBank]:
         raise NotImplementedError
 
+    def compare_banks_detail(
+        self, ref: Optional[PartFeatureBank], cur: Optional[PartFeatureBank]
+    ) -> Tuple[float, Optional[float], Optional[float], Optional[float], float]:
+        """
+        부위별 유사도와 최종 종합 점수를 함께 반환합니다:
+        (total_score, upper_sim, mid_sim, lower_sim, full_sim)
+        """
+        if ref is None or cur is None:
+            return 0.0, None, None, None, 0.0
+
+        upper_sim = (
+            self.hist_sim(ref.upper, cur.upper)
+            if (ref.upper is not None and cur.upper is not None)
+            else None
+        )
+        mid_sim = (
+            self.hist_sim(ref.mid, cur.mid)
+            if (ref.mid is not None and cur.mid is not None)
+            else None
+        )
+        lower_sim = (
+            self.hist_sim(ref.lower, cur.lower)
+            if (ref.lower is not None and cur.lower is not None)
+            else None
+        )
+
+        part_scores = []
+        for sim_val, weight in (
+            (upper_sim, 0.44),
+            (mid_sim, 0.36),
+            (lower_sim, 0.20),
+        ):
+            if sim_val is not None:
+                part_scores.append((sim_val, weight))
+
+        full_score = self.hist_sim(ref.full, cur.full)
+        if part_scores:
+            aligned_score = sum(s * w for s, w in part_scores) / sum(w for _, w in part_scores)
+            score = max(full_score, aligned_score)
+        else:
+            score = full_score
+
+        if self.ALLOW_CROSS_PART and cur.upper is None:
+            cross_candidates = [score]
+            if ref.mid is not None:
+                cross_candidates.append(self.hist_sim(ref.mid, cur.full) * 0.92)
+            if ref.lower is not None:
+                cross_candidates.append(self.hist_sim(ref.lower, cur.full) * 0.90)
+            score = max(cross_candidates)
+
+        return float(score), upper_sim, mid_sim, lower_sim, float(full_score)
+
     def compare_banks(
         self, ref: Optional[PartFeatureBank], cur: Optional[PartFeatureBank]
     ) -> float:
         """
-        현재 보이는 부위(visible_parts)끼리 1:1 매칭을 우선 수행하고,
-        가까이 다가와 하반신만 보이는 경우 교차 부위(Cross-Part) 매칭까지 수행합니다.
+        현재 보이는 부위(visible_parts)끼리 1:1 매칭을 우선 수행합니다.
         """
-        if ref is None or cur is None:
-            return 0.0
+        score, _, _, _, _ = self.compare_banks_detail(ref, cur)
+        return score
 
-        part_scores = []
-        for r_h, c_h, weight in [
-            (ref.upper, cur.upper, 0.35),
-            (ref.mid, cur.mid, 0.40),
-            (ref.lower, cur.lower, 0.25),
-        ]:
-            if r_h is not None and c_h is not None:
-                part_scores.append((self.hist_sim(r_h, c_h), weight))
+    def compute_dual_similarity_detail(
+        self,
+        anchor_bank: Optional[PartFeatureBank],
+        recent_bank: Optional[PartFeatureBank],
+        cur_bank: Optional[PartFeatureBank],
+    ) -> Tuple[float, Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]]:
+        """최고 종합 유사도와 해당 비교의 (upper, mid, lower, full) 세부 점수를 반환합니다."""
+        if cur_bank is None:
+            return 0.0, (None, None, None, None)
 
-        aligned_score = (
-            sum(s * w for s, w in part_scores) / sum(w for _, w in part_scores)
-            if part_scores
-            else 0.0
+        anchor_detail = self.compare_banks_detail(anchor_bank, cur_bank)
+        recent_detail = self.compare_banks_detail(recent_bank, cur_bank)
+
+        if recent_detail[0] > anchor_detail[0]:
+            return float(recent_detail[0]), (
+                recent_detail[1],
+                recent_detail[2],
+                recent_detail[3],
+                recent_detail[4],
+            )
+        return float(anchor_detail[0]), (
+            anchor_detail[1],
+            anchor_detail[2],
+            anchor_detail[3],
+            anchor_detail[4],
         )
-        full_score = self.hist_sim(ref.full, cur.full)
-
-        candidates = [full_score, aligned_score]
-        if ref.mid is not None:
-            candidates.append(self.hist_sim(ref.mid, cur.full) * 0.95)
-        if ref.lower is not None:
-            candidates.append(self.hist_sim(ref.lower, cur.full) * 0.92)
-        if ref.mid is not None and cur.upper is not None:
-            candidates.append(self.hist_sim(ref.mid, cur.upper) * 0.95)
-
-        return float(max(candidates))
 
     def compute_dual_similarity(
         self,
@@ -129,14 +183,8 @@ class BaseFeatureExtractor:
         recent_bank: Optional[PartFeatureBank],
         cur_bank: Optional[PartFeatureBank],
     ) -> float:
-        if cur_bank is None:
-            return 0.0
-        return float(
-            max(
-                self.compare_banks(anchor_bank, cur_bank),
-                self.compare_banks(recent_bank, cur_bank),
-            )
-        )
+        score, _ = self.compute_dual_similarity_detail(anchor_bank, recent_bank, cur_bank)
+        return score
 
     @staticmethod
     def update_recent_bank(
@@ -271,6 +319,7 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
     # COCO Keypoint 인덱스:
     # 5:L-Shoulder, 6:R-Shoulder, 11:L-Hip, 12:R-Hip, 13:L-Knee, 14:R-Knee, 15:L-Ankle, 16:R-Ankle
     KP_CONF_THRESH = 0.35
+    ALLOW_CROSS_PART = False
 
     def extract(
         self,
@@ -352,11 +401,11 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
         combined_mask = cv2.bitwise_or(upper_mask, cv2.bitwise_or(mid_mask, lower_mask))
         if cv2.countNonZero(combined_mask) < 20:
             # 관절이 너무 안 보일 때는 중앙 영역 폴백
-            return BBoxFeatureExtractor().extract(frame, bbox)
+            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
 
         full_h = self.calc_hsv_hist(roi_hsv, combined_mask)
         if full_h is None:
-            return BBoxFeatureExtractor().extract(frame, bbox)
+            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
 
         return PartFeatureBank(
             full=full_h,
