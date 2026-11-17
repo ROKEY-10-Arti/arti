@@ -14,6 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,6 +32,8 @@ setup(
             'visitor_follower = arti_follow.visitor_follower:main',
             'dwa_follower = arti_follow.dwa_follower:main',
             'nav2_follower = arti_follow.nav2_follower:main',
+            'artwork_zone = arti_follow.artwork_zone:main',
+            'zone_viz = arti_follow.zone_viz:main',
         ],
     },
 )

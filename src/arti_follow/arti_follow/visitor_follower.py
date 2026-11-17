@@ -11,7 +11,10 @@
       diag_csv를 주면 제어 주기마다 한 줄씩 CSV로 저장 (launch/follow_test.launch.py)
 
 상태 (플로우차트 순서)
-  IDLE    처음, 좌표 기다림
+  START_FACE  시작하자마자 제자리 회전으로 출발 지점(arti_common init_pose.yaml의 robots.<ns>.undock) 쪽을 봄
+              (로봇이 이미 그 위에 있으면 dock → undock 방향). 다 돌거나 face_timeout 지나면 IDLE.
+              그 사이 관람객 좌표가 들어오면 바로 FOLLOW
+  IDLE    좌표 기다림
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
   SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표로 이동 → 멈춰서 남은 시간 안에 한 바퀴 회전 탐색
   WAIT    search_time 지남 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
@@ -26,9 +29,11 @@
 """
 import csv
 import math
+import os
 import signal
 import time
 
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 import cv2
 from geometry_msgs.msg import PointStamped, TwistStamped
 import numpy as np
@@ -41,9 +46,15 @@ from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
 from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
+import yaml
 
 PARAMS = {
-    'odom_frame': 'odom', 'base_frame': 'base_link',
+    'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
+    'face_on_start': True,          # 시작하자마자 출발 지점 쪽으로 제자리 회전
+    'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
+    'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것>을 바라봄
+    'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
+    'face_timeout': 15.0,           # 이 시간 안에 못 돌면 포기하고 IDLE [s] (map TF가 없을 때 등)
     'target_distance': 0.8,         # 유지 거리 [m]
     'distance_tolerance': 0.05,     # 이 안이면 전진 안 함 [m]
     'restart_margin': 0.15,         # 멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)
@@ -197,10 +208,28 @@ class VisitorFollower(Node):
         sub(Bool, 'follow/enable', self.on_enable, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
-        self.set_state('IDLE')
+        self.face_target = self.load_start_point() if self.p['face_on_start'] else None
+        self.face_until = None                      # START_FACE 끝 시각 (첫 제어 주기에 정함)
+        self.set_state('START_FACE' if self.face_target is not None else 'IDLE')
         self.create_timer(self.p['control_period'], self.control)
         if self.diag is not None and self.p['diag']:
             self.create_timer(self.p['diag_period'], self.report)
+
+    def load_start_point(self):
+        """init_pose.yaml에서 이 로봇의 출발 지점과 도크 (map). 없으면 None (회전 안 함)."""
+        path = self.p['start_pose_file']
+        try:
+            path = path or os.path.join(get_package_share_directory('arti_common'), 'config', 'init_pose.yaml')
+            with open(path, encoding='utf-8') as f:
+                robot = (yaml.safe_load(f) or {}).get('robots', {}).get(self.get_namespace(), {})
+            target = robot[self.p['start_point']]
+        except (OSError, KeyError, PackageNotFoundError, yaml.YAMLError) as e:
+            self.get_logger().warn(f'출발 지점을 못 읽음 ({path}, {self.get_namespace()}: {e!r}) → 시작 회전 안 함')
+            return None
+        dock = robot.get('dock')
+        self.get_logger().info(f'시작 회전: 출발 지점 {self.p["start_point"]} ({target["x"]}, {target["y"]}) 쪽을 봄')
+        return ((float(target['x']), float(target['y'])),
+                (float(dock['x']), float(dock['y'])) if dock else None)
 
     # ---------- 입력 ----------
 
@@ -305,6 +334,8 @@ class VisitorFollower(Node):
         here = np.array(pose[:2])
         self.dbg['here'] = here
 
+        if self.state == 'START_FACE' and self.kf.x is None:
+            return self.face_start(now)
         if self.kf.x is not None and now - self.seen < p['lost_timeout']:
             self.set_state('FOLLOW')                # 80 cm 유지하며 이동
             last, vel = self.person()
@@ -354,6 +385,34 @@ class VisitorFollower(Node):
         self.set_state('WAIT' if t < p['search_time'] + p['wait_time'] else 'LOST')
         self.dbg['reason'] = self.state.lower()
         self.drive(*self.ramp(0.0, 0.0))
+
+    def face_start(self, now):
+        """제자리 회전으로 출발 지점 쪽을 본다 (map 좌표, localization 필요)."""
+        p = self.p
+        if self.face_until is None:
+            self.face_until = now + p['face_timeout']
+        (tx, ty), dock = self.face_target
+        pose = self.lookup(p['map_frame'], p['base_frame'])
+        if pose is None or now > self.face_until:
+            if now > self.face_until:
+                self.get_logger().warn(f'시작 회전 {p["face_timeout"]} s 안에 못 끝냄'
+                                       + (' (map TF 없음: localization 확인)' if pose is None else '') + ' → IDLE')
+                self.set_state('IDLE')
+            self.dbg['reason'] = 'start_face_wait'
+            return self.drive(*self.ramp(0.0, 0.0))
+        x, y, yaw = pose
+        if math.hypot(tx - x, ty - y) < 0.15 and dock is not None:    # 이미 출발 지점 위 → dock에서 나가는 방향
+            want = math.atan2(ty - dock[1], tx - dock[0])
+        else:
+            want = math.atan2(ty - y, tx - x)
+        err = float(wrap(want - yaw))
+        self.dbg['reason'] = 'start_face'
+        if abs(err) < p['face_tolerance'] and abs(self.cmd[1]) < 0.2:
+            self.get_logger().info(f'시작 회전 끝 (오차 {math.degrees(err):.0f}°)')
+            self.set_state('IDLE')
+            return self.drive(*self.ramp(0.0, 0.0))
+        w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
+        return self.drive(*self.ramp(0.0, w))
 
     # ---------- 주행 ----------
 

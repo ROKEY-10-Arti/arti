@@ -25,7 +25,7 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
 - Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
 - `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/common/setup.md`, 주행 띄우기는 `docs/common/navigation.md`.
-- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. Host PC는 `scripts/run_discovery_server.sh`를 켜 둔다. 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
+- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. 서버 ID 0 = `192.168.107.42`(관제 PC, `scripts/run_discovery_server.sh`를 켜 둠). 이 PC(`192.168.107.11`, mu-01, robot1 담당)는 guest → `192.168.107.42:11811;192.168.107.101:11811;` (`/etc/turtlebot4_discovery/setup.bash`와 같은 값). 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
 - `env.bash`는 로컬 전용(gitignore). `env.bash.example`을 복사해서 `ROS_DOMAIN_ID`, 로봇 네임스페이스 설정.
 
 ## 패키지 구성
@@ -37,8 +37,8 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 |---|---|---|---|---|
 | common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | `VisitorDetection` msg, `ExplainArtwork` action |
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | 빈 패키지 |
-| common | arti_common | ament_python | 공용 좌표 config, 유틸 | 빈 패키지 |
-| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일) |
+| common | arti_common | ament_python | 공용 좌표 config, 유틸 | `config/artworks.yaml` (작품 4·출구·키오스크 반원 구역) |
+| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일), `artwork_zone`(작품 반원 구역 5초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`, 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
 | (src 바로 아래) | person_tracker | ament_python | 사람 인식: 탑캠 YOLO 추적·재식별 + LiDAR → `target_person/point_map` (jsbzzz/turtlebot_project에서 가져옴) | `multi_tracker_node`, `camera_pub`, `top_cam_tf` 등 |
 | (src 바로 아래) | arti_audio | ament_python | 작품 설명·안내 음성 (T35). 작품 정보(artwork_id·artwork_title·artist·location·theme·description·x·y, 지금 `config/artworks_sample.yaml`, 나중에 DB)와 안내 문구(`config/guide_lines.yaml`)를 실행 중에 edge-tts로 합성(캐시 `~/.cache/arti_audio/tts`) → 스피커(`pw-play`) 재생 | `guide_audio_node` (`explain_artwork` 액션, `guide_message` 토픽) |
 

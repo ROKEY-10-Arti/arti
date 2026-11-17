@@ -57,6 +57,15 @@
 - ros2 bag(기본 켬, `bag:=false`로 끔): 같은 폴더 `bag/`에 mcap으로 녹화. 토픽은 launch의 `BAG_TOPICS`
   (scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*). **카메라 영상·depth는 넣지 않는다**(개인정보, 팀 합의 전).
   다시 보기: `ros2 bag info <폴더>/bag`, `ros2 bag play <폴더>/bag` + RViz. Discovery Server가 안 떠 있으면 0개로 녹화된다
+- **관람 안내 실행 (추종 + 작품 설명)**: `ros2 launch arti_follow tour.launch.py`
+  → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).
+  옵션은 follow_test와 같고 `audio:=false`(음성 노드 따로), `player_cmd:=`, `zones_file:=` 추가.
+  구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
+  관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
+  (`artwork_zone/reset`(Empty)으로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
+  확인: `ros2 topic echo /robot1/artwork_zone/state`
+- **구역 RViz로 보기**: `ros2 launch arti_follow zone_view.launch.py` (localization의 `<ns>/map` 위에), 로봇 없이 `standalone:=true`(지도 파일로 `/zone_view` map_server).
+  `zone_viz`가 `artwork_zone/markers`(파랑 = 작품, 주황 = 출구·키오스크, 화살표 = 정면) 발행. "Publish Point"로 클릭 → `<ns>/clicked_point`로 좌표 재기
 - 인식 노드는 네임스페이스를 붙여 띄워야 한다. 안 붙이면 설치본에서 설정 파일을 못 찾아 `/top_cam/...`(네임스페이스 없음)을 구독 → 영상이 안 와서 인식 창이 까맣다
 - 확인한 것 (가상 LiDAR, 2026-11-16): 0.25 m/s 직진 시 0.80~0.85 m 유지, 길 위 바닥 물체(10 cm) 회피,
   상자 뒤로 사라지면 SEARCH → 돌아가서 재발견, 인식이 끊기면 SEARCH(이동→회전) → WAIT → 재인식 시 FOLLOW,

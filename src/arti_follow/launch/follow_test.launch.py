@@ -49,6 +49,7 @@ BAG_TOPICS = [
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
     'cmd_vel', 'follow/state', 'follow/enable',                  # visitor_follower 입출력
+    'artwork_zone/state', 'artwork_zone/reset', 'guide_message',  # 작품 구역·음성 (tour.launch.py)
 ]
 
 
