@@ -3,12 +3,13 @@
 amcl:
   ros__parameters:
     # 출발 위치 (map 좌표, m / rad) — 켜자마자 여기로 위치를 잡는다. RViz 2D Pose Estimate 없이 시작
+    # = arti_common/config/init_pose.yaml의 robot1 undock (-0.5, 0.7, 180°). 바꿀 때는 두 파일을 같이 고친다
     set_initial_pose: true
     initial_pose:
-      x: 0.304
-      y: -0.0957
+      x: -0.5
+      y: 0.7
       z: 0.0
-      yaw: 0.0
+      yaw: 3.14159
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
