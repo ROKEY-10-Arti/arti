@@ -11,6 +11,9 @@
 ultralytics==8.4.208      # rokey_venv와 같은 버전 (torch, opencv-python 함께 설치됨)
 lap==0.5.12               # person_tracker 추적 매칭 (src/person_tracker/requirements.txt)
 
+# --- 음성 안내 (arti_audio: 작품·안내 문장을 실행 중에 음성으로 합성, ~/.cache에 캐시) ---
+edge-tts==7.3.1           # 합성할 때 인터넷 필요 (캐시에 있으면 오프라인 재생 가능)
+
 # --- ROS 호환 ---
 numpy<2                   # ROS Jazzy cv_bridge는 시스템 numpy 1.26 기준 빌드 → numpy 2면 import 에러
 setuptools<80             # colcon-core 0.21 요구사항 (torch가 최신 setuptools를 끌고 옴 → ament_python 빌드 깨질 수 있음)
