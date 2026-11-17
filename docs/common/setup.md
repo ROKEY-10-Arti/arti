@@ -58,8 +58,13 @@ nano env.bash
 - `ROS_DOMAIN_ID`는 팀 공통 값 **1**이다 (로봇 discovery 설정과 같음). 예시 파일 값 그대로 두면 된다.
   다르면 로봇 토픽이 보이지 않는다 → [기록](../troubleshooting/env/2026-11-16-domain-id-mismatch.md)
 - 네트워크 구성은 노션 "Multi Robot Custom Discovery Setup"의 **CASE 1-3**이다.
-  PC 한 대가 로봇 한 대를 맡고, Host PC가 discovery server(ID 0)를 띄워 PC끼리도 토픽을 주고받는다.
-  - `ARTI_PC_ROLE`: Host PC는 `host`, 나머지 PC는 `guest`
+  **관제 PC(Host)** 가 discovery server(ID 0)를 띄우고, **로봇 PC 2대(Guest)** 가 각자 로봇 한 대를 맡으면서 관제 PC에 붙는다.
+  ```
+                관제 PC (host, server ID 0)
+               /                          \
+  로봇 PC A (guest) ── robot1      로봇 PC B (guest) ── robot4
+  ```
+  - `ARTI_PC_ROLE`: 관제 PC는 `host`, 로봇 PC는 `guest`
   - `ARTI_HOST_PC_IP`: guest만 적는다. Host PC에서 `hostname -I`로 확인
   - `ARTI_DISCOVERY_SERVERS`: **자기가 맡은 로봇만** `서버ID:IP`로 적는다 (robot1 담당 `1:192.168.107.101`)
   - Host PC는 작업하는 동안 별도 터미널에서 `bash scripts/run_discovery_server.sh`를 켜 둔다
