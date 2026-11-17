@@ -13,7 +13,7 @@
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
-      diag_csv를 주면 제어 주기마다 한 줄씩 CSV로 저장 (launch/follow_test.launch.py)
+      (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
 상태 (플로우차트 순서). 시작은 READY — arti/start_tour 액션이 와야 움직인다 (auto_start면 켜자마자)
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
@@ -35,7 +35,6 @@
 주행: 장애물로 격자를 만들어 칸마다 목표까지 '돌아가는 거리'를 구하고(BFS),
       (v, w) 후보를 sim_time 동안 굴려 보며 안 부딪히고 끝점의 그 거리가 가장 작은 것을 고른다(DWA).
 """
-import csv
 import math
 import os
 import signal
@@ -113,13 +112,8 @@ PARAMS = {
     'start_enabled': True,          # 시작할 때 cmd_vel을 보낼지 (false면 follow/enable true가 올 때까지 계산만)
     'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
-    'diag_csv': '',                 # 제어 주기마다 한 줄씩 저장할 CSV 경로 ('' = 저장 안 함)
     'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
 }
-
-
-CSV_COLUMNS = ['t', 'tick_gap_s', 'step_ms', 'field_ms', 'state', 'reason', 'enabled', 'v', 'w',
-               'scan_age_s', 'person_age_s', 'depth_age_s', 'person_x', 'person_y', 'person_dist']
 
 
 class Diag:
@@ -203,14 +197,9 @@ class VisitorFollower(Node):
         self.cam_k = self.cam_tf = None
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
-        self.diag = Diag() if self.p['diag'] or self.p['diag_csv'] else None
+        self.diag = Diag() if self.p['diag'] else None
         self.arrive, self.last_tick, self.last_cmd = {}, None, None
         self.gap_avg, self.last_reason = {}, None    # 토픽별 평소 수신 간격, 지난 주기 이유 (diag_events)
-        self.csv_file = self.csv = None
-        if self.p['diag_csv']:
-            self.csv_file = open(self.p['diag_csv'], 'w', newline='', encoding='utf-8')
-            self.csv = csv.writer(self.csv_file)
-            self.csv.writerow(CSV_COLUMNS)
         if self.diag is not None:
             self.get_logger().info('파라미터 ' + ', '.join(f'{k}={v}' for k, v in self.p.items()))
 
@@ -384,7 +373,6 @@ class VisitorFollower(Node):
             self.dbg['reason'] = 'no_pose' if pose is None else 'scan_timeout'
             return self.drive(0.0, 0.0)             # 센서 없음 → 정지
         here = np.array(pose[:2])
-        self.dbg['here'] = here
 
         if self.state == 'START_FACE':
             return self.face_start(now)
@@ -397,7 +385,6 @@ class VisitorFollower(Node):
             last, vel = self.person()
             person = last + vel * (now - self.kf.t)     # 필터 위치를 지금 시각으로
             ahead = person + vel * p['lead_time']
-            self.dbg['person'] = person
             to = ahead - here
             d = np.linalg.norm(to)
             stop = p['target_distance'] + p['distance_tolerance']
@@ -421,7 +408,6 @@ class VisitorFollower(Node):
             return self.drive(*self.ramp(0.0, 0.0))  # WAIT_VISITOR
 
         last, vel = self.person()
-        self.dbg['person'] = last
         if self.state == 'FOLLOW':                  # 방금 놓침 → 마지막으로 가던 방향 기억
             self.lost_at, self.spin_at = now, None
             d = last + vel - here
@@ -744,7 +730,7 @@ class VisitorFollower(Node):
         return cb
 
     def record(self, t0):
-        """제어 한 주기를 통계와 CSV에 남긴다."""
+        """제어 한 주기를 진단 통계에 넣고, diag_events면 끊긴 순간을 바로 로그로."""
         d, now, t1 = self.dbg, self.now(), time.monotonic()
         gap = t1 - self.last_tick if self.last_tick is not None else 0.0
         self.last_tick = t1
@@ -769,20 +755,6 @@ class VisitorFollower(Node):
                               f'v={self.cmd[0]:.2f} w={self.cmd[1]:.2f}, scan {ago(self.scan_time)}, '
                               f'좌표 {ago(self.seen)}')
         self.last_reason = reason
-        if self.csv is None:
-            return
-        person = d.get('person')
-
-        def age(t):
-            return round(now - t, 3) if t > 0 else ''
-        self.csv.writerow([
-            round(now, 3), round(gap, 3), round(step_ms, 1), round(d.get('field_ms', 0.0), 1),
-            self.state, reason, int(self.enabled), round(self.cmd[0], 3), round(self.cmd[1], 3),
-            age(self.scan_time), age(self.seen), age(self.floor_time),
-            '' if person is None else round(float(person[0]), 3),
-            '' if person is None else round(float(person[1]), 3),
-            '' if person is None or 'here' not in d else round(float(np.linalg.norm(person - d['here'])), 3)])
-        self.csv_file.flush()
 
     def report(self):
         """diag_period마다 요약 로그. 끊김과 관련 있어 보이는 값은 WARN으로."""
@@ -836,10 +808,6 @@ class VisitorFollower(Node):
         else:
             self.get_logger().info(text)
 
-    def close(self):
-        if self.csv_file is not None:
-            self.csv_file.close()
-
     def set_state(self, state):
         if state != self.state:
             self.get_logger().info(f'상태 {self.state} → {state}')
@@ -861,7 +829,6 @@ def main():
         node.active = False                         # 관람 액션 대기 루프 끝냄
         executor.shutdown(timeout_sec=1.0)
         node.drive(0.0, 0.0)
-        node.close()
         node.destroy_node()
         rclpy.shutdown()
 
