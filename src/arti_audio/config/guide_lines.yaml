@@ -1,0 +1,17 @@
+# 음성 설정과 안내 문구 — guide_audio_node가 실행 중에 텍스트를 음성으로 합성(edge-tts)해서 재생한다.
+# 합성한 mp3는 tts_cache_dir(기본 ~/.cache/arti_audio/tts)에 저장해 두고 다시 쓴다.
+# 문구를 바꾸면 자동으로 새로 합성된다 (캐시 이름 = 목소리·빠르기·문장의 해시).
+
+tts:
+  voice: ko-KR-SunHiNeural   # edge-tts --list-voices | grep ko-KR
+  rate: "+0%"                # 말 빠르기 (예: "-10%" 느리게)
+
+# guide_message 토픽(std_msgs/String)으로 받는 키 → 읽을 문장. 설명보다 우선한다.
+guides:
+  start: "등록되었습니다. 지금부터 관람을 함께하겠습니다. 작품 앞에서 잠시 멈추시면 설명해 드릴게요."  # 관람 시작
+  register: "로봇 앞에서 손바닥을 펼쳐 보여 주세요."                                                 # 등록·재등록 요청
+  come_here: "관람객님을 찾고 있습니다. 로봇 쪽으로 와 주세요."                                     # 분실 후 호출
+  wait: "잠시 기다려 주세요."                                                                       # 다른 로봇과 마주침
+  battery_low: "배터리가 부족하여 안내를 마칩니다. 이용해 주셔서 감사합니다."                       # 배터리 부족 종료
+  tour_end: "관람이 끝났습니다. 이용해 주셔서 감사합니다."                                          # 종료 구역 진입
+  register_failed: "관람객님을 찾지 못해 안내를 마칩니다."                                          # 재등록 실패 종료
