@@ -2,7 +2,7 @@
 
 입력  arti_common/config/artworks.yaml (artwork_zone 노드와 같은 파일)
 출력  artwork_zone/markers (MarkerArray, frame map, latched)
-        파랑 반원 = 작품 구역, 주황 반원 = 안내 구역(출구·키오스크), 화살표 = 정면(방 쪽), 글자 = 이름·ID·중심 좌표
+        파랑 = 작품 구역, 주황 = 안내 구역(출구·키오스크), 반원 화살표 = 정면(방 쪽), 글자 = 이름·ID·좌표
       artwork_zone/markers 는 시작할 때 한 번 + republish_period마다 다시 보낸다 (RViz를 나중에 켜도 보이게)
 
 YAML을 고친 뒤에는 이 노드만 다시 켜면 된다 (빌드는 --symlink-install이면 필요 없음).
@@ -42,16 +42,18 @@ class ZoneViz(Node):
         self.pub.publish(self.msg)
         self.create_timer(self.get_parameter('republish_period').value, lambda: self.pub.publish(self.msg))
         for z in arts + guides:
-            self.get_logger().info(
-                f'{z.name}({z.id}): 중심 ({z.x:.2f}, {z.y:.2f}), 정면 '
-                f'{math.degrees(math.atan2(z.fy, z.fx)):.0f}°, 반지름 {z.r} m'
-                + (f', 안내 "{z.guide}"' if z.guide else ''))
+            shape = (f'직사각형 x {z.box[0]}~{z.box[1]}, y {z.box[2]}~{z.box[3]}' if z.shape == 'rect' else
+                     f'반원 중심 ({z.x:.2f}, {z.y:.2f}), 정면 {math.degrees(math.atan2(z.fy, z.fx)):.0f}°, 반지름 {z.r} m')
+            self.get_logger().info(f'{z.name}({z.id}): {shape}' + (f', 안내 "{z.guide}"' if z.guide else ''))
         self.get_logger().info(f'{path} → artwork_zone/markers ({len(arts) + len(guides)}개 구역)')
 
     def build(self, zones, rgb, start=0):
         ms = []
         for i, z in enumerate(zones):
             base = start + i * 10
+            if z.shape == 'rect':
+                ms += self.build_rect(z, rgb, base)
+                continue
             yaw = math.atan2(z.fy, z.fx)
             arc = [(z.x + z.r * math.cos(yaw + a), z.y + z.r * math.sin(yaw + a))
                    for a in [math.radians(d) for d in range(-90, 91, 6)]]
@@ -77,6 +79,21 @@ class ZoneViz(Node):
             text.text = f'{z.name} {z.id}\n({z.x:.2f}, {z.y:.2f})'
             ms += [fill, edge, arrow, text]
         return ms
+
+    def build_rect(self, z, rgb, base):
+        x0, x1, y0, y1 = z.box
+        c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        fill = self.marker(base, Marker.TRIANGLE_LIST, rgb, 0.25)
+        fill.scale.x = fill.scale.y = fill.scale.z = 1.0
+        fill.points = [Point(x=x, y=y) for x, y in (c[0], c[1], c[2], c[0], c[2], c[3])]
+        edge = self.marker(base + 1, Marker.LINE_STRIP, rgb, 0.9)
+        edge.scale.x = 0.03
+        edge.points = [Point(x=x, y=y, z=0.01) for x, y in c + [c[0]]]
+        text = self.marker(base + 3, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0), 1.0)
+        text.scale.z = 0.15
+        text.pose.position.x, text.pose.position.y, text.pose.position.z = z.x, z.y, 0.3
+        text.text = f'{z.name} {z.id}\nx {x0}~{x1}, y {y0}~{y1}'
+        return [fill, edge, text]
 
     def marker(self, mid, kind, rgb, alpha):
         m = Marker()

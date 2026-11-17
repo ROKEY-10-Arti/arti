@@ -44,19 +44,32 @@ PARAMS = {
 
 
 class Zone:
-    """반원 구역: 중심에서 정면(facing) 쪽으로 반지름 radius."""
+    """구역 하나. shape: semicircle(기본) 또는 rect.
+
+    semicircle  x, y(중심), facing_deg(정면, 방 쪽), radius
+    rect        x_min, x_max, y_min, y_max (map 축에 나란한 직사각형). 중심 = 가운데, 정면 없음
+    """
 
     def __init__(self, zid, row):
         self.id, self.name = zid, row.get('name', zid)
+        self.shape = row.get('shape', 'semicircle')
+        self.guide = row.get('guide')
+        if self.shape == 'rect':
+            self.box = tuple(float(row[k]) for k in ('x_min', 'x_max', 'y_min', 'y_max'))
+            self.x, self.y = (self.box[0] + self.box[1]) / 2, (self.box[2] + self.box[3]) / 2
+            self.r, self.fx, self.fy = None, 0.0, 0.0
+            return
         self.x, self.y, self.r = float(row['x']), float(row['y']), float(row['radius'])
         a = math.radians(float(row['facing_deg']))
         self.fx, self.fy = math.cos(a), math.sin(a)
-        self.guide = row.get('guide')
 
     def dist(self, p):
         return math.hypot(p[0] - self.x, p[1] - self.y)
 
     def contains(self, p):
+        if self.shape == 'rect':
+            x0, x1, y0, y1 = self.box
+            return x0 <= p[0] <= x1 and y0 <= p[1] <= y1
         dx, dy = p[0] - self.x, p[1] - self.y
         return math.hypot(dx, dy) <= self.r and dx * self.fx + dy * self.fy >= 0.0
 
