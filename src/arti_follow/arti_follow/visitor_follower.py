@@ -14,8 +14,8 @@
 상태 (플로우차트 순서)
   IDLE    처음, 좌표 기다림
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
-  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표로 이동 → 멈춰서 남은 시간 안에 한 바퀴 회전 탐색
-  WAIT    search_time 지남 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
+  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
+  WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
   LOST    wait_time 지남 → 정지 (재등록은 인식 모듈·상태 노드)
   좌표가 다시 들어오면 언제든 FOLLOW
 
@@ -57,8 +57,8 @@ PARAMS = {
     'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
     'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
     'lost_timeout': 3.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
-    'search_time': 10.0,            # 이동·회전 탐색 시간 (플로우차트 10초) [s]
-    'search_move_time': 100.0,        # 그중 최종 좌표로 이동하는 데 쓰는 최대 시간 → 남은 시간은 회전 [s]
+    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 회전 탐색 시간 (플로우차트 10초) [s]
+    'search_move_time': 0.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s]
     'wait_time': 10.0,              # 그다음 정지 대기 (플로우차트 10초) [s]
     'search_spin': 0.6,             # 회전 탐색 최소 속도. 남은 시간에 한 바퀴가 안 되면 더 빨리 돎 [rad/s]
     'max_linear': 0.3, 'max_angular': 1.5,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
@@ -345,19 +345,21 @@ class VisitorFollower(Node):
             self.lost_at, self.spin_at = now, None
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
-        t = now - self.lost_at
-        if t < p['search_time']:
-            self.set_state('SEARCH')
-            if self.spin_at is None and np.linalg.norm(last - here) > 0.5 and t < p['search_move_time']:
+        if self.spin_at is None:                    # 1) 최종 좌표에 도착할 때까지 이동
+            cap = p['search_move_time']             # 0이면 시간 제한 없음
+            if np.linalg.norm(last - here) > 0.5 and (cap <= 0 or now - self.lost_at < cap):
+                self.set_state('SEARCH')
                 self.dbg['goal'], self.dbg['reason'] = last, 'search_move'
-                return self.drive(*self.dwa(pose, last, last))  # 최종 좌표로 이동
-            if self.spin_at is None:
-                self.spin_at = now                  # 도착(또는 이동 시간 끝) → 남은 시간 안에 한 바퀴 (가속분 5 % 여유)
-                left = max(p['search_time'] - t, 1e-3)
-                self.spin_speed = float(np.clip(1.05 * 2 * math.pi / left, p['search_spin'], p['max_angular']))
+                return self.drive(*self.dwa(pose, last, last))
+            self.spin_at = now                      # 도착 → 여기서부터 search_time 동안 한 바퀴 (가속분 5 % 여유)
+            self.spin_speed = float(np.clip(1.05 * 2 * math.pi / max(p['search_time'], 1e-3),
+                                            p['search_spin'], p['max_angular']))
+        t = now - self.spin_at
+        if t < p['search_time']:                    # 2) 도착 지점에서 회전 탐색
+            self.set_state('SEARCH')
             self.dbg['reason'] = 'search_spin'
             return self.drive(*self.ramp(0.0, self.turn * self.spin_speed))  # 마지막 방향 쪽으로 회전
-        self.set_state('WAIT' if t < p['search_time'] + p['wait_time'] else 'LOST')
+        self.set_state('WAIT' if t < p['search_time'] + p['wait_time'] else 'LOST')  # 3) 정지 대기
         self.dbg['reason'] = self.state.lower()
         self.drive(*self.ramp(0.0, 0.0))
 
