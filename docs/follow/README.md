@@ -40,7 +40,7 @@
 | READY | 처음 | `arti/start_tour` 액션 기다림. `cmd_vel`을 보내지 않음 |
 | UNDOCK | 액션 받음 | 도크에 붙어 있으면 undock (도크 밖이면 건너뜀) |
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
-| START_FACE | 위치 잡힘 | 제자리 회전으로 출발 방향(undock yaw 180°)을 봄 |
+| START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
 | WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 첫 좌표 → "인식되었습니다" 안내 |
 | FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |

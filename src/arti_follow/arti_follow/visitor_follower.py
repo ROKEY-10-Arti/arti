@@ -19,8 +19,8 @@
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
   UNDOCK      도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 도크 밖이면 건너뜀
   LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다림
-  START_FACE  제자리 회전으로 출발 방향을 봄 (출발 지점 위면 그 점의 yaw_deg, 아니면 그 점 쪽).
-              다 돌거나 face_timeout 지나면 WAIT_VISITOR
+  START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
+              face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 첫 좌표 → guide_message로 "인식되었습니다" → FOLLOW
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
   SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
@@ -73,7 +73,9 @@ PARAMS = {
     'localize_tolerance': 0.3,      # initialpose 뒤 map 위치가 출발 지점에서 이 안이면 잡힌 것 [m]
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
-    'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것> = 초기 위치이자 바라볼 출발 지점
+    'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
+    'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
+    'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치
     'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
     'face_timeout': 15.0,           # 이 시간 안에 못 돌면 포기하고 WAIT_VISITOR [s] (map TF가 없을 때 등)
     'target_distance': 0.8,         # 유지 거리 [m]
@@ -222,7 +224,8 @@ class VisitorFollower(Node):
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
-        self.face_target = self.load_start_point()
+        self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
+        self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
         # 관람 (start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
@@ -246,23 +249,51 @@ class VisitorFollower(Node):
         if self.diag is not None and self.p['diag']:
             self.create_timer(self.p['diag_period'], self.report)
 
+    def config_file(self, param, name):
+        return self.p[param] or os.path.join(get_package_share_directory('arti_common'), 'config', name)
+
     def load_start_point(self):
-        """init_pose.yaml에서 이 로봇의 출발 지점과 도크 (map). 없으면 None (회전 안 함)."""
+        """init_pose.yaml에서 이 로봇의 출발 지점 (x, y, yaw) map. 없으면 None (초기 위치 안 보냄).
+        yaw_deg가 없으면 dock → 출발 지점 방향, dock도 없으면 0."""
         path = self.p['start_pose_file']
         try:
-            path = path or os.path.join(get_package_share_directory('arti_common'), 'config', 'init_pose.yaml')
+            path = self.config_file('start_pose_file', 'init_pose.yaml')
             with open(path, encoding='utf-8') as f:
                 robot = (yaml.safe_load(f) or {}).get('robots', {}).get(self.get_namespace(), {})
             target = robot[self.p['start_point']]
         except (OSError, KeyError, PackageNotFoundError, yaml.YAMLError) as e:
-            self.get_logger().warn(f'출발 지점을 못 읽음 ({path}, {self.get_namespace()}: {e!r}) → 시작 회전 안 함')
+            self.get_logger().warn(f'출발 지점을 못 읽음 ({path}, {self.get_namespace()}: {e!r}) → 초기 위치 안 보냄')
             return None
-        dock = robot.get('dock')
-        yaw = math.radians(float(target['yaw_deg'])) if 'yaw_deg' in target else None
-        self.get_logger().info(f'출발 지점 {self.p["start_point"]} ({target["x"]}, {target["y"]})'
-                               + (f', 방향 {target["yaw_deg"]}°' if yaw is not None else ''))
-        return ((float(target['x']), float(target['y'])),
-                (float(dock['x']), float(dock['y'])) if dock else None, yaw)
+        x, y, dock = float(target['x']), float(target['y']), robot.get('dock')
+        if 'yaw_deg' in target:
+            yaw = math.radians(float(target['yaw_deg']))
+        else:
+            yaw = math.atan2(y - float(dock['y']), x - float(dock['x'])) if dock else 0.0
+        self.get_logger().info(f'출발 지점 {self.p["start_point"]} ({x}, {y}, {math.degrees(yaw):.0f}°)')
+        return x, y, yaw
+
+    def load_face_point(self):
+        """artworks.yaml에서 face_zone 구역의 중심 (x, y) map. 없으면 None (출발 지점 yaw로 돎)."""
+        zid = self.p['face_zone']
+        if not zid:
+            return None
+        path = self.p['zones_file']
+        try:
+            path = self.config_file('zones_file', 'artworks.yaml')
+            with open(path, encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+            rows = [r for r in (data.get('guide_zones') or []) + (data.get('artworks') or [])
+                    if zid in (r.get('zone_id'), r.get('artwork_id'))]
+            r = rows[0]
+            if 'x' in r:
+                point = (float(r['x']), float(r['y']))
+            else:                                   # 직사각형 구역 → 가운데
+                point = ((float(r['x_min']) + float(r['x_max'])) / 2, (float(r['y_min']) + float(r['y_max'])) / 2)
+        except (OSError, KeyError, IndexError, PackageNotFoundError, yaml.YAMLError, ValueError) as e:
+            self.get_logger().warn(f'바라볼 구역 {zid}을 못 읽음 ({path}: {e!r}) → 출발 지점 방향으로 돎')
+            return None
+        self.get_logger().info(f'시작 때 바라볼 곳: {zid} {point}')
+        return point
 
     # ---------- 입력 ----------
 
@@ -435,11 +466,10 @@ class VisitorFollower(Node):
     def face_start(self, now):
         """제자리 회전으로 출발 지점 쪽을 본다 (map 좌표, localization 필요)."""
         p = self.p
-        if self.face_target is None:                # 출발 지점을 모름 → 돌지 않음
+        if self.face_point is None and self.start is None:   # 바라볼 곳을 모름 → 돌지 않음
             return self.set_state('WAIT_VISITOR')
         if self.face_until is None:
             self.face_until = now + p['face_timeout']
-        (tx, ty), dock, start_yaw = self.face_target
         pose = self.lookup(p['map_frame'], p['base_frame'])
         if pose is None or now > self.face_until:
             if now > self.face_until:
@@ -450,12 +480,10 @@ class VisitorFollower(Node):
             self.dbg['reason'] = 'start_face_wait'
             return self.drive(*self.ramp(0.0, 0.0))
         x, y, yaw = pose
-        if math.hypot(tx - x, ty - y) < 0.15 and start_yaw is not None:  # 이미 출발 지점 위 → 그 점의 방향
-            want = start_yaw
-        elif math.hypot(tx - x, ty - y) < 0.15 and dock is not None:    # 방향이 없으면 dock에서 나가는 방향
-            want = math.atan2(ty - dock[1], tx - dock[0])
-        else:
-            want = math.atan2(ty - y, tx - x)
+        if self.face_point is not None:             # 바라볼 곳(키오스크 등) 쪽
+            want = math.atan2(self.face_point[1] - y, self.face_point[0] - x)
+        else:                                       # 없으면 출발 지점의 방향
+            want = self.start[2]
         err = float(wrap(want - yaw))
         self.dbg['reason'] = 'start_face'
         if abs(err) < p['face_tolerance'] and abs(self.cmd[1]) < 0.2:
@@ -465,21 +493,14 @@ class VisitorFollower(Node):
         w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
         return self.drive(*self.ramp(0.0, w))
 
-    def start_pose(self):
-        """초기 위치로 쓸 출발 지점 (x, y, yaw) map. yaw_deg가 없으면 dock → 출발 지점 방향, 그것도 없으면 0."""
-        (tx, ty), dock, yaw = self.face_target
-        if yaw is None:
-            yaw = math.atan2(ty - dock[1], tx - dock[0]) if dock is not None else 0.0
-        return tx, ty, yaw
-
     def localize(self, now):
         """AMCL에 initialpose를 보내고 map 위치가 출발 지점 근처로 잡힐 때까지 기다린다 (cmd_vel 안 보냄)."""
         p = self.p
-        if self.face_target is None or not p['set_initial_pose']:
+        if self.start is None or not p['set_initial_pose']:
             return self.set_state('START_FACE')     # 초기 위치를 안 보냄 → 지금 AMCL 위치 그대로
         if self.loc_at is None:
             self.loc_at = now
-        x, y, yaw = self.start_pose()
+        x, y, yaw = self.start
         if self.pose_sent is None:
             if self.pose_pub.get_subscription_count() == 0:     # AMCL이 아직 initialpose를 구독하지 않음
                 self.dbg['reason'] = 'localize_wait_amcl'
@@ -502,13 +523,13 @@ class VisitorFollower(Node):
         pose = self.lookup(p['map_frame'], p['base_frame'])
         near = pose is not None and math.hypot(pose[0] - x, pose[1] - y) < p['localize_tolerance']
         if near and now - self.pose_sent > 1.0:     # AMCL이 새 위치로 map→odom을 낼 시간
-            self.get_logger().info('초기 위치 잡힘 → 출발 방향 보기')
+            self.get_logger().info('초기 위치 잡힘 → 그 자리에서 바라볼 곳(face_zone) 쪽으로 회전')
             return self.set_state('START_FACE')
         if now - self.loc_at > p['localize_timeout']:
             if pose is None:
                 return self.end_tour('READY', 'no_localization')
             self.get_logger().warn(f'map 위치가 출발 지점에서 {math.hypot(pose[0] - x, pose[1] - y):.2f} m '
-                                   '떨어져 있음 (AMCL 확인) → 그래도 출발 방향 보기')
+                                   '떨어져 있음 (AMCL 확인) → 그래도 바라볼 곳 쪽으로 회전')
             self.set_state('START_FACE')
 
     # ---------- 관람 시작 (start_tour 액션) ----------

@@ -6,7 +6,8 @@
 #            → yaw_deg 180 (map 기준, 0° = +x 오른쪽, 180° = 방 안쪽)
 #
 # 참고: 두 위치 모두 출구(종료) 구역(artworks.yaml exit, 직사각형 y 1.36~1.91) 밖이다.
-#       visitor_follower는 시작할 때 undock 위에 있으면 yaw_deg로 돌아선다 (이미 180°면 안 돎).
+#       visitor_follower·arti_bringup localization.launch.py는 undock을 AMCL 초기 위치로 쓴다.
+#       시작 때 바라보는 곳은 여기가 아니라 artworks.yaml의 키오스크 (visitor_follower face_zone).
 
 robots:
   /robot1:
