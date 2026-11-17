@@ -9,6 +9,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+arti_venv/
 
 # 로컬 전용 설정 (env.bash.example을 복사해서 사용)
 env.bash

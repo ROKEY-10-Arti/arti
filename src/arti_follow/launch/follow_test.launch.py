@@ -1,4 +1,4 @@
-"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + RViz + 자세한 로그 저장.
+"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + 자세한 로그 저장.
 
     ros2 launch arti_follow follow_test.launch.py
     → 인식 창에서 따라갈 사람을 마우스로 클릭하면 로봇이 따라간다
@@ -9,7 +9,6 @@
     test:=false              진단 로그·파일 저장 끄기
     bag:=false               test일 때 ros2 bag 녹화 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
-    rviz:=true               RViz도 띄움 (기본은 인식 창 하나만 보임)
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -18,7 +17,6 @@
     multi_tracker_node (person_tracker)       YOLO 인식 + LiDAR → <ns>/target_person/point_map
                                               인식 창: 사람 박스 + 로봇까지 거리(m) (타겟 초록, '~'는 LiDAR 없이 박스 크기로 추정)
     visitor_follower                          좌표 → <ns>/cmd_vel (화면 없음, 로그만)
-    rviz2 (rviz:=true일 때만)                 웹캠·지도·LiDAR·인식 좌표·추종 판단 (rviz/follow_test.rviz)
 인식 노드는 네임스페이스를 붙여 띄운다. 안 붙이면 설정 파일을 못 찾아 네임스페이스 없는 토픽을 구독해서
 영상·scan을 못 받는다 (인식 창이 까맣게 나옴).
 
@@ -33,7 +31,6 @@
 import datetime
 import os
 import subprocess
-import tempfile
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
@@ -51,7 +48,7 @@ BAG_TOPICS = [
     'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
-    'cmd_vel', 'follow/state', 'follow/enable', 'follow/debug',  # visitor_follower 입출력
+    'cmd_vel', 'follow/state', 'follow/enable',                  # visitor_follower 입출력
 ]
 
 
@@ -90,7 +87,7 @@ def make_nodes(context):
         raise RuntimeError('namespace가 비었음 → 저장소 폴더 안에서 실행($ARTI_ROBOT_NS)하거나 namespace:=/robot1')
     test = arg('test').lower() == 'true'
     drive = arg('drive').lower() == 'true'
-    params = {'start_enabled': drive, 'debug_viz': True}
+    params = {'start_enabled': drive}
     env, actions = {}, []
 
     if test:
@@ -120,17 +117,6 @@ def make_nodes(context):
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
         parameters=[params], additional_env=env))
 
-    if arg('rviz').lower() == 'true':
-        share = get_package_share_directory('arti_follow')
-        with open(os.path.join(share, 'rviz', 'follow_test.rviz'), encoding='utf-8') as f:
-            cfg = f.read().replace('<ns>', ns)
-        path = os.path.join(tempfile.gettempdir(), 'arti_follow_test%s.rviz' % ns.replace('/', '_'))
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(cfg)
-        # tf는 네임스페이스 안(/robot1/tf)에 있으므로 RViz가 그쪽을 보게 바꿔 준다
-        actions.append(Node(
-            package='rviz2', executable='rviz2', arguments=['-d', path], output='log',
-            remappings=[('/tf', ns + '/tf'), ('/tf_static', ns + '/tf_static')]))
     return actions
 
 
@@ -147,7 +133,6 @@ def generate_launch_description():
                               description='test일 때 ros2 bag으로 BAG_TOPICS 녹화 (카메라 영상 제외)'),
         DeclareLaunchArgument('tracker', default_value='true',
                               description='사람 인식 모듈(person_tracker)도 같이 띄우기'),
-        DeclareLaunchArgument('rviz', default_value='false', description='RViz도 띄우기 (기본은 인식 창만)'),
         DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow',
                               description='테스트 로그를 저장할 폴더'),
         OpaqueFunction(function=make_nodes),

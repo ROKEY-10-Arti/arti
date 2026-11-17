@@ -7,7 +7,6 @@
       tf, tf_static               좌표 변환
       follow/enable (Bool)        false면 cmd_vel을 보내지 않음 (작품 설명 중, 도킹 등)
 출력  cmd_vel (TwistStamped), follow/state (String)
-      follow/debug (MarkerArray)  debug_viz일 때 RViz 확인용 (launch/follow_test.launch.py)
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       diag_csv를 주면 제어 주기마다 한 줄씩 CSV로 저장 (launch/follow_test.launch.py)
 
@@ -31,7 +30,7 @@ import signal
 import time
 
 import cv2
-from geometry_msgs.msg import Point, PointStamped, TwistStamped
+from geometry_msgs.msg import PointStamped, TwistStamped
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -39,10 +38,9 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, ColorRGBA, String
+from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
-from visualization_msgs.msg import Marker, MarkerArray
 
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link',
@@ -56,7 +54,7 @@ PARAMS = {
     'kf_max_rejects': 5,            # 연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 필터를 새로 시작
     'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
     'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
-    'lost_timeout': 1.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
+    'lost_timeout': 3.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
     'search_time': 10.0,            # 이동·회전 탐색 시간 (플로우차트 10초) [s]
     'search_move_time': 4.0,        # 그중 최종 좌표로 이동하는 데 쓰는 최대 시간 → 남은 시간은 회전 [s]
     'wait_time': 10.0,              # 그다음 정지 대기 (플로우차트 10초) [s]
@@ -80,7 +78,6 @@ PARAMS = {
     'floor_min_points': 3,          # 10 cm 칸에 점이 이만큼 모여야 물체 (흩어진 잡음 제거)
     'depth_keep': 1.0,              # depth 장애물을 이 시간 동안 기억 [s]
     'start_enabled': True,          # 시작할 때 cmd_vel을 보낼지 (false면 follow/enable true가 올 때까지 계산만)
-    'debug_viz': False,             # follow/debug(MarkerArray)로 판단 과정을 RViz에 보여줌
     'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
     'diag_csv': '',                 # 제어 주기마다 한 줄씩 저장할 CSV 경로 ('' = 저장 안 함)
@@ -172,7 +169,7 @@ class VisitorFollower(Node):
         self.floor_pts, self.floor_time = np.zeros((0, 2)), -1e9
         self.cam_k = self.cam_tf = None
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
-        self.dbg = {}                               # 이번 주기의 판단 과정 (debug_viz, diag)
+        self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
         self.diag = Diag() if self.p['diag'] or self.p['diag_csv'] else None
         self.arrive, self.last_tick, self.last_cmd = {}, None, None
         self.gap_avg, self.last_reason = {}, None    # 토픽별 평소 수신 간격, 지난 주기 이유 (diag_events)
@@ -200,7 +197,6 @@ class VisitorFollower(Node):
         sub(Bool, 'follow/enable', self.on_enable, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
-        self.dbg_pub = self.create_publisher(MarkerArray, 'follow/debug', 10) if self.p['debug_viz'] else None
         self.set_state('IDLE')
         self.create_timer(self.p['control_period'], self.control)
         if self.diag is not None and self.p['diag']:
@@ -297,8 +293,6 @@ class VisitorFollower(Node):
         t0 = time.monotonic()
         self.dbg = {}
         self.step()
-        if self.dbg_pub is not None:
-            self.publish_debug()
         if self.diag is not None:
             self.record(t0)
 
@@ -326,7 +320,7 @@ class VisitorFollower(Node):
                 self.holding = False
             if not self.holding:
                 goal = ahead - to / d * p['target_distance']
-                self.dbg['goal'], self.dbg['reason'] = goal, 'follow'
+                self.dbg['reason'] = 'follow'
                 return self.drive(*self.dwa(pose, goal, ahead))
             self.dbg['reason'] = 'hold'             # 0.85 m 안 → 서서 바라봄
             turn = wrap(math.atan2(*(person - here)[::-1]) - pose[2])        # 충분히 가까움 → 감속해 서서 바라보기
@@ -349,7 +343,7 @@ class VisitorFollower(Node):
         if t < p['search_time']:
             self.set_state('SEARCH')
             if self.spin_at is None and np.linalg.norm(last - here) > 0.5 and t < p['search_move_time']:
-                self.dbg['goal'], self.dbg['reason'] = last, 'search_move'
+                self.dbg['reason'] = 'search_move'
                 return self.drive(*self.dwa(pose, last, last))  # 최종 좌표로 이동
             if self.spin_at is None:
                 self.spin_at = now                  # 도착(또는 이동 시간 끝) → 남은 시간 안에 한 바퀴 (가속분 5 % 여유)
@@ -389,7 +383,6 @@ class VisitorFollower(Node):
         # 여유를 지키는 경로, 또는 이미 붙어 있을 때 더 가까워지지 않는 경로(빠져나오기). 로봇 반지름 안은 금지
         r = p['robot_radius']
         safe = (clear > r + p['safety_margin']) | ((clear > r) & (clear >= here_clear - 0.005))
-        self.dbg['cands'] = (xs, ys, safe)
         if not safe.any():                          # 막힘 → 제자리에서 대상 쪽으로
             self.dbg['blocked'] = True
             turn = wrap(math.atan2(face[1] - y0, face[0] - x0) - th0)
@@ -406,7 +399,6 @@ class VisitorFollower(Node):
             cost += p['w_heading'] * np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))
         cost[~safe] = np.inf
         i = int(np.argmin(cost))
-        self.dbg['path'] = np.stack([xs[i], ys[i]], 1)
         return float(V[i]), float(W[i])
 
     def field(self, goal, here, obs):
@@ -476,58 +468,6 @@ class VisitorFollower(Node):
             if self.last_cmd is not None:
                 self.diag.add('cmd_vel.gap', t - self.last_cmd)
             self.last_cmd = t
-
-    def publish_debug(self):
-        """RViz 확인용 MarkerArray (odom). 이번 주기에 없는 항목은 지운다.
-
-        초록 공 = 칼만 필터로 추정한 관람객, 초록 원 = 유지 거리(0.8 m), 노란 공 = 로봇이 가려는 목표,
-        회색/빨간 선 = DWA 후보 (안전/충돌), 파란 굵은 선 = 고른 경로, 빨간 점 = depth 바닥 물체, 글자 = 상태
-        """
-        d, stamp, frame = self.dbg, self.get_clock().now().to_msg(), self.p['odom_frame']
-
-        def marker(i, kind, rgba, scale, pts=None, pos=None, z=0.05):
-            m = Marker()
-            m.header.frame_id, m.header.stamp = frame, stamp
-            m.ns, m.id, m.type = 'follow', i, kind
-            m.pose.orientation.w = 1.0
-            if pts is None and pos is None:
-                m.action = Marker.DELETE
-                return m
-            m.scale.x = m.scale.y = m.scale.z = scale
-            m.color = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
-            if pos is not None:
-                m.pose.position.x, m.pose.position.y, m.pose.position.z = float(pos[0]), float(pos[1]), z
-            if pts is not None:
-                m.points = [Point(x=float(x), y=float(y), z=z) for x, y in pts]
-            return m
-
-        person, goal = d.get('person'), d.get('goal')
-        ring = None
-        if person is not None:
-            a = np.linspace(0, 2 * np.pi, 37)
-            ring = person + self.p['target_distance'] * np.stack([np.cos(a), np.sin(a)], 1)
-        floor = self.floor_pts if self.now() - self.floor_time < self.p['depth_keep'] else []
-        ms = [
-            marker(0, Marker.SPHERE, (0.1, 0.9, 0.2, 0.9), 0.3, pos=person, z=0.15),
-            marker(1, Marker.LINE_STRIP, (0.1, 0.9, 0.2, 0.6), 0.02, pts=ring),
-            marker(2, Marker.SPHERE, (1.0, 0.85, 0.0, 0.9), 0.15, pos=goal, z=0.1),
-            marker(3, Marker.LINE_STRIP, (0.2, 0.5, 1.0, 1.0), 0.04, pts=d.get('path')),
-            marker(4, Marker.POINTS, (1.0, 0.1, 0.1, 1.0), 0.05, pts=floor if len(floor) else None),
-            marker(5, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0, 1.0), 0.2,
-                   pos=d.get('here'), z=0.6),
-        ]
-        ms[5].text = self.state or ''
-        cands = marker(6, Marker.LINE_LIST, (1.0, 1.0, 1.0, 1.0), 0.005)
-        if 'cands' in d:                            # 후보마다 선분들, 안전하면 회색 위험하면 빨강
-            xs, ys, safe = d['cands']
-            cands = marker(6, Marker.LINE_LIST, (1.0, 1.0, 1.0, 1.0), 0.005, pts=[])
-            grey, red = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.4), ColorRGBA(r=1.0, g=0.2, b=0.2, a=0.4)
-            for x, y, ok in zip(xs, ys, safe):
-                seg = np.repeat(np.stack([x, y], 1), 2, 0)[1:-1]     # 0-1, 1-2, 2-3 ... 쌍
-                cands.points += [Point(x=float(a), y=float(b), z=0.02) for a, b in seg]
-                cands.colors += [grey if ok else red] * len(seg)
-        ms.append(cands)
-        self.dbg_pub.publish(MarkerArray(markers=ms))
 
     # ---------- 진단 (끊김 원인 찾기) ----------
 
