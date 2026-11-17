@@ -12,7 +12,10 @@ with warnings.catch_warnings():
     )
 
 package_name = 'person_tracker'
-model_files = [f for f in glob.glob('models/*.pt') if os.path.isfile(f)]
+model_files = [
+    f for f in (glob.glob('models/*.pt') + glob.glob('models/*.task'))
+    if os.path.isfile(f)
+]
 launch_files = [f for f in glob.glob('launch/*.launch.py') if os.path.isfile(f)]
 config_files = [f for f in glob.glob('config/*.yaml') if os.path.isfile(f)]
 
@@ -44,6 +47,7 @@ setup(
             'bbox_tracker_node = person_tracker.tracker_node:main',
             'seg_tracker_node = person_tracker.seg_tracker_node:main',
             'multi_tracker_node = person_tracker.multi_tracker_node:main',
+            'gesture_test_node = person_tracker.gesture_test_node:main',
             'camera_pub = person_tracker.camera_publisher_node:main',
             'top_cam_tf = person_tracker.top_cam_tf_node:main',
             'init_pose = person_tracker.init_pose_node:main',

@@ -13,6 +13,7 @@ def bootstrap_venv():
         candidates.append(os.environ['VIRTUAL_ENV'])
 
     candidates.extend([
+        os.path.expanduser('~/venvs/arti_venv'),
         os.path.expanduser('~/venvs/rokey_venv'),
         os.path.expanduser('~/venv/rokey_venv'),
         os.path.expanduser('~/.venv'),

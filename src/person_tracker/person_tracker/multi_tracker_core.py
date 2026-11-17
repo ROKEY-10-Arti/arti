@@ -315,20 +315,7 @@ class MultiModelTrackerCore:
             self.recent_bank = bank.copy()
             person.visible_parts = bank.visible_parts
 
-    def select_target_by_point(self, x: int, y: int) -> Optional[int]:
-        for person in self.last_detections:
-            x1, y1, x2, y2 = person.bbox
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                self.target_id = person.track_id
-                self.last_target_bbox = person.bbox
-                self.pending_tracker_rebind = False
-                self.last_target_world_xy = None
-                self.last_target_world_frame = ''
-                self.last_target_seen_time = 0.0
-                if self.last_frame is not None:
-                    self._lock_target_bank(self.last_frame, person)
-                return self.target_id
-
+    def _clear_target(self):
         self.target_id = None
         self.anchor_bank = None
         self.recent_bank = None
@@ -337,6 +324,36 @@ class MultiModelTrackerCore:
         self.last_target_world_xy = None
         self.last_target_world_frame = ''
         self.last_target_seen_time = 0.0
+
+    def _activate_target(self, person: UnifiedTrackedPerson) -> int:
+        self.target_id = person.track_id
+        self.last_target_bbox = person.bbox
+        self.pending_tracker_rebind = False
+        self.last_target_world_xy = None
+        self.last_target_world_frame = ''
+        self.last_target_seen_time = 0.0
+        if self.last_frame is not None:
+            self._lock_target_bank(self.last_frame, person)
+        return self.target_id
+
+    def select_target_by_id(self, track_id: Optional[int]) -> Optional[int]:
+        """Select and lock a tracked person by track_id, or clear target when None."""
+        if track_id is None:
+            self._clear_target()
+            return None
+        for person in self.last_detections:
+            if person.track_id == track_id:
+                return self._activate_target(person)
+        self._clear_target()
+        return None
+
+    def select_target_by_point(self, x: int, y: int) -> Optional[int]:
+        for person in self.last_detections:
+            x1, y1, x2, y2 = person.bbox
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return self._activate_target(person)
+
+        self._clear_target()
         return None
 
     def process_frame(

@@ -7,8 +7,10 @@
 #
 # 패키지를 추가할 때는 버전을 고정한다.
 
-# --- 사람 인식 (arti_follow: visitor_perception) ---
+# --- 사람 인식 (person_tracker / arti_follow) ---
 ultralytics==8.4.208      # rokey_venv와 같은 버전 (torch, opencv-python 함께 설치됨)
+mediapipe==1.2.3          # 손 제스처 타겟 지정 (HandLandmarker)
+opencv-contrib-python==4.11.0.86  # mediapipe 의존성 (5.x는 numpy>=2를 끌어오므로 4.11 고정)
 lap==0.5.12               # person_tracker 추적 매칭 (src/person_tracker/requirements.txt)
 
 # --- ROS 호환 ---
