@@ -56,9 +56,9 @@ PARAMS = {
     'kf_max_rejects': 5,            # 연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 필터를 새로 시작
     'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
     'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
-    'lost_timeout': 1.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
+    'lost_timeout': 3.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
     'search_time': 10.0,            # 이동·회전 탐색 시간 (플로우차트 10초) [s]
-    'search_move_time': 4.0,        # 그중 최종 좌표로 이동하는 데 쓰는 최대 시간 → 남은 시간은 회전 [s]
+    'search_move_time': 100.0,        # 그중 최종 좌표로 이동하는 데 쓰는 최대 시간 → 남은 시간은 회전 [s]
     'wait_time': 10.0,              # 그다음 정지 대기 (플로우차트 10초) [s]
     'search_spin': 0.6,             # 회전 탐색 최소 속도. 남은 시간에 한 바퀴가 안 되면 더 빨리 돎 [rad/s]
     'max_linear': 0.3, 'max_angular': 1.5,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
