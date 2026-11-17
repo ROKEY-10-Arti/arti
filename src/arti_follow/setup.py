@@ -22,16 +22,9 @@ setup(
     maintainer_email='arti@todo.invalid',
     description='Arti user following: register, track, keep distance, lost handling',
     license='Apache-2.0',
-    extras_require={
-        'test': [
-            'pytest',
-        ],
-    },
     entry_points={
         'console_scripts': [
             'visitor_follower = arti_follow.visitor_follower:main',
-            'dwa_follower = arti_follow.dwa_follower:main',
-            'nav2_follower = arti_follow.nav2_follower:main',
             'artwork_zone = arti_follow.artwork_zone:main',
             'zone_viz = arti_follow.zone_viz:main',
         ],

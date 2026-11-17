@@ -10,7 +10,7 @@
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false / bag:=false 진단 로그·bag 녹화 끄기
     tracker:=false           인식 모듈은 따로 띄울 때
-    tracker_node:=false      카메라만 띄우고 인식 노드는 뺄 때 (tour_no_tracker.launch.py)
+    tracker_node:=false      카메라만 띄우고 인식 노드는 뺄 때 (인식은 다른 PC·bag 재생에서)
     video_source:=0          웹캠 번호 또는 DroidCam URL
     audio:=false             음성 노드는 따로 띄울 때 (구역 판정만)
     player_cmd:="pw-play --volume 0.6"   재생 명령 (출력 장치·음량)
