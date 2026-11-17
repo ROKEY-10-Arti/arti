@@ -63,13 +63,12 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
   → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
-  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`, `bag:=false`, `tracker:=camera|none`
-- 테스트 로그(기본 켬): 2초마다 데이터 흐름 요약(토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유)과
-  끊긴 순간마다 `[늦음]`·`[제어 밀림]`·`[이유]`·`[시간]` 로그. `~/arti_logs/follow/<날짜_시각>/`에 노드 로그,
-  `follow_timing.csv`(0.1 s마다 한 줄), `run_info.txt`(인자, PC NTP 상태) 저장. 영상은 저장하지 않는다
-- ros2 bag(기본 켬, `bag:=false`로 끔): 같은 폴더 `bag/`에 mcap으로 녹화. 토픽은 launch의 `BAG_TOPICS`
-  (scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*). **카메라 영상·depth는 넣지 않는다**(개인정보, 팀 합의 전).
-  다시 보기: `ros2 bag info <폴더>/bag`, `ros2 bag play <폴더>/bag` + RViz. Discovery Server가 안 떠 있으면 0개로 녹화된다
+  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
+- 테스트 저장(`test:=true`, 기본): **ros2 bag 하나만** `~/arti_bags/follow/<날짜_시각>/`에 mcap으로 녹화. 로그·CSV 파일은 따로 만들지 않는다.
+  토픽은 launch의 `BAG_TOPICS`(scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*, guide_message 등) + `/rosout`(노드 로그 메시지).
+  **카메라 영상·depth는 넣지 않는다**(개인정보, 팀 합의 전).
+  다시 보기: `ros2 bag info <폴더>`, `ros2 bag play <폴더>` + RViz, 로그는 재생하면서 `ros2 topic echo /rosout`. Discovery Server가 안 떠 있으면 0개로 녹화된다
+- 끊김 원인을 화면 로그로 볼 때만: `ros2 run arti_follow visitor_follower --ros-args -p diag:=true -p diag_events:=true`
 - **관람 안내 실행 (추종 + 작품 설명)**: `ros2 launch arti_follow tour.launch.py`
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).
   옵션은 follow_test와 같고 `audio:=false`(음성 노드 따로), `player_cmd:=`, `zones_file:=` 추가.

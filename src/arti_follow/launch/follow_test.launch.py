@@ -1,4 +1,4 @@
-"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + 자세한 로그 저장.
+"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + ros2 bag 녹화.
 
     ros2 launch arti_follow follow_test.launch.py
     → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
@@ -7,8 +7,8 @@
 
 옵션
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
-    test:=false              진단 로그·CSV 저장 끄기
-    bag:=false               ros2 bag 녹화 끄기 (test와 따로. 둘 다 log_dir/<날짜_시각>/에 저장)
+    test:=false              ros2 bag 녹화 끄기
+    bag_dir:=<폴더>          bag 저장 폴더 (기본 ~/arti_bags/follow, 그 아래 <날짜_시각>/)
     tracker:=camera          카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌 (인식은 다른 PC·bag 재생에서)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
     auto_start:=true         액션 없이 켜자마자 관람 시작
@@ -23,13 +23,9 @@
 인식 노드는 네임스페이스를 붙여 띄운다. 안 붙이면 설정 파일을 못 찾아 네임스페이스 없는 토픽을 구독해서
 영상·scan을 못 받는다 (인식 창이 까맣게 나옴).
 
-저장 (test·bag, 기본 켬)  log_dir/<날짜_시각>/  — 영상은 저장하지 않음, 좌표·속도·시간만
-    python3_*.log         (test) 노드 로그. 2초마다 토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유 요약
-                          + 끊긴 순간마다 [늦음] [제어 밀림] [이유] [시간]
-    follow_timing.csv     (test) 제어 주기(0.1 s)마다 한 줄
-    run_info.txt          실행 인자, PC 시간 동기화(NTP) 상태
-    bag/                  (bag) ros2 bag (mcap). BAG_TOPICS만 녹화 — 카메라 영상·depth는 빼고 좌표·거리·명령만
-                          다시 보기: ros2 bag info <run_dir>/bag,  ros2 bag play <run_dir>/bag
+저장 (test:=true, 기본)  bag_dir/<날짜_시각>/  ros2 bag (mcap) 하나만. 로그·CSV 파일은 따로 만들지 않는다
+    녹화: BAG_TOPICS + /rosout(노드 로그 메시지). 관람객 영상은 저장하지 않음 — 카메라 영상·depth는 빼고 좌표·거리·명령만
+    다시 보기: ros2 bag info <폴더>,  ros2 bag play <폴더> + RViz,  노드 로그: ros2 bag play <폴더> 중 ros2 topic echo /rosout
 """
 import datetime
 import os
@@ -97,40 +93,30 @@ def make_nodes(context):
     if ns == '/':
         raise RuntimeError('namespace가 비었음 → 저장소 폴더 안에서 실행($ARTI_ROBOT_NS)하거나 namespace:=/robot1')
     test = arg('test').lower() == 'true'
-    bag = arg('bag').lower() == 'true'
     drive = arg('drive').lower() == 'true'
     tracker = arg('tracker').lower()
     if tracker not in TRACKER_MODES:
         raise RuntimeError(f'tracker:={tracker} → {" | ".join(TRACKER_MODES)} 중 하나')
     params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true'}
-    env, actions = {}, []
+    actions = []
 
-    if test or bag:                                 # 이번 실행 폴더
-        run_dir = os.path.join(os.path.expanduser(arg('log_dir')),
-                               datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-        os.makedirs(run_dir, exist_ok=True)
-        sync = pc_time_sync()
-        with open(os.path.join(run_dir, 'run_info.txt'), 'w', encoding='utf-8') as f:
-            f.write(f'namespace={ns}\ndrive={drive}\ntracker={tracker}\ntest={test}\nbag={bag}\n'
-                    f'PC 시간 동기화(NTP): {sync}\n')
-        actions.append(LogInfo(msg=f'[테스트] 주행 {"켬" if drive else "끔"}, 진단 로그 {"켬" if test else "끔"}, '
-                                   f'bag {"켬" if bag else "끔"}, PC 시간 동기화 {sync}, 저장 위치: {run_dir}'))
-    if test:
-        params.update({'diag': True, 'diag_events': True,
-                       'diag_csv': os.path.join(run_dir, 'follow_timing.csv')})
-        env['ROS_LOG_DIR'] = run_dir                # 노드 로그 파일이 여기에 생김
-    if bag:
+    if test:                                        # ros2 bag 녹화 (폴더는 ros2 bag이 만든다)
+        bag_dir = os.path.expanduser(arg('bag_dir'))
+        os.makedirs(bag_dir, exist_ok=True)
+        out = os.path.join(bag_dir, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
         actions.append(ExecuteProcess(
-            cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', os.path.join(run_dir, 'bag'),
-                 '--topics', *[f'{ns}/{t}' for t in BAG_TOPICS]],
+            cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', out,
+                 '--topics', '/rosout', *[f'{ns}/{t}' for t in BAG_TOPICS]],
             output='log'))
+        actions.append(LogInfo(msg=f'[테스트] 주행 {"켬" if drive else "끔"}, PC 시간 동기화 {pc_time_sync()}, '
+                                   f'bag 저장: {out}'))
 
     if tracker != 'none':
         actions += tracker_actions(ns, with_node=tracker == 'all')
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
-        parameters=[params], additional_env=env))
+        parameters=[params]))
 
     return actions
 
@@ -141,14 +127,12 @@ def generate_launch_description():
             'ARTI_ROBOT_NS', default_value=''), description='로봇 네임스페이스 (기본: $ARTI_ROBOT_NS)'),
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true',
-                              description='진단 로그·CSV를 log_dir에 저장'),
-        DeclareLaunchArgument('bag', default_value='true',
-                              description='ros2 bag으로 BAG_TOPICS를 log_dir에 녹화 (카메라 영상 제외)'),
+                              description='ros2 bag으로 BAG_TOPICS + /rosout을 bag_dir에 녹화 (카메라 영상 제외)'),
         DeclareLaunchArgument('tracker', default_value='all', choices=list(TRACKER_MODES),
                               description='all: 카메라+인식 노드, camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
                               description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
-        DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow',
-                              description='테스트 로그를 저장할 폴더'),
+        DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
+                              description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),
     ])
