@@ -4,6 +4,7 @@
 - 패키지: `src/arti_follow` (주행), `src/person_tracker` (사람 인식) (인터페이스는 `src/common/arti_interfaces`)
 - 일정 (노션 간트): 11/16 ~ 11/18 코딩 → 11/19 ~ 11/20 테스트
 - **작업 목록: [tasks.md](tasks.md)** (노션 T01~T46)
+- **visitor_follower 동작 정리: [visitor_follower.md](visitor_follower.md)** (켜면 무슨 일이 일어나는지, 상태·feedback·토픽)
 - 관련 요구사항: [common/requirements.md](../common/requirements.md)
 - 원본 플로우차트: 노션 `tracking_pc_ver3.drawio`
 
