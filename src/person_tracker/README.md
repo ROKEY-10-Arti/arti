@@ -129,6 +129,7 @@ cd ~/turtlebot4_ws && colcon build --symlink-install --packages-select person_tr
 | `/robot4/target_person/point_map` | `geometry_msgs/PointStamped` | 저장된 맵(`map`) 기준 타겟 3D 좌표 (m) |
 | `/robot4/target_person/marker` | `visualization_msgs/Marker` | RViz2 시각화용 원기둥 마커 |
 | `/target_person/offset` | `geometry_msgs/Point` | 영상 화면 중심 대비 정규화 오프셋 |
+| `/robot4/target_person/register_front` (구독) | `std_msgs/Empty` | 받으면 로봇 정면 ±`register_front_angle_deg`(30°), `register_max_dist`(2.5 m) 안에서 가장 가까운 사람을 타겟으로 등록 (없으면 해제). `visitor_follower`가 관람객을 기다릴 때 보냄 |
 
 ### UI 단축키 (`multi_tracker_node`)
 - **마우스 좌클릭**: 사람 클릭 시 타겟 지정 / 빈 공간 클릭 시 타겟 해제

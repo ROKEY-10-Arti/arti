@@ -76,7 +76,7 @@ flowchart TD
 ```
 
 - **함수 바로 이동 (등록 모듈 순서)**:
-  - 입력·탐지: [`_compressed_cb()`](./gesture_test_node.py#L317) / [`_raw_cb()`](./gesture_test_node.py#L326) / [`_poll_local_frame()`](./gesture_test_node.py#L310) → [`handle_frame()`](./gesture_test_node.py#L550) → [`process_frame()`](./multi_tracker_core.py#L438)
+  - 입력·탐지: [`_compressed_cb()`](./gesture_test_node.py#L320) / [`_raw_cb()`](./gesture_test_node.py#L329) / [`_poll_local_frame()`](./gesture_test_node.py#L313) → [`handle_frame()`](./gesture_test_node.py#L556) → [`process_frame()`](./multi_tracker_core.py#L438)
   - 손 ROI·분류: [`build_person_hand_rois()`](./gesture_core.py#L514) ([`_clamp_square_roi()`](./gesture_core.py#L497) / [`build_person_gesture_roi()`](./gesture_core.py#L452)) → [`detect_in_roi()`](./gesture_core.py#L168) → [`classify_hand_gesture()`](./gesture_core.py#L88)
   - 얼굴 제외·손목 1:1 매칭: [`find_best_hand_owner()`](./gesture_core.py#L676) → [`match_hand_to_person_wrist()`](./gesture_core.py#L610) ([`is_false_face_detection()`](./gesture_core.py#L561)) → [`pick_primary_observation()`](./gesture_core.py#L239)
   - 상태머신·잠금: [`MultiTargetGestureManager.update()`](./gesture_core.py#L422) → [`FistOpenStateMachine.update()`](./gesture_core.py#L299) → [`select_target_by_id()`](./multi_tracker_core.py#L418) → [`_activate_target()`](./multi_tracker_core.py#L401) → [`_lock_target_bank()`](./multi_tracker_core.py#L377)
@@ -113,13 +113,13 @@ flowchart TD
 - **함수 바로 이동 (인식 모듈 순서)**:
   - 외형 추출·유사도: [`PoseKeypointFeatureExtractor.extract()`](./feature_extractors.py#L379) ([`BBoxFeatureExtractor.extract()`](./feature_extractors.py#L256)) → [`calc_hsv_hist()`](./feature_extractors.py#L60) → [`PartFeatureBank`](./feature_extractors.py#L30) → [`compute_dual_similarity_detail()`](./feature_extractors.py#L194) → [`compare_banks_detail()`](./feature_extractors.py#L125) / [`hist_sim()`](./feature_extractors.py#L83)
   - Adaptive ReID 상태머신: [`MODE_ADAPTIVE`](./multi_tracker_core.py#L640) (`COEX` [`L641`](./multi_tracker_core.py#L641) · `SAFE` [`L674`](./multi_tracker_core.py#L674) · `SEARCH` [`L704`](./multi_tracker_core.py#L704) · `GUARD` [`L794`](./multi_tracker_core.py#L794)), [`update_recent_bank()`](./feature_extractors.py#L236), [`_apply_exclude_boxes()`](./feature_extractors.py#L91), [`_is_crowded_near_target()`](./multi_tracker_core.py#L294), [`_compute_spatial_score()`](./multi_tracker_core.py#L311), [`_score_candidate()`](./multi_tracker_core.py#L364)
-  - 센서 수신·좌표 변환·발행: [`LidarPersonLocalizer.__init__()`](./lidar_person_localizer.py#L101), [`_on_scan()`](./lidar_person_localizer.py#L259), [`_on_tf_msg()`](./lidar_person_localizer.py#L251), [`_on_tf_static_msg()`](./lidar_person_localizer.py#L255), [`_estimate_candidate_spatial()`](./gesture_test_node.py#L541) → [`localize_target()`](./lidar_person_localizer.py#L368) → [`_get_map_from_base_matrix()`](./lidar_person_localizer.py#L289) → [`_publish_target_outputs()`](./lidar_person_localizer.py#L495)
-  - 수동 제어·리셋: [`_on_mouse_click()`](./gesture_test_node.py#L355), [`_process_key()`](./gesture_test_node.py#L379), [`_reset_target()`](./gesture_test_node.py#L333)
+  - 센서 수신·좌표 변환·발행: [`LidarPersonLocalizer.__init__()`](./lidar_person_localizer.py#L101), [`_on_scan()`](./lidar_person_localizer.py#L259), [`_on_tf_msg()`](./lidar_person_localizer.py#L251), [`_on_tf_static_msg()`](./lidar_person_localizer.py#L255), [`_estimate_candidate_spatial()`](./gesture_test_node.py#L547) → [`localize_target()`](./lidar_person_localizer.py#L368) → [`_get_map_from_base_matrix()`](./lidar_person_localizer.py#L289) → [`_publish_target_outputs()`](./lidar_person_localizer.py#L495)
+  - 수동 제어·리셋: [`_on_mouse_click()`](./gesture_test_node.py#L361), [`_process_key()`](./gesture_test_node.py#L385), [`_reset_target()`](./gesture_test_node.py#L336), [`_on_tour_end()`](./gesture_test_node.py#L343)
 
 ---
 
 ### ③ 공통 디버그 시각화 (`ReID Monitor` & GUI)
-- [`ReIDDebugVisualizer.render()`](./reid_visualizer.py#L117) / [`_render_hsv_vector_patch()`](./reid_visualizer.py#L65) / [`_ensure_reid_window()`](./gesture_test_node.py#L225): 120f 유사도 시계열 그래프, 인원별 `Tot/U/M/L/F` 막대, `Anchor` / `Recent EMA` / `Compare` 304D 히트맵 및 `A-R Sim`·`EMA` 상태 렌더링 (기동 진입점: [`main()`](./gesture_test_node.py#L805), [`__init__()`](./gesture_test_node.py#L75))
+- [`ReIDDebugVisualizer.render()`](./reid_visualizer.py#L117) / [`_render_hsv_vector_patch()`](./reid_visualizer.py#L65) / [`_ensure_reid_window()`](./gesture_test_node.py#L228): 120f 유사도 시계열 그래프, 인원별 `Tot/U/M/L/F` 막대, `Anchor` / `Recent EMA` / `Compare` 304D 히트맵 및 `A-R Sim`·`EMA` 상태 렌더링 (기동 진입점: [`main()`](./gesture_test_node.py#L811), [`__init__()`](./gesture_test_node.py#L75))
 
 ---
 

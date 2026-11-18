@@ -23,9 +23,13 @@ def bootstrap_venv():
         if not os.path.isdir(venv_root):
             continue
         for site_dir in sorted(glob.glob(os.path.join(venv_root, 'lib', 'python3*', 'site-packages')), reverse=True):
-            if os.path.isdir(site_dir) and site_dir not in sys.path:
+            if not os.path.isdir(site_dir):
+                continue
+            # 이미 이 venv의 python으로 실행 중(sys.path에 있음)이면 그대로 쓴다.
+            # 다음 후보(rokey_venv 등)를 앞에 끼우면 numpy 2·opencv 5가 섞여 cv_bridge가 깨진다.
+            if site_dir not in sys.path:
                 sys.path.insert(0, site_dir)
-                return site_dir
+            return site_dir
     return None
 
 

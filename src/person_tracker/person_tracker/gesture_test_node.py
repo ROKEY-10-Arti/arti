@@ -42,7 +42,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 from person_tracker.gesture_core import (
     GESTURE_FIST,
@@ -173,6 +173,9 @@ class GestureTestNode(Node):
         self.last_status_str = 'IDLE'
 
         self.status_pub = self.create_publisher(String, 'gesture/status', 10)
+        # 관람 끝(visitor_follower) → 이 관람객 타겟·re-ID 특징을 지운다 (로봇 1대 = 관람객 1명, 개인정보).
+        # 다음 관람객은 다시 제스처로 등록. multi_tracker_node.on_tour_end와 같은 역할
+        self.create_subscription(Empty, 'arti/tour_end', self._on_tour_end, 10)
         self.localizer: Optional[LidarPersonLocalizer] = (
             LidarPersonLocalizer(self) if self.use_localizer else None
         )
@@ -338,6 +341,9 @@ class GestureTestNode(Node):
         self.reid_viz.reset()
         self.last_loc_result = None
         self.get_logger().info(reason)
+
+    def _on_tour_end(self, _msg):
+        self._reset_target('[관람 끝] 타겟과 re-ID 특징을 지웠습니다. 다음 관람객은 제스처로 등록')
 
     def _toggle_yolo_roi(self):
         self.use_yolo_roi = not self.use_yolo_roi
