@@ -1,0 +1,15 @@
+# 로봇별 도킹·언독 위치 (map 프레임, m) — T06. 로봇 2대 중 robot1만 사용.
+# 측정: 2026-11-17, 사용자가 RViz로 확인한 값.
+#
+#   dock   : 도크에 붙어 있을 때 로봇 위치 (충전). 방향은 안 잼 (오른쪽 벽의 도크를 봄)
+#   undock : 언독 직후 위치 (관람 시작·복귀 목표). Create 3 언독은 뒤로 나온 뒤 180° 돌아서 끝남
+#            → yaw_deg 180 (map 기준, 0° = +x 오른쪽, 180° = 방 안쪽)
+#
+# 참고: 두 위치 모두 출구(종료) 구역(artworks.yaml exit, 직사각형 y 1.36~1.91) 밖이다.
+#       visitor_follower·arti_bringup localization.launch.py는 undock을 AMCL 초기 위치로 쓴다.
+#       시작 때 바라보는 곳은 여기가 아니라 artworks.yaml의 키오스크 (visitor_follower face_zone).
+
+robots:
+  /robot1:
+    dock:   {x: -0.04, y: 0.7}
+    undock: {x: -0.5,  y: 0.7, yaw_deg: 180}

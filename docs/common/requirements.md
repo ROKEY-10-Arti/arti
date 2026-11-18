@@ -44,10 +44,10 @@
 
 ## 4. 하드웨어·네트워크 메모 (11.15 기준)
 
-- 카메라: TurtleBot 4 **위에 휴대폰을 올려 탑CAM으로 사용**한다. 깊이(Depth)는 OAK-D를 쓴다.
+- 카메라: TurtleBot 4 **위에 올린 노트북 웹캠을 탑CAM으로 사용**한다 (`video_source:=0`, 휴대폰 DroidCam URL도 가능). 깊이(Depth)는 OAK-D를 쓴다.
 - 카메라 위치를 TF로 등록했다. LiDAR와 합쳐 사람 위치를 map 좌표로 변환한다. 위치는 대체로 정확하지만 값이 튀는 노이즈가 있다 → 필터가 필요하다.
 - 네트워크 사용량(기본 TB4 토픽 + 휴대폰 카메라 + LiDAR): 총 8–9 MB/s. 휴대폰 카메라 2 MB/s 이내, 노트북 웹캠 500 KB/s 이내, LiDAR 4–6 MB/s로 추정. Nav2 등을 추가하면 다시 측정해야 한다.
-- 지도: `maps/rokey_map.{pgm,yaml}` (저장소 루트) (72 x 126 px, 0.05 m/px → 약 3.6 m x 6.3 m).
+- 지도: `maps/gallery.{pgm,yaml}` (저장소 루트) (66 x 121 px, 0.05 m/px → 약 3.3 m x 6.05 m).
 
 ## 5. 범위 밖 (MVP)
 

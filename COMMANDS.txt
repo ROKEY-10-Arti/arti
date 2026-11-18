@@ -1,6 +1,6 @@
 # arti 실행 명령 모음 — 한 줄씩 그대로 복사해서 터미널에 붙여넣기
 # (리눅스 터미널 붙여넣기: Ctrl+Shift+V)
-# 지도: maps/rokey_map.yaml (두 로봇 공용, 저장소 폴더 안에서는 $ARTI_MAP)
+# 지도: maps/gallery.yaml (두 로봇 공용, 저장소 폴더 안에서는 $ARTI_MAP)
 # follow 로봇 = /robot1
 
 
@@ -13,9 +13,9 @@ pb
 # ===== 1. robot1 주행 띄우기 (터미널 3개, 순서대로) =====
 
 # [터미널 1] localization — "Creating bond timer..." 나오면 다음
-ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot1 map:=$ARTI_MAP
+ros2 launch arti_bringup localization.launch.py namespace:=/robot1   # 시작 위치는 init_pose.yaml undock (자동)
 
-# [터미널 2] rviz — 상단 "2D Pose Estimate"로 로봇 초기 위치 찍기
+# [터미널 2] rviz — 위치가 어긋났을 때만 상단 "2D Pose Estimate"로 다시 찍기
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot1
 
 # [터미널 3] nav2 — 초기 위치 찍은 뒤 실행
@@ -62,6 +62,6 @@ ros2 topic list | grep robot1
 
 # ===== 5. robot4 (코스주행) — 필요할 때만 =====
 
-ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=$ARTI_MAP
+ros2 launch arti_bringup localization.launch.py namespace:=/robot4
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot4
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4

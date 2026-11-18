@@ -1,7 +1,7 @@
 # arti ROS 2 네트워크 설정 — .envrc가 env.bash 다음에 source 한다
 # 기준: 노션 "Multi Robot Custom Discovery Setup" CASE 1-3
-#   한 PC가 로봇 한 대를 맡고, PC끼리도 토픽을 주고받는다.
-#   Host PC가 discovery server(ID 0)를 직접 띄우고, Guest PC는 그 Host를 0번 칸에 등록한다.
+#   관제 PC(host)에 로봇 PC 2대(guest)가 붙는다. 로봇 PC는 각자 로봇 한 대를 맡는다.
+#   관제 PC가 discovery server(ID 0)를 직접 띄우고, Guest PC는 그 Host를 0번 칸에 등록한다.
 #   Host PC는 별도 터미널에서 scripts/run_discovery_server.sh 를 켜 두어야 한다.
 #
 # env.bash에서 받는 값

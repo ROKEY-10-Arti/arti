@@ -9,6 +9,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+arti_venv/
 
 # 로컬 전용 설정 (env.bash.example을 복사해서 사용)
 env.bash
@@ -24,3 +25,9 @@ env.bash
 rosbag2_*/
 *.pt
 *.onnx
+*.mcap
+*.db3
+bags/
+
+# 압축 파일 (소스는 풀어서 패키지 폴더로, 자료는 Drive·노션으로)
+*.zip

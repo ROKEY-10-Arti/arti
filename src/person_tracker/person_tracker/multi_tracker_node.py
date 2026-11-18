@@ -15,6 +15,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
+from std_msgs.msg import Empty
 from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
 
@@ -124,6 +125,8 @@ class MultiModelTrackerNode(Node):
             )
 
         self.target_pub = self.create_publisher(Point, '/target_person/offset', 10)
+        # 관람 끝(arti_follow visitor_follower) → 그 관람객의 타겟·re-ID 특징을 지운다 (개인정보: 세션 종료 즉시 폐기)
+        self.create_subscription(Empty, 'arti/tour_end', self.on_tour_end, 10)
         self.localizer = LidarPersonLocalizer(self)
         self.last_loc_result: Optional[TargetLocalizationResult] = None
         self.last_loc_log_time = 0.0
@@ -142,6 +145,11 @@ class MultiModelTrackerNode(Node):
             f'MultiModelTrackerNode 시작됨 | 토픽: {image_topic} | 모델: {self.tracker.current_model_name} | '
             f'모드: {MultiModelTrackerCore.MODE_NAMES[self.tracker.mode]} | 장치: {self.tracker.device}'
         )
+
+    def on_tour_end(self, _msg):
+        self.tracker.select_target_by_id(None)     # target_id, anchor_bank·recent_bank(re-ID 특징), 마지막 위치 삭제
+        self.last_loc_result = None
+        self.get_logger().info('[관람 끝] 타겟과 re-ID 특징을 지웠습니다.')
 
     def on_mouse_click(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN:

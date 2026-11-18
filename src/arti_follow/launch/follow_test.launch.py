@@ -1,15 +1,17 @@
-"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + RViz + 자세한 로그 저장.
+"""추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + ros2 bag 녹화.
 
     ros2 launch arti_follow follow_test.launch.py
-    → 인식 창에서 따라갈 사람을 마우스로 클릭하면 로봇이 따라간다
+    → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
+      인식 창에서 따라갈 사람을 마우스로 클릭하면 "인식되었습니다" 안내 후 따라간다
+      ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}" --feedback
 
 옵션
-    video_source:=0          노트북 웹캠 번호, 또는 휴대폰 DroidCam URL (http://<폰IP>:4747/video)
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
-    test:=false              진단 로그·파일 저장 끄기
-    bag:=false               test일 때 ros2 bag 녹화 끄기
-    tracker:=false           인식 모듈은 따로 띄울 때
-    rviz:=true               RViz도 띄움 (기본은 인식 창 하나만 보임)
+    test:=false              ros2 bag 녹화 끄기
+    bag_dir:=<폴더>          bag 저장 폴더 (기본 ~/arti_bags/follow, 그 아래 <날짜_시각>/)
+    tracker:=camera          카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌 (인식은 다른 PC·bag 재생에서)
+    tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
+    auto_start:=true         액션 없이 켜자마자 관람 시작
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -18,22 +20,16 @@
     multi_tracker_node (person_tracker)       YOLO 인식 + LiDAR → <ns>/target_person/point_map
                                               인식 창: 사람 박스 + 로봇까지 거리(m) (타겟 초록, '~'는 LiDAR 없이 박스 크기로 추정)
     visitor_follower                          좌표 → <ns>/cmd_vel (화면 없음, 로그만)
-    rviz2 (rviz:=true일 때만)                 웹캠·지도·LiDAR·인식 좌표·추종 판단 (rviz/follow_test.rviz)
 인식 노드는 네임스페이스를 붙여 띄운다. 안 붙이면 설정 파일을 못 찾아 네임스페이스 없는 토픽을 구독해서
 영상·scan을 못 받는다 (인식 창이 까맣게 나옴).
 
-테스트 로그 (test:=true, 기본)  log_dir/<날짜_시각>/  — 영상은 저장하지 않음, 좌표·속도·시간만
-    python3_*.log         노드 로그. 2초마다 토픽별 Hz·간격·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유 요약
-                          + 끊긴 순간마다 [늦음] [제어 밀림] [이유] [시간]
-    follow_timing.csv     제어 주기(0.1 s)마다 한 줄
-    run_info.txt          실행 인자, PC 시간 동기화(NTP) 상태
-    bag/                  ros2 bag (mcap). BAG_TOPICS만 녹화 — 카메라 영상·depth는 빼고 좌표·거리·명령만
-                          다시 보기: ros2 bag info <run_dir>/bag,  ros2 bag play <run_dir>/bag
+저장 (test:=true, 기본)  bag_dir/<날짜_시각>/  ros2 bag (mcap) 하나만. 로그·CSV 파일은 따로 만들지 않는다
+    녹화: BAG_TOPICS + /rosout(노드 로그 메시지). 관람객 영상은 저장하지 않음 — 카메라 영상·depth는 빼고 좌표·거리·명령만
+    다시 보기: ros2 bag info <폴더>,  ros2 bag play <폴더> + RViz,  노드 로그: ros2 bag play <폴더> 중 ros2 topic echo /rosout
 """
 import datetime
 import os
 import subprocess
-import tempfile
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
@@ -51,8 +47,13 @@ BAG_TOPICS = [
     'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
-    'cmd_vel', 'follow/state', 'follow/enable', 'follow/debug',  # visitor_follower 입출력
+    'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
+    'artwork_zone/state', 'arti/tour_end',                        # 작품 구역 (tour.launch.py), 관람 끝
 ]
+
+
+# tracker 인자: all = 카메라 + 인식 노드, camera = 카메라만, none = 둘 다 안 띄움
+TRACKER_MODES = ('all', 'camera', 'none')
 
 
 def pc_time_sync():
@@ -65,19 +66,22 @@ def pc_time_sync():
         return f'확인 실패 ({e})'
 
 
-def tracker_actions(ns, video_source):
-    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스)."""
+def tracker_actions(ns, with_node=True):
+    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스). with_node=False면 카메라만.
+    카메라(video_source)는 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0)."""
     try:
         share = get_package_share_directory('person_tracker')
     except PackageNotFoundError:
-        raise RuntimeError('person_tracker 패키지가 없음 → colcon build 하거나 tracker:=false') from None
+        raise RuntimeError('person_tracker 패키지가 없음 → colcon build 하거나 tracker:=none') from None
     camera = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'phone_camera.launch.py')),
-        launch_arguments={'namespace': ns, 'video_source': video_source}.items())
+        launch_arguments={'namespace': ns}.items())
     tracker = Node(package='person_tracker', executable='multi_tracker_node',
                    name='multi_person_tracker_node', namespace=ns, output='screen',
                    parameters=[{'show_info_window': False,      # 화면은 인식 영상 창 하나만
                                 'show_distance': True}])        # 박스마다 거리(m)
+    if not with_node:
+        return [camera]
     return [camera, TimerAction(period=2.0, actions=[tracker])]     # 카메라가 먼저 켜지게
 
 
@@ -90,47 +94,30 @@ def make_nodes(context):
         raise RuntimeError('namespace가 비었음 → 저장소 폴더 안에서 실행($ARTI_ROBOT_NS)하거나 namespace:=/robot1')
     test = arg('test').lower() == 'true'
     drive = arg('drive').lower() == 'true'
-    params = {'start_enabled': drive, 'debug_viz': True}
-    env, actions = {}, []
+    tracker = arg('tracker').lower()
+    if tracker not in TRACKER_MODES:
+        raise RuntimeError(f'tracker:={tracker} → {" | ".join(TRACKER_MODES)} 중 하나')
+    params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true'}
+    actions = []
 
-    if test:
-        run_dir = os.path.join(os.path.expanduser(arg('log_dir')),
-                               datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-        os.makedirs(run_dir, exist_ok=True)
-        sync = pc_time_sync()
-        with open(os.path.join(run_dir, 'run_info.txt'), 'w', encoding='utf-8') as f:
-            f.write(f'namespace={ns}\ndrive={drive}\ntracker={arg("tracker")}\nbag={arg("bag")}\n'
-                    f'video_source={arg("video_source")}\nPC 시간 동기화(NTP): {sync}\n')
-        params.update({'diag': True, 'diag_events': True,
-                       'diag_csv': os.path.join(run_dir, 'follow_timing.csv')})
-        env['ROS_LOG_DIR'] = run_dir                # 노드 로그 파일이 여기에 생김
-        if arg('bag').lower() == 'true':
-            topics = [f'{ns}/{t}' for t in BAG_TOPICS]
-            actions.append(ExecuteProcess(
-                cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', os.path.join(run_dir, 'bag'),
-                     '--topics', *topics],
-                output='log'))
-        actions.append(LogInfo(msg=f'[테스트] 주행 {"켬" if drive else "끔"}, PC 시간 동기화 {sync}, '
-                                   f'로그 저장 위치: {run_dir}'))
+    if test:                                        # ros2 bag 녹화 (폴더는 ros2 bag이 만든다)
+        bag_dir = os.path.expanduser(arg('bag_dir'))
+        os.makedirs(bag_dir, exist_ok=True)
+        out = os.path.join(bag_dir, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        actions.append(ExecuteProcess(
+            cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-o', out,
+                 '--topics', '/rosout', *[f'{ns}/{t}' for t in BAG_TOPICS]],
+            output='log'))
+        actions.append(LogInfo(msg=f'[테스트] 주행 {"켬" if drive else "끔"}, PC 시간 동기화 {pc_time_sync()}, '
+                                   f'bag 저장: {out}'))
 
-    if arg('tracker').lower() == 'true':
-        actions += tracker_actions(ns, arg('video_source'))
+    if tracker != 'none':
+        actions += tracker_actions(ns, with_node=tracker == 'all')
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
-        parameters=[params], additional_env=env))
+        parameters=[params]))
 
-    if arg('rviz').lower() == 'true':
-        share = get_package_share_directory('arti_follow')
-        with open(os.path.join(share, 'rviz', 'follow_test.rviz'), encoding='utf-8') as f:
-            cfg = f.read().replace('<ns>', ns)
-        path = os.path.join(tempfile.gettempdir(), 'arti_follow_test%s.rviz' % ns.replace('/', '_'))
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(cfg)
-        # tf는 네임스페이스 안(/robot1/tf)에 있으므로 RViz가 그쪽을 보게 바꿔 준다
-        actions.append(Node(
-            package='rviz2', executable='rviz2', arguments=['-d', path], output='log',
-            remappings=[('/tf', ns + '/tf'), ('/tf_static', ns + '/tf_static')]))
     return actions
 
 
@@ -138,17 +125,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value=EnvironmentVariable(
             'ARTI_ROBOT_NS', default_value=''), description='로봇 네임스페이스 (기본: $ARTI_ROBOT_NS)'),
-        DeclareLaunchArgument('video_source', default_value='0',
-                              description='인식 카메라: 웹캠 번호 또는 DroidCam URL'),
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true',
-                              description='진단 로그를 켜고 log_dir에 저장'),
-        DeclareLaunchArgument('bag', default_value='true',
-                              description='test일 때 ros2 bag으로 BAG_TOPICS 녹화 (카메라 영상 제외)'),
-        DeclareLaunchArgument('tracker', default_value='true',
-                              description='사람 인식 모듈(person_tracker)도 같이 띄우기'),
-        DeclareLaunchArgument('rviz', default_value='false', description='RViz도 띄우기 (기본은 인식 창만)'),
-        DeclareLaunchArgument('log_dir', default_value='~/arti_logs/follow',
-                              description='테스트 로그를 저장할 폴더'),
+                              description='ros2 bag으로 BAG_TOPICS + /rosout을 bag_dir에 녹화 (카메라 영상 제외)'),
+        DeclareLaunchArgument('tracker', default_value='all', choices=list(TRACKER_MODES),
+                              description='all: 카메라+인식 노드, camera: 카메라만, none: 안 띄움'),
+        DeclareLaunchArgument('auto_start', default_value='false',
+                              description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
+        DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
+                              description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),
     ])
