@@ -12,6 +12,7 @@
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
+      target_person/register_front (Empty)         WAIT_VISITOR에서 인식 모듈에 '바로 앞 사람을 등록' 요청
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
@@ -22,6 +23,8 @@
   START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
               face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 첫 좌표 → guide_message로 "인식되었습니다" → FOLLOW
+              auto_register면 register_period마다 target_person/register_front를 보내 인식 모듈이
+              로봇 바로 앞 사람을 대상으로 등록하게 한다 (첫 요청 + register_settle 전 좌표 = 예전 대상 → 버림)
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
   SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
@@ -58,7 +61,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Empty, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 import yaml
@@ -72,6 +75,9 @@ PARAMS = {
     'localize_timeout': 10.0,       # map 위치가 출발 지점 근처로 잡히길 이만큼 기다림 [s]
     'localize_tolerance': 0.3,      # initialpose 뒤 map 위치가 출발 지점에서 이 안이면 잡힌 것 [m]
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
+    'auto_register': True,          # WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)
+    'register_period': 1.0,         # 등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)
+    'register_settle': 0.5,         # 첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
@@ -224,6 +230,8 @@ class VisitorFollower(Node):
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
+        self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
+        self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
@@ -317,6 +325,10 @@ class VisitorFollower(Node):
     def on_person(self, msg):
         if self.state not in ('WAIT_VISITOR', 'FOLLOW', 'SEARCH', 'WAIT'):
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
+        if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
+            stamp = Time.from_msg(msg.header.stamp).nanoseconds / 1e9
+            if self.reg_first is None or stamp < self.reg_first + self.p['register_settle']:
+                return                              # 등록 요청 전 좌표 = 예전 대상일 수 있음
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
@@ -436,6 +448,7 @@ class VisitorFollower(Node):
         self.holding = False
         if self.kf.x is None:
             self.dbg['reason'] = 'wait_visitor'
+            self.request_register(now)
             return self.drive(*self.ramp(0.0, 0.0))  # WAIT_VISITOR
 
         last, vel = self.person()
@@ -462,6 +475,19 @@ class VisitorFollower(Node):
         self.set_state('WAIT')                      # 3) 정지 대기
         self.dbg['reason'] = 'wait'
         self.drive(*self.ramp(0.0, 0.0))
+
+    def request_register(self, now):
+        """WAIT_VISITOR: 인식 모듈에 바로 앞 사람 등록을 요청 (등록돼 좌표가 올 때까지 register_period마다)."""
+        p = self.p
+        if self.state != 'WAIT_VISITOR' or not p['auto_register']:
+            return
+        if self.reg_last is not None and now - self.reg_last < p['register_period']:
+            return
+        if self.reg_first is None:
+            self.reg_first = now
+            self.get_logger().info('바로 앞 사람 등록 요청 (target_person/register_front)')
+        self.reg_last = now
+        self.register_pub.publish(Empty())
 
     def face_start(self, now):
         """제자리 회전으로 출발 지점 쪽을 본다 (map 좌표, localization 필요)."""
@@ -543,6 +569,7 @@ class VisitorFollower(Node):
     def begin_tour(self):
         self.kf.x, self.seen, self.holding = None, -1e9, False
         self.face_until = self.loc_at = self.pose_sent = None
+        self.reg_first = self.reg_last = None
         self.active, self.end_reason = True, ''
         self.get_logger().info('관람 시작')
         self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')

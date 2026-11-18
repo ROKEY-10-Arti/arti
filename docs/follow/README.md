@@ -63,11 +63,15 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
   → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
-  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
+  `arti/start_tour` 액션을 보내면 undock → 초기 위치 → 키오스크 쪽 회전 뒤, 로봇 바로 앞 사람을 자동 등록해 따라간다(인식 창 클릭으로 바꿀 수도 있음). AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
 - 테스트 저장(`test:=true`, 기본): **ros2 bag 하나만** `~/arti_bags/follow/<날짜_시각>/`에 mcap으로 녹화. 로그·CSV 파일은 따로 만들지 않는다.
   토픽은 launch의 `BAG_TOPICS`(scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*, guide_message 등) + `/rosout`(노드 로그 메시지).
   **카메라 영상·depth는 넣지 않는다**(개인정보, 팀 합의 전).
   다시 보기: `ros2 bag info <폴더>`, `ros2 bag play <폴더>` + RViz, 로그는 재생하면서 `ros2 topic echo /rosout`. Discovery Server가 안 떠 있으면 0개로 녹화된다
+- **바로 앞 사람 자동 등록**: `WAIT_VISITOR` 동안 `visitor_follower`가 1초마다 `<ns>/target_person/register_front`(Empty)를 보내고,
+  `multi_tracker_node`가 로봇 정면 ±30°, 2.5 m 안에서 가장 가까운 사람을 타겟으로 잡는다(아무도 없으면 예전 타겟 해제). 첫 요청 뒤 0.5 s 전 좌표는 버린다.
+  끄기: `visitor_follower`의 `auto_register:=false`. 범위: `multi_tracker_node`의 `register_front_angle_deg`, `register_max_dist`.
+  확인: `ros2 topic echo /robot1/target_person/register_front`
 - 끊김 원인을 화면 로그로 볼 때만: `ros2 run arti_follow visitor_follower --ros-args -p diag:=true -p diag_events:=true`
 - **관람 안내 실행 (추종 + 작품 설명)**: `ros2 launch arti_follow tour.launch.py`
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).

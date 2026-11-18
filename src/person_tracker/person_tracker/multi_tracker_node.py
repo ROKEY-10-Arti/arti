@@ -16,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from geometry_msgs.msg import Point
+from std_msgs.msg import Empty
 from cv_bridge import CvBridge
 
 from typing import Optional, Tuple
@@ -69,6 +70,9 @@ class MultiModelTrackerNode(Node):
         self.declare_parameter('draw_overlay', True)
         self.declare_parameter('auto_lock_first', False)
         self.declare_parameter('device', '')
+        # target_person/register_front(Empty) 요청 때 '바로 앞 사람'으로 볼 범위 (base_link 기준)
+        self.declare_parameter('register_front_angle_deg', 30.0)  # 정면에서 좌우 이 각도 안
+        self.declare_parameter('register_max_dist', 2.5)          # 이 거리 안 [m]
 
         ns = self.get_namespace()
         ns_prefix = '' if ns == '/' else ns
@@ -124,6 +128,12 @@ class MultiModelTrackerNode(Node):
             )
 
         self.target_pub = self.create_publisher(Point, '/target_person/offset', 10)
+        self.register_front_angle = float(self.get_parameter('register_front_angle_deg').value)
+        self.register_max_dist = float(self.get_parameter('register_max_dist').value)
+        self.frame_size: Optional[Tuple[int, int]] = None   # 마지막 프레임 (w, h)
+        # visitor_follower가 관람객을 기다릴 때(WAIT_VISITOR) 보내는 '바로 앞 사람 등록' 요청
+        self.register_sub = self.create_subscription(
+            Empty, f'{ns_prefix}/target_person/register_front', self.on_register_front, 10)
         self.localizer = LidarPersonLocalizer(self)
         self.last_loc_result: Optional[TargetLocalizationResult] = None
         self.last_loc_log_time = 0.0
@@ -177,6 +187,30 @@ class MultiModelTrackerNode(Node):
             )
         else:
             self.get_logger().info('[타겟 해제] 추적을 중지합니다.')
+
+    def on_register_front(self, _msg):
+        """로봇 바로 앞(정면 ±register_front_angle_deg, register_max_dist 안)에서 가장 가까운 사람을 타겟으로 등록.
+        아무도 없으면 타겟을 해제한다 (예전 관람객 좌표가 계속 나가지 않게). 요청은 등록될 때까지 반복해서 온다."""
+        if self.frame_size is None:
+            return
+        w, h = self.frame_size
+        best, best_dist = None, float('inf')
+        for person in self.tracker.last_detections:
+            res = self.localizer.localize_target(person, w, h, publish=False)
+            if res.base_xyz is None:
+                continue
+            bx, by = res.base_xyz[0], res.base_xyz[1]
+            dist = math.hypot(bx, by)
+            angle = math.degrees(math.atan2(by, bx))
+            if abs(angle) <= self.register_front_angle and dist <= self.register_max_dist and dist < best_dist:
+                best, best_dist = person, dist
+        if best is None:
+            if self.tracker.target_id is not None:
+                self.get_logger().info('[앞 사람 등록] 앞에 사람 없음 → 예전 타겟 해제')
+            self.tracker.select_target_by_id(None)
+            return
+        selected = self.tracker.select_target_by_id(best.track_id)
+        self.get_logger().info(f'[앞 사람 등록] ID={selected} (거리 {best_dist:.2f} m)')
 
     def _update_system_metrics(self, msg_stamp):
         now = time.time()
@@ -546,6 +580,7 @@ class MultiModelTrackerNode(Node):
 
     def handle_frame(self, frame: np.ndarray, msg_stamp):
         h, w = frame.shape[:2]
+        self.frame_size = (w, h)
         self.last_frame_wall_time = time.time()
         detections, target = self.tracker.process_frame(
             frame,
