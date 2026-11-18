@@ -67,7 +67,8 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
-  → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
+  → 웹캠 인식(person_tracker, 카메라 + **`gesture_test_node`(기본, 손 제스처 등록)** 또는 `tracker:=all`이면 `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행).
+  두 인식 노드는 같은 `LidarPersonLocalizer`로 `target_person/point_map`·`point_base`(PointStamped)·`marker`를 내므로 `visitor_follower`·`artwork_zone`은 그대로 쓴다. 둘 다 `arti/tour_end`를 받으면 타겟·re-ID 특징을 지운다.
   `arti/start_tour` 액션을 보내면 undock → 초기 위치 → 키오스크 쪽 회전 뒤, 로봇 바로 앞 사람을 자동 등록해 따라간다(인식 창 클릭으로 바꿀 수도 있음). AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
 - 테스트 저장(`test:=true`, 기본): **ros2 bag 하나만** `~/arti_bags/follow/<날짜_시각>/`에 mcap으로 녹화. 로그·CSV 파일은 따로 만들지 않는다.
   토픽은 launch의 `BAG_TOPICS`(scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*, guide_message 등) + `/rosout`(노드 로그 메시지).
@@ -77,12 +78,12 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   `multi_tracker_node`가 로봇 정면 ±30°, 2.5 m 안에서 가장 가까운 사람을 타겟으로 잡는다(아무도 없으면 예전 타겟 해제). 첫 요청 뒤 0.5 s 전 좌표는 버린다.
   끄기: `visitor_follower`의 `auto_register:=false`. 범위: `multi_tracker_node`의 `register_front_angle_deg`, `register_max_dist`.
   확인: `ros2 topic echo /robot1/target_person/register_front`
-- **관람 안내 전체 + 제스처 등록**: `ros2 launch arti_follow tour.launch.py tracker:=gesture` (음성·작품 구역 포함)
+- **관람 안내 전체**: `ros2 launch arti_follow tour.launch.py` (기본 제스처 등록, 음성·작품 구역 포함). 바로 앞 사람 자동 등록으로 하려면 `tracker:=all`
 - **카메라 + 추종만 (인식 노드는 따로)**: `ros2 launch arti_follow cam_test.launch.py` (= `follow_test.launch.py tracker:=camera`).
   인식 노드는 다른 터미널·PC에서 하나만: `ros2 run person_tracker gesture_test_node --ros-args -r __ns:=/robot1` 또는 `multi_tracker_node`
   → 인식 노드 대신 `gesture_test_node`(person_tracker): 카메라 앞에서 '주먹 → 손바닥 펴기' 한 사람을 대상으로 등록하고 `target_person/point_map` 발행.
   `visitor_follower`의 바로 앞 자동 등록은 끈다. 확인: `ros2 topic echo /robot1/gesture/status` (SCANNING → FIST_ARMED → TRIGGERED → LOCKED).
-  다음 관람객 전에는 제스처 창에서 `R`로 대상 초기화 (gesture_test_node는 아직 `arti/tour_end`를 안 받음)
+  관람이 끝나면(`arti/tour_end`) 대상이 자동으로 초기화된다. 수동 초기화는 제스처 창에서 `R`
 - 끊김 원인을 화면 로그로 볼 때만: `ros2 run arti_follow visitor_follower --ros-args -p diag:=true -p diag_events:=true`
 - **관람 안내 실행 (추종 + 작품 설명)**: `ros2 launch arti_follow tour.launch.py`
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).

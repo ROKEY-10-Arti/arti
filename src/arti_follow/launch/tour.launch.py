@@ -2,14 +2,15 @@
 
     ros2 launch arti_follow tour.launch.py
     → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
-      로봇 바로 앞 사람이 자동 등록되면(또는 인식 창에서 클릭) "인식되었습니다" 안내 후 로봇이 따라가고,
+      관람객이 제스처(주먹 → 손바닥)로 등록되면 "인식되었습니다" 안내 후 로봇이 따라가고,
+      (tracker:=all이면 multi_tracker_node: 로봇 바로 앞 사람 자동 등록·인식 창 클릭)
       관람객이 작품 앞 반원 구역에서 5초 멈추면 설명, 출구·키오스크 구역에 들어가면 안내 음성
 
 옵션 — 이 파일은 audio·zones_file만 선언한다. 나머지는 include한 launch의 인자가 그대로 통한다
     (ros2 launch 명령줄 인자는 include된 launch까지 전달됨. 목록: ros2 launch arti_follow tour.launch.py --show-args)
     audio:=false             음성 노드는 따로 띄울 때 (구역 판정만)
     zones_file:=<경로>       구역 파일 (기본 arti_common/config/artworks.yaml)
-    follow_test.launch.py    namespace, auto_start, drive, test(bag 녹화), bag_dir, tracker(all|camera|none)
+    follow_test.launch.py    namespace, auto_start, drive, test(bag 녹화), bag_dir, tracker(gesture 기본|all|camera|none)
     guide_audio.launch.py    player_cmd:="pw-play --volume 0.6"   재생 명령 (출력 장치·음량)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 

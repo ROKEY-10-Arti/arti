@@ -10,10 +10,11 @@
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false              ros2 bag 녹화 끄기
     bag_dir:=<폴더>          bag 저장 폴더 (기본 ~/arti_bags/follow, 그 아래 <날짜_시각>/)
+    tracker:=all             인식 노드로 multi_tracker_node (바로 앞 사람 자동 등록·클릭 등록)
     tracker:=camera          카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌 (인식은 다른 PC·bag 재생에서, 바로 가기: cam_test.launch.py)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
-    tracker:=gesture         인식 노드 대신 gesture_test_node: 손 제스처(주먹 → 손바닥)로 대상 등록
-                             (visitor_follower auto_register 끔. 관람 전체: tour.launch.py tracker:=gesture)
+    tracker:=gesture         (기본) gesture_test_node: 손 제스처(주먹 → 손바닥)로 대상 등록
+                             (visitor_follower auto_register 끔). 좌표 토픽·형식은 multi_tracker_node와 같음
     auto_start:=true         액션 없이 켜자마자 관람 시작
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
@@ -142,8 +143,9 @@ def generate_launch_description():
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true',
                               description='ros2 bag으로 BAG_TOPICS + /rosout을 bag_dir에 녹화 (카메라 영상 제외)'),
-        DeclareLaunchArgument('tracker', default_value='all', choices=list(TRACKER_MODES),
-                              description='all: 카메라+인식 노드, gesture: 카메라+제스처 등록 노드, camera: 카메라만, none: 안 띄움'),
+        DeclareLaunchArgument('tracker', default_value='gesture', choices=list(TRACKER_MODES),
+                              description='gesture(기본): 카메라+제스처 등록 노드, all: 카메라+multi_tracker_node, '
+                                          'camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
                               description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
