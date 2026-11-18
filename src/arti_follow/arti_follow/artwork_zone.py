@@ -10,6 +10,8 @@
       artwork_zone/state (std_msgs/String)                    지금 판단 (바뀔 때만): idle, dwell art_01 3.2s, explaining art_01 ...
       artwork_zone/explaining (std_msgs/String, latched)      설명 중인 artwork_id (시작할 때), 끝나면 '' → visitor_follower feedback
       artwork_zone/explained (std_msgs/String)                끝까지 설명한 artwork_id (한 번씩) → visitor_follower result visited_ids
+      artwork_zone/entered (std_msgs/String)                  관람객이 들어간 안내 구역 zone_id (들어갈 때마다)
+                                                            → visitor_follower: end_zone(exit)이면 관람 끝 → 도크 앞으로 복귀·도킹
 
 구역은 arti_common/config/artworks.yaml (map 좌표 반원). 코드에 좌표를 두지 않는다.
 
@@ -50,6 +52,7 @@ PARAMS = {
 }
 
 TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')    # visitor_follower follow/state 중 관람객이 등록돼 추종 중인 상태
+# 출구 뒤 복귀·도킹(RETURN·DOCK_FACE·DOCK)은 여기 없다 → 도크로 가는 길에 키오스크를 지나도 안내 음성이 나오지 않음
 
 
 class Zone:
@@ -118,6 +121,7 @@ class ArtworkZone(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.explaining_pub = self.create_publisher(String, 'artwork_zone/explaining', latched)
         self.explained_pub = self.create_publisher(String, 'artwork_zone/explained', 10)
+        self.entered_pub = self.create_publisher(String, 'artwork_zone/entered', 10)
         self.explaining_pub.publish(String(data=''))
         self.create_subscription(PointStamped, 'target_person/point_map', self.on_person, 10)
         self.create_subscription(Empty, 'arti/tour_end', self.on_tour_end, 10)
@@ -213,6 +217,7 @@ class ArtworkZone(Node):
             if z.id in self.inside:
                 continue
             self.inside.add(z.id)
+            self.entered_pub.publish(String(data=z.id))     # 안내(음성)와 별개로 진입은 매번 알림 (출구 → 복귀)
             if now - self.guided_at.get(z.id, -1e9) < self.p['guide_rearm_time']:
                 continue
             self.guided_at[z.id] = now

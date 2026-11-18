@@ -48,6 +48,9 @@
 | SEARCH | 좌표가 1.5 s 안 옴 | 최종 좌표로 이동(0.35 m 안, 최대 5 s) → 거기서 0.63 rad/s로 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
 | LOST | 대기도 지남 | 정지, 액션 끝(`reason: lost`) — 재등록은 인식 모듈·상태 노드, 다시 시작은 액션을 새로 |
+| RETURN | 추종 중 관람객이 출구 구역에 들어감 (`artwork_zone/entered` = `exit`) | 관람객 데이터 삭제, 언독 지점(도크 앞)으로 이동 (뒤쪽이면 먼저 제자리 회전, 90 s 넘으면 `return_failed`) |
+| DOCK_FACE | 언독 지점 도착 | 제자리에서 도크 쪽을 봄 |
+| DOCK | 다 돎 | Create 3 `dock` 액션 → 액션 끝 `success=true`, `finished` (실패 `dock_failed`) |
 
 SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW. 액션을 취소하면 언제든 정지 → READY.
 
@@ -87,7 +90,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
   관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
   (관람이 끝나면 `arti/tour_end`로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
-  `artwork_zone`은 `follow/state`가 FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정한다 (그 밖에는 `off (follow ...)`, 단독 테스트는 `need_follow:=false`).
+  `artwork_zone`은 `follow/state`가 FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정한다. 출구 뒤 복귀·도킹 중에는 판정하지 않아 도크로 가는 길에 키오스크 안내가 나오지 않는다 (그 밖에는 `off (follow ...)`, 단독 테스트는 `need_follow:=false`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`
 - **인식 노드만 빼고 실행**: `ros2 launch arti_follow tour.launch.py tracker:=camera` → `multi_tracker_node`만 뺌 (카메라는 띄움).
   관람객 좌표(`target_person/point_map`)는 다른 PC의 인식 노드·bag 재생·`ros2 topic pub`에서 와야 한다.

@@ -53,7 +53,7 @@ BAG_TOPICS = [
     'target_person/marker', 'top_cam/pose_in_map',
     'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
     'target_person/register_front', 'gesture/status',            # 바로 앞 사람 등록 요청, 제스처 상태
-    'artwork_zone/state', 'arti/tour_end',                        # 작품 구역 (tour.launch.py), 관람 끝
+    'artwork_zone/state', 'artwork_zone/entered', 'arti/tour_end',  # 작품 구역 (tour.launch.py), 출구 진입, 관람 끝
 ]
 
 

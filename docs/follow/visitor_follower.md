@@ -54,6 +54,16 @@ LOST          관람 끝 (lost)
 
 SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 액션 취소(cancel)는 언제든 → 정지 → READY (canceled)
+
+FOLLOW·SEARCH·WAIT 중 관람객이 출구 구역(end_zone: exit)에 들어감 (artwork_zone/entered)
+  ▼ 관람객 데이터 삭제 (arti/tour_end), feedback RETURNING
+RETURN        언독 지점(init_pose.yaml undock = 도크 앞)으로 이동. 목표가 57° 넘게 틀어져 있으면 먼저 제자리 회전
+  │             (출구에서 바로 dock하면 Create 3가 도크를 못 찾음) 90 s 안에 못 가면 → 관람 끝 (return_failed)
+  ▼
+DOCK_FACE     제자리에서 도크(init_pose.yaml dock) 쪽을 봄
+  ▼
+DOCK          Create 3 dock 액션 → 관람 끝 (success=true, finished) → READY
+                실패 → dock_failed, 서버 없음 → no_dock_server
 ```
 
 관람이 끝나면(취소·LOST·실패) 정지하고 `arti/tour_end`를 한 번 보낸다.
@@ -99,7 +109,9 @@ SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 | 입력 | `dock_status` | DockStatus | 로봇 |
 | 입력 | `follow/enable` | Bool | (필요할 때) |
 | 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | String | artwork_zone |
+| 입력 | `artwork_zone/entered` | String | artwork_zone (출구 진입 → 복귀·도킹) |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | 로봇 |
+| 액션 클라이언트 | `dock` | irobot_create_msgs/Dock | 로봇 (관람 끝, 도크 앞에서) |
 | 출력 | `cmd_vel` | TwistStamped | 로봇 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL |
 | 출력 | `follow/state` | String (latched, 바뀔 때만) | artwork_zone, 확인용 |
@@ -139,6 +151,11 @@ ros2 topic echo /robot1/follow/state
 | `min_spin_cmd` | 0.1 | 서 있을 때 이보다 작은 회전 명령은 0 (Create 3는 작은 제자리 회전을 0.25 rad/s 이상으로 돎) [rad/s] |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `undock` | true | 시작 때 undock |
+| `return_on_exit` / `end_zone` | true / exit | 관람객이 이 구역에 들어가면 도크 앞으로 복귀·도킹 |
+| `return_point` / `dock_point` | undock / dock | init_pose.yaml에서 먼저 갈 곳 / 바라볼 도크 |
+| `return_arrive` / `return_timeout` | 0.15 / 90 | 도착 거리 [m] / 복귀 시간 상한 [s] |
+| `dock` / `dock_timeout` | true / 120 | 도킹 할지 / dock 액션 대기 [s] |
+| `turn_first_angle` | 1.0 | 정해진 지점으로 갈 때 목표가 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (DWA는 후진이 없어 뒤쪽 목표에서 멈춤) |
 | `auto_start` | false | 액션 없이 바로 시작 (테스트) |
 
 ## 근거
@@ -152,4 +169,4 @@ ros2 topic echo /robot1/follow/state
 - 바닥에 떨어진 낮은 물체(LiDAR 높이 아래)는 못 본다 (depth 제거)
 - 목표까지 길이 없으면(LiDAR 점에 막힘) 경고 없이 선다 (`dwa()` 동점 처리)
 - 등록은 "1 s 동안 계속 보임"까지만 본다. 특징 수집·한 명 확인(T13)은 아직 없다
-- 관람 끝에 도크로 돌아가는 기능(RETURNING)은 아직 없다
+- 도크로 돌아가는 것은 출구 진입으로 끝날 때만이다. 취소·LOST로 끝나면 그 자리에 선다
