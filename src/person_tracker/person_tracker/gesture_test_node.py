@@ -1,3 +1,29 @@
+"""
+제스처 기반 타겟 등록 및 ReID 추적/위치 추정 통합 실행 노드 (gesture_test_node.py)
+
+[전체 실행 흐름 및 주요 호출 함수]
+1. 영상 입력 수신:
+   - ROS 이미지 토픽 (`_compressed_cb` / `_raw_cb`) 또는 로컬 웹캠 캡처 스레드 (`_capture_loop` -> `_poll_local_frame`)를 통해
+     프레임을 수신하고 `handle_frame(frame)`을 호출합니다.
+2. 사람 탐지·추적 및 ReID (`MultiModelTrackerCore.process_frame`):
+   - `YOLO26n-pose` + ByteTrack 기반 `MODE_ADAPTIVE`로 프레임 내 사람을 추적하고,
+     타겟 잠금 상태일 때는 304D HSV 부위 특징 유사도(`similarity`)와 공간 점수(`_estimate_candidate_spatial`)로
+     SAFE / GUARD / SEARCH / RECOVERED 상태를 갱신합니다. (유실 시에는 수동 `[R]` 초기화 전까지 SEARCH 유지)
+3. 미등록(`target_id is None`) 시 손 제스처 스캔 및 타겟 등록:
+   - 사람별 손목 우선 ROI 생성 (`build_person_hand_rois`)
+   - ROI 내부 MediaPipe 21관절 손 검출 (`HandGestureDetector.detect_in_roi`)
+   - 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 거리 매칭 (`find_best_hand_owner`)
+   - 동일 인물에 복수 손이 매칭되면 대표 1개 선택 (`HandGestureDetector.pick_primary_observation`)
+   - '주먹(Fist 4f) -> 손바닥 펴기(Open 4f)' 상태머신 갱신 (`MultiTargetGestureManager.update`)
+   - `just_triggered=True` 발생 시 `MultiModelTrackerCore.select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정
+4. 3D 공간 좌표 추정 및 발행 (`LidarPersonLocalizer.localize_target`):
+   - 타겟이 확정되면 LiDAR + 카메라 TF(폴백: BBox 높이 기반 거리)로 `base_link`/`map` 좌표를 계산하고
+     `publish_target_topics=True`일 때 타겟 좌표/마커 토픽을 발행합니다.
+5. 시각화 및 실시간 튜닝 (`_draw_top_bar`, `ReIDDebugVisualizer.render`, `_ensure_reid_window`):
+   - 메인 GUI 창에 BBox, ROI, 손 21관절 스켈레톤, 제스처 진행도, 좌표 오버레이를 출력하고,
+     별도 ReID 모니터 창에 유사도 시계열/부위 점수/304D 히트맵과 트랙바(`Match%`, `Coex%`, `Margin%`, `ConfirmF`)를 제공합니다.
+"""
+
 import os
 import threading
 import time
@@ -31,7 +57,9 @@ from person_tracker.gesture_core import (
     build_person_hand_rois,
     find_best_hand_owner,
 )
+from person_tracker.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
 from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.reid_visualizer import ReIDDebugVisualizer
 
 
 class GestureTestNode(Node):
@@ -65,10 +93,17 @@ class GestureTestNode(Node):
         self.declare_parameter('min_palm_scale_px', 12.0)
         self.declare_parameter('min_person_width_px', 44)
         self.declare_parameter('require_pose_wrist', False)
+        self.declare_parameter('use_localizer', True)
+        self.declare_parameter('publish_target_topics', True)
+        self.declare_parameter('publish_cam_tf', False)
         self.declare_parameter('show_gui', True)
+        self.declare_parameter('show_reid_viz', True)
 
         self.use_yolo_roi = bool(self.get_parameter('use_yolo_roi').value)
+        self.use_localizer = bool(self.get_parameter('use_localizer').value)
+        self.publish_target_topics = bool(self.get_parameter('publish_target_topics').value)
         self.show_gui = bool(self.get_parameter('show_gui').value)
+        self.show_reid_viz = bool(self.get_parameter('show_reid_viz').value)
         imgsz = int(self.get_parameter('imgsz').value)
         device = str(self.get_parameter('device').value)
         fist_hold = int(self.get_parameter('fist_hold_frames').value)
@@ -113,6 +148,11 @@ class GestureTestNode(Node):
         self.last_status_str = 'IDLE'
 
         self.status_pub = self.create_publisher(String, 'gesture/status', 10)
+        self.localizer: Optional[LidarPersonLocalizer] = (
+            LidarPersonLocalizer(self) if self.use_localizer else None
+        )
+        self.last_loc_result: Optional[TargetLocalizationResult] = None
+        self.last_loc_log_time = 0.0
 
         self._cap = None
         self._cap_lock = threading.Lock()
@@ -143,15 +183,50 @@ class GestureTestNode(Node):
                 )
 
         self.win_name = 'Arti Gesture Test (Fist -> Open Palm)'
+        self.reid_win_name = 'ReID Similarity & 304D HSV Vector'
+        self.reid_viz = ReIDDebugVisualizer()
         if self.show_gui:
             cv2.namedWindow(self.win_name)
             cv2.setMouseCallback(self.win_name, self._on_mouse_click)
+            if self.show_reid_viz:
+                self._ensure_reid_window()
 
         self.get_logger().info(
             f'GestureTestNode 시작 | 소스: {self.image_source_label} | '
             f'YOLO+ROI: {self.use_yolo_roi} | fist={fist_hold}, open={open_hold} | '
             f'모델: {self.gesture_detector.model_path}'
         )
+
+    def _ensure_reid_window(self):
+        """ReID 모니터 창과 4개 실시간 튜닝 트랙바(Match%, Coex%, Margin%, ConfirmF)를 생성·연동합니다."""
+        cv2.namedWindow(self.reid_win_name)
+        m_val = int(round((self.tracker.reid_match_thresh if self.tracker else 0.50) * 100))
+        c_val = int(round((self.tracker.coexist_min_sim if self.tracker else 0.74) * 100))
+        g_val = int(round((self.tracker.recover_margin if self.tracker else 0.06) * 100))
+        f_val = int(self.tracker.recover_confirm_frames if self.tracker else 2)
+
+        def _on_match(v):
+            if self.tracker is not None:
+                val = max(0.30, v / 100.0)
+                self.tracker.reid_match_thresh = val
+                self.tracker.search_min_sim = max(0.28, val - 0.02)
+
+        def _on_coex(v):
+            if self.tracker is not None:
+                self.tracker.coexist_min_sim = max(0.50, v / 100.0)
+
+        def _on_margin(v):
+            if self.tracker is not None:
+                self.tracker.recover_margin = max(0.0, v / 100.0)
+
+        def _on_confirm(v):
+            if self.tracker is not None:
+                self.tracker.recover_confirm_frames = max(1, int(v))
+
+        cv2.createTrackbar('Match%', self.reid_win_name, m_val, 80, _on_match)
+        cv2.createTrackbar('Coex%', self.reid_win_name, c_val, 95, _on_coex)
+        cv2.createTrackbar('Margin%', self.reid_win_name, g_val, 20, _on_margin)
+        cv2.createTrackbar('ConfirmF', self.reid_win_name, f_val, 5, _on_confirm)
 
     def _ensure_tracker(self):
         if self.tracker is None:
@@ -216,11 +291,14 @@ class GestureTestNode(Node):
         except Exception as exc:
             self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
 
-    def _reset_target(self):
+    def _reset_target(self, reason: str = '[타겟/제스처 초기화] 대기 상태로 복귀합니다.'):
+        """등록된 타겟, 제스처 상태머신 및 ReID 시계열 그래프를 초기 대기 상태로 되돌립니다."""
         if self.tracker is not None:
             self.tracker.select_target_by_id(None)
         self.gesture_mgr.reset_all()
-        self.get_logger().info('[타겟/제스처 초기화] 대기 상태로 복귀합니다.')
+        self.reid_viz.reset()
+        self.last_loc_result = None
+        self.get_logger().info(reason)
 
     def _toggle_yolo_roi(self):
         self.use_yolo_roi = not self.use_yolo_roi
@@ -275,6 +353,17 @@ class GestureTestNode(Node):
         elif key in (ord('d'), ord('D')) and self.tracker is not None:
             dev = self.tracker.toggle_device()
             self.get_logger().info(f'[장치 전환] {dev}')
+        elif key in (ord('v'), ord('V')):
+            self.show_reid_viz = not self.show_reid_viz
+            if self.show_gui:
+                if self.show_reid_viz:
+                    self._ensure_reid_window()
+                else:
+                    cv2.destroyWindow(self.reid_win_name)
+            self.get_logger().info(f'[ReID 그래프/벡터 창] {self.show_reid_viz}')
+        elif key in (ord('p'), ord('P')):
+            self.publish_target_topics = not self.publish_target_topics
+            self.get_logger().info(f'[타겟 토픽 발행] publish_target_topics={self.publish_target_topics}')
 
     def _publish_status(self, status_text: str):
         if status_text != self.last_status_str:
@@ -348,10 +437,16 @@ class GestureTestNode(Node):
                 cv2.LINE_AA,
             )
 
+        adapt_str = ''
+        if self.use_yolo_roi and self.tracker is not None and self.tracker.target_id is not None:
+            adapt_str = f' | {self.tracker.metrics.adaptive_state}'
+        pub_tag = ''
+        if self.localizer is not None and not self.publish_target_topics:
+            pub_tag = ' | PUB:OFF'
         state_txt = (
             f'FPS:{self.fps:4.1f} | Total:{self.total_ms:4.1f}ms | '
             f'Gesture:{self.gesture_ms:4.1f}ms | CPU:{self.cpu_percent:4.1f}% | '
-            f'{"SCANNING" if gesture_active else "PAUSED (Locked)"}'
+            f'{"SCANNING" if gesture_active else "LOCKED"}{adapt_str}{pub_tag}'
         )
         cv2.rectangle(frame, (0, self.BAR_HEIGHT), (w, self.BAR_HEIGHT + 24), (24, 24, 24), -1)
         cv2.putText(
@@ -404,7 +499,30 @@ class GestureTestNode(Node):
             cv2.LINE_AA,
         )
 
+    def _estimate_candidate_spatial(self, person: UnifiedTrackedPerson, w: int, h: int):
+        """ReID 후보 검증용 3D 위치 추정 콜백(토픽 발행 없이 map 또는 base_link XY 좌표와 센서 출처 반환)."""
+        if self.localizer is None:
+            return None
+        res = self.localizer.localize_target(person, w, h, publish=False)
+        if res.map_xyz is not None:
+            return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source
+        return (res.base_xyz[0], res.base_xyz[1]), 'base_link', res.source
+
     def handle_frame(self, frame: np.ndarray):
+        """
+        프레임 1장을 입력받아 전체 추적 -> 제스처 등록 -> 3D 위치 추정 -> GUI 렌더링을 수행하는 메인 파이프라인.
+
+        [단계별 처리 원리]
+        1. 추적/ReID (`tracker.process_frame`): 사람 BBox·Pose 키포인트 추적 및 타겟 잠금 시 SAFE/GUARD/SEARCH 수행.
+           (유실 시에도 타임아웃 자동 해제 없이 `SEARCH` 상태를 유지하며 수동 `[R]` 초기화 전까지 재식별 대기)
+        2. 제스처 스캔 (`target_id is None`일 때만 실행):
+           - 인원별 손목 우선 ROI 생성(`build_person_hand_rois`) -> 손 검출(`detect_in_roi`)
+           - `find_best_hand_owner()`로 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 최단거리 주인 배정
+           - 인원별 대표 손(`pick_primary_observation`)으로 `gesture_mgr.update()` 전이 판정 ->
+             `just_triggered` 시 `select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정.
+        3. 위치 추정 및 발행: 확정된 타겟에 대해 `localizer.localize_target(..., publish=publish_target_topics)` 호출.
+        4. GUI 출력: 메인 영상 오버레이 + `[V]` 활성화 시 `reid_viz.render()` 실시간 표시.
+        """
         t_start = time.perf_counter()
         now_wall = time.time()
         self.last_frame_wall_time = now_wall
@@ -427,14 +545,29 @@ class GestureTestNode(Node):
         t_gesture_ms = 0.0
 
         if self.use_yolo_roi and self.tracker is not None:
-            detections, target = self.tracker.process_frame(frame, auto_lock_first=False)
+            # ReID 모니터 창이 켜져 있을 때만 비타겟 포함 전원의 유사도·히스토그램 계산 활성화
+            want_all_sims = self.show_gui and self.show_reid_viz
+            detections, target = self.tracker.process_frame(
+                frame,
+                auto_lock_first=False,
+                spatial_estimator=(
+                    self._estimate_candidate_spatial if self.localizer is not None else None
+                ),
+                compute_all_sims=want_all_sims,
+            )
             if self.tracker.target_id is not None:
                 gesture_active = False
-                self._publish_status(f'LOCKED:id={self.tracker.target_id}')
-            else:
+                if target is not None:
+                    self._publish_status(f'LOCKED:id={self.tracker.target_id}')
+                else:
+                    self._publish_status('LOST_WAIT')
+
+            # 타겟 미등록 상태에서만 사람별 손 ROI 스캔 및 제스처 상태머신 구동
+            if self.tracker.target_id is None:
                 t_g0 = time.perf_counter()
                 active_ids = [p.track_id for p in detections]
                 person_tuples = [(p.track_id, p.bbox, p.keypoints) for p in detections]
+                # A의 손 ROI에서 B의 손이 검출되어도 실제 Pose 손목 거리가 더 가까운 주인 ID에 귀속
                 assigned_obs: Dict[int, List[HandGestureObservation]] = {
                     p.track_id: [] for p in detections
                 }
@@ -467,6 +600,9 @@ class GestureTestNode(Node):
                     progresses[person.track_id] = prog
                     if prog.just_triggered:
                         locked_id = self.tracker.select_target_by_id(person.track_id)
+                        person.is_target = True
+                        target = person
+                        gesture_active = False
                         self.get_logger().info(
                             f'[제스처 타겟 등록] ID={locked_id} (주먹->펴기 완료)'
                         )
@@ -477,6 +613,27 @@ class GestureTestNode(Node):
                 if self.tracker.target_id is None:
                     armed = [p.subject_id for p in progresses.values() if p.state == STATE_FIST_ARMED]
                     self._publish_status(f'FIST_ARMED:ids={armed}' if armed else 'SCANNING')
+
+            if target is not None and self.localizer is not None:
+                h_f, w_f = frame.shape[:2]
+                loc_res = self.localizer.localize_target(
+                    target, w_f, h_f, publish=self.publish_target_topics
+                )
+                self.last_loc_result = loc_res
+                if now_wall - self.last_loc_log_time >= 1.0:
+                    self.last_loc_log_time = now_wall
+                    bx, by, _ = loc_res.base_xyz
+                    if loc_res.map_xyz is not None:
+                        mx, my, _ = loc_res.map_xyz
+                        map_str = f'X={mx:+.2f}m, Y={my:+.2f}m [{loc_res.map_source}]'
+                    else:
+                        map_str = 'map TF 대기중'
+                    self.get_logger().info(
+                        f'[타겟 위치 ID={loc_res.track_id} | {loc_res.source}] '
+                        f'base: ({bx:+.2f},{by:+.2f})m ({loc_res.base_dist_m:.2f}m) | map: {map_str}'
+                    )
+            else:
+                self.last_loc_result = None
         else:
             t_g0 = time.perf_counter()
             obs_list = self.gesture_detector.detect_in_roi(frame, roi=None)
@@ -511,19 +668,48 @@ class GestureTestNode(Node):
                         2,
                         cv2.LINE_AA,
                     )
+                    if self.last_loc_result is not None:
+                        lr = self.last_loc_result
+                        bx, by, _ = lr.base_xyz
+                        coord_txt = f'Bot:({bx:+.2f},{by:+.2f})m {lr.base_dist_m:.2f}m [{lr.source}]'
+                        if lr.map_xyz is not None:
+                            mx, my, _ = lr.map_xyz
+                            coord_txt += f' Map:({mx:+.2f},{my:+.2f})m'
+                        cv2.putText(
+                            vis,
+                            coord_txt,
+                            (x1, min(vis.shape[0] - 8, y2 + 16)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.42,
+                            (50, 255, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
                 else:
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (170, 170, 170), 1)
-                    for roi_box, roi_kind in rois.get(p.track_id, []):
-                        roi_color = (255, 220, 40) if roi_kind == 'wrist' else (40, 160, 220)
-                        cv2.rectangle(vis, (roi_box[0], roi_box[1]), (roi_box[2], roi_box[3]), roi_color, 1)
-                    prog = progresses.get(p.track_id)
-                    if prog is not None:
-                        self._draw_progress_badge(
+                    if self.tracker is not None and self.tracker.target_id is not None:
+                        cv2.putText(
                             vis,
-                            (x1, max(84, y1 - 12)),
-                            prog,
-                            label_prefix=f'ID:{p.track_id} ',
+                            f'ID:{p.track_id} sim:{p.similarity:.2f}',
+                            (x1, max(78, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.44,
+                            (180, 180, 180),
+                            1,
+                            cv2.LINE_AA,
                         )
+                    else:
+                        for roi_box, roi_kind in rois.get(p.track_id, []):
+                            roi_color = (255, 220, 40) if roi_kind == 'wrist' else (40, 160, 220)
+                            cv2.rectangle(vis, (roi_box[0], roi_box[1]), (roi_box[2], roi_box[3]), roi_color, 1)
+                        prog = progresses.get(p.track_id)
+                        if prog is not None:
+                            self._draw_progress_badge(
+                                vis,
+                                (x1, max(84, y1 - 12)),
+                                prog,
+                                label_prefix=f'ID:{p.track_id} ',
+                            )
 
             if not self.use_yolo_roi and 0 in progresses:
                 self._draw_progress_badge(vis, (12, 92), progresses[0], label_prefix='Hand ')
@@ -534,6 +720,9 @@ class GestureTestNode(Node):
             self._draw_top_bar(vis, gesture_active=gesture_active)
             self.last_display_frame = vis
             cv2.imshow(self.win_name, vis)
+            if self.show_reid_viz and self.use_yolo_roi and self.tracker is not None:
+                reid_panel = self.reid_viz.render(self.tracker, detections)
+                cv2.imshow(self.reid_win_name, reid_panel)
             key = cv2.waitKey(1) & 0xFF
             if key != 255:
                 self._process_key(key)

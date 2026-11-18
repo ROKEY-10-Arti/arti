@@ -1,3 +1,25 @@
+"""
+부위별 외형 특징 추출(304D HSV) 및 ReID 유사도 비교 모듈 (feature_extractors.py)
+
+[전체 처리 흐름 및 주요 클래스/함수]
+1. 태스크별 부위 특징 추출 (`BaseFeatureExtractor.extract` 구현체):
+   - Pose 태스크 (`PoseKeypointFeatureExtractor`): COCO 17관절(어깨 5/6, 골반 11/12, 무릎 13/14, 발목 15/16)로
+     실제 해부학적 상의/허벅지/정강이 마스크를 생성합니다. (관절 부족 시 `BBoxFeatureExtractor` 폴백)
+   - Segment 태스크 (`SegMaskFeatureExtractor`): 인스턴스 폴리곤 마스크(1px 침식)를 높이 비율 3등분합니다.
+   - Detect 태스크 (`BBoxFeatureExtractor`): 박스 중앙 영역(가로 60%, 세로 80%)을 3등분합니다.
+   - 겹침/가려짐 구간에서는 `_apply_exclude_boxes()`로 타인 박스 픽셀을 마스킹에서 제거해 특징 오염을 막습니다.
+2. 304차원 HSV 히스토그램 생성 (`BaseFeatureExtractor.calc_hsv_hist`):
+   - 유채색 구분용 `18(Hue) x 16(Sat)` 2D 히스토그램(288D, 가중치 0.72)과
+     무채색(검정/흰색/회색) 구분용 `16(Value)` 1D 히스토그램(16D, 가중치 0.28)을 L1 정규화 후 결합해
+     총 304차원 벡터를 생성하고 `PartFeatureBank(full, upper, mid, lower)`로 반환합니다.
+3. 부위별 1:1 및 이중 뱅크(Anchor + Recent) 유사도 계산 (`compute_dual_similarity_detail` -> `compare_banks_detail` -> `hist_sim`):
+   - `Bhattacharyya` 거리를 `max(0.0, 1.0 - dist)` 유사도로 변환하며,
+     가시 부위 가중 평균(상반신 0.44, 중반신 0.36, 하반신 0.20)과 전체(`full`) 유사도의 최댓값을 사용합니다.
+   - `PoseKeypointFeatureExtractor`는 `ALLOW_CROSS_PART = False`를 적용해 상의-하의 교차 매칭 오류를 차단합니다.
+4. 최근 외형 지수이동평균(EMA) 갱신 (`BaseFeatureExtractor.update_recent_bank`):
+   - 조명/각도 변화에 적응하기 위해 안정 추적 구간에서 `recent_bank`를 `alpha=0.04` 비율로 점진 갱신합니다.
+"""
+
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import cv2
@@ -32,8 +54,19 @@ class PartFeatureBank:
 class BaseFeatureExtractor:
     """태스크별 특징 추출기의 공통 베이스 클래스 (Strategy Pattern)"""
 
+    ALLOW_CROSS_PART = True
+
     @staticmethod
     def calc_hsv_hist(hsv_roi: np.ndarray, mask_roi: np.ndarray) -> Optional[np.ndarray]:
+        """
+        마스크 영역(`mask_roi`) 내부 픽셀만 사용해 304차원 L1 정규화 HSV 특징 벡터를 생성합니다.
+
+        [알고리즘 원리]
+        - 유효 픽셀이 12개 미만이면 통계 불안정으로 None을 반환합니다.
+        - 색상+채도(H: 18bin, S: 16bin -> 288D) L1 정규화 히스토그램(가중치 0.72)과
+          밝기(V: 16bin -> 16D) L1 정규화 히스토그램(가중치 0.28)을 연결합니다.
+        - V 성분을 포함시켜 검정/회색/흰색 같은 무채색 의상도 구별할 수 있게 합니다.
+        """
         if hsv_roi.size == 0 or mask_roi.size == 0:
             return None
         if cv2.countNonZero(mask_roi) < 12:
@@ -48,6 +81,7 @@ class BaseFeatureExtractor:
 
     @staticmethod
     def hist_sim(h1: Optional[np.ndarray], h2: Optional[np.ndarray]) -> float:
+        """Bhattacharyya 거리 d in [0, 1]을 (1.0 - d) 코사인/분포 유사도 [0.0 ~ 1.0]으로 변환합니다."""
         if h1 is None or h2 is None:
             return 0.0
         dist = cv2.compareHist(h1, h2, cv2.HISTCMP_BHATTACHARYYA)
@@ -85,43 +119,109 @@ class BaseFeatureExtractor:
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> Optional[PartFeatureBank]:
+        """태스크별(BBox/Segment/Pose) 사람 ROI에서 304D HSV PartFeatureBank를 추출하는 추상 인터페이스."""
         raise NotImplementedError
+
+    def compare_banks_detail(
+        self, ref: Optional[PartFeatureBank], cur: Optional[PartFeatureBank]
+    ) -> Tuple[float, Optional[float], Optional[float], Optional[float], float]:
+        """
+        부위별 유사도와 최종 종합 점수를 함께 반환합니다:
+        (total_score, upper_sim, mid_sim, lower_sim, full_sim)
+
+        [비교 원리]
+        - 기준(`ref`)과 현재(`cur`) 모두 추출된 부위끼리만 1:1 유사도(`upper`, `mid`, `lower`)를 계산하고,
+          가용 부위 가중치(상의 0.44, 허벅지 0.36, 정강이 0.20)로 `aligned_score`를 산출합니다.
+        - `score = max(full_score, aligned_score)`를 사용해 일부 관절 가림 시에도 전체(`full`) 점수로 보완합니다.
+        - Pose 추출기는 `ALLOW_CROSS_PART = False`이므로 상의가 가려졌을 때 중/하반신과 교차 비교하지 않습니다.
+        """
+        if ref is None or cur is None:
+            return 0.0, None, None, None, 0.0
+
+        upper_sim = (
+            self.hist_sim(ref.upper, cur.upper)
+            if (ref.upper is not None and cur.upper is not None)
+            else None
+        )
+        mid_sim = (
+            self.hist_sim(ref.mid, cur.mid)
+            if (ref.mid is not None and cur.mid is not None)
+            else None
+        )
+        lower_sim = (
+            self.hist_sim(ref.lower, cur.lower)
+            if (ref.lower is not None and cur.lower is not None)
+            else None
+        )
+
+        part_scores = []
+        for sim_val, weight in (
+            (upper_sim, 0.44),
+            (mid_sim, 0.36),
+            (lower_sim, 0.20),
+        ):
+            if sim_val is not None:
+                part_scores.append((sim_val, weight))
+
+        # 가용 부위만으로 가중 평균을 구하되, 가림/자세 변화 보완을 위해 full 유사도와 최댓값 선택
+        full_score = self.hist_sim(ref.full, cur.full)
+        if part_scores:
+            aligned_score = sum(s * w for s, w in part_scores) / sum(w for _, w in part_scores)
+            score = max(full_score, aligned_score)
+        else:
+            score = full_score
+
+        # Pose는 상의-하의 교차 매칭 오류를 막기 위해 ALLOW_CROSS_PART=False로 비활성화됨
+        if self.ALLOW_CROSS_PART and cur.upper is None:
+            cross_candidates = [score]
+            if ref.mid is not None:
+                cross_candidates.append(self.hist_sim(ref.mid, cur.full) * 0.92)
+            if ref.lower is not None:
+                cross_candidates.append(self.hist_sim(ref.lower, cur.full) * 0.90)
+            score = max(cross_candidates)
+
+        return float(score), upper_sim, mid_sim, lower_sim, float(full_score)
 
     def compare_banks(
         self, ref: Optional[PartFeatureBank], cur: Optional[PartFeatureBank]
     ) -> float:
         """
-        현재 보이는 부위(visible_parts)끼리 1:1 매칭을 우선 수행하고,
-        가까이 다가와 하반신만 보이는 경우 교차 부위(Cross-Part) 매칭까지 수행합니다.
+        현재 보이는 부위(visible_parts)끼리 1:1 매칭을 우선 수행합니다.
         """
-        if ref is None or cur is None:
-            return 0.0
+        score, _, _, _, _ = self.compare_banks_detail(ref, cur)
+        return score
 
-        part_scores = []
-        for r_h, c_h, weight in [
-            (ref.upper, cur.upper, 0.35),
-            (ref.mid, cur.mid, 0.40),
-            (ref.lower, cur.lower, 0.25),
-        ]:
-            if r_h is not None and c_h is not None:
-                part_scores.append((self.hist_sim(r_h, c_h), weight))
+    def compute_dual_similarity_detail(
+        self,
+        anchor_bank: Optional[PartFeatureBank],
+        recent_bank: Optional[PartFeatureBank],
+        cur_bank: Optional[PartFeatureBank],
+    ) -> Tuple[float, Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]]:
+        """
+        초기 등록 외형(`anchor_bank`)과 최근 적응 외형(`recent_bank`) 중 더 높은 종합 유사도와
+        해당 비교의 세부 부위 점수 `(upper, mid, lower, full)`을 반환합니다.
 
-        aligned_score = (
-            sum(s * w for s, w in part_scores) / sum(w for _, w in part_scores)
-            if part_scores
-            else 0.0
+        - 초기 등록 자세(Anchor)와 현재 조명/자세 변화(Recent)를 모두 허용해 재인식률을 유지합니다.
+        """
+        if cur_bank is None:
+            return 0.0, (None, None, None, None)
+
+        anchor_detail = self.compare_banks_detail(anchor_bank, cur_bank)
+        recent_detail = self.compare_banks_detail(recent_bank, cur_bank)
+
+        if recent_detail[0] > anchor_detail[0]:
+            return float(recent_detail[0]), (
+                recent_detail[1],
+                recent_detail[2],
+                recent_detail[3],
+                recent_detail[4],
+            )
+        return float(anchor_detail[0]), (
+            anchor_detail[1],
+            anchor_detail[2],
+            anchor_detail[3],
+            anchor_detail[4],
         )
-        full_score = self.hist_sim(ref.full, cur.full)
-
-        candidates = [full_score, aligned_score]
-        if ref.mid is not None:
-            candidates.append(self.hist_sim(ref.mid, cur.full) * 0.95)
-        if ref.lower is not None:
-            candidates.append(self.hist_sim(ref.lower, cur.full) * 0.92)
-        if ref.mid is not None and cur.upper is not None:
-            candidates.append(self.hist_sim(ref.mid, cur.upper) * 0.95)
-
-        return float(max(candidates))
 
     def compute_dual_similarity(
         self,
@@ -129,14 +229,8 @@ class BaseFeatureExtractor:
         recent_bank: Optional[PartFeatureBank],
         cur_bank: Optional[PartFeatureBank],
     ) -> float:
-        if cur_bank is None:
-            return 0.0
-        return float(
-            max(
-                self.compare_banks(anchor_bank, cur_bank),
-                self.compare_banks(recent_bank, cur_bank),
-            )
-        )
+        score, _ = self.compute_dual_similarity_detail(anchor_bank, recent_bank, cur_bank)
+        return score
 
     @staticmethod
     def update_recent_bank(
@@ -144,6 +238,7 @@ class BaseFeatureExtractor:
         cur_bank: Optional[PartFeatureBank],
         alpha: float = 0.04,
     ):
+        """유효한 부위 히스토그램에 대해 EMA(`(1 - alpha) * recent + alpha * cur`)로 최근 외형을 완만히 갱신합니다."""
         if recent_bank is None or cur_bank is None:
             return
         recent_bank.full = (1.0 - alpha) * recent_bank.full + alpha * cur_bank.full
@@ -166,6 +261,10 @@ class BBoxFeatureExtractor(BaseFeatureExtractor):
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> Optional[PartFeatureBank]:
+        """
+        BBox 중앙 크롭(가로 20%~80%, 세로 12%~92%)에서 배경 노이즈를 줄이고
+        세로 비율(0.38 / 0.72) 기준 3등분 HSV 히스토그램을 추출합니다.
+        """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = bbox
         bw, bh = x2 - x1, y2 - y1
@@ -214,6 +313,10 @@ class SegMaskFeatureExtractor(BaseFeatureExtractor):
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> Optional[PartFeatureBank]:
+        """
+        Segment 폴리곤 마스크를 3x3 커널로 1회 침식해 경계 배경을 덜어낸 뒤
+        높이 비율(0.35 / 0.70) 기준 상·중·하 부위별 HSV 히스토그램을 추출합니다.
+        """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = (
             max(0, bbox[0]),
@@ -271,6 +374,7 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
     # COCO Keypoint 인덱스:
     # 5:L-Shoulder, 6:R-Shoulder, 11:L-Hip, 12:R-Hip, 13:L-Knee, 14:R-Knee, 15:L-Ankle, 16:R-Ankle
     KP_CONF_THRESH = 0.35
+    ALLOW_CROSS_PART = False
 
     def extract(
         self,
@@ -280,6 +384,16 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> Optional[PartFeatureBank]:
+        """
+        YOLO-Pose 17관절 좌표를 로컬 ROI 좌표로 변환한 뒤 3개 해부학 부위별 마스크를 생성해 특징 뱅크를 추출합니다.
+
+        [마스킹 원리]
+        - `upper_mask`: 어깨(5,6)-골반(11,12) 3점 이상 가시 시 사각형 다각형 채우기, 한쪽만 보이면 두꺼운 골격선.
+        - `mid_mask`: 골반->무릎(11->13, 12->14) 선분 스트립 (`thickness = max(6, bw*0.22)`).
+        - `lower_mask`: 무릎->발목(13->15, 14->16) 선분 또는 발목 원형 패치.
+        - `valid_color`(V>=15) 및 `exclude_boxes`(타인 BBox 제외)를 적용해 배경과 교차 오염을 제거하고,
+          관절이 너무 적으면 `BBoxFeatureExtractor` 중앙 크롭 방식으로 폴백합니다.
+        """
         if keypoints is None or len(keypoints) < 17:
             return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
 
@@ -352,11 +466,11 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
         combined_mask = cv2.bitwise_or(upper_mask, cv2.bitwise_or(mid_mask, lower_mask))
         if cv2.countNonZero(combined_mask) < 20:
             # 관절이 너무 안 보일 때는 중앙 영역 폴백
-            return BBoxFeatureExtractor().extract(frame, bbox)
+            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
 
         full_h = self.calc_hsv_hist(roi_hsv, combined_mask)
         if full_h is None:
-            return BBoxFeatureExtractor().extract(frame, bbox)
+            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
 
         return PartFeatureBank(
             full=full_h,

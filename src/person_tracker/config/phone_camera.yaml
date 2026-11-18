@@ -4,7 +4,7 @@
 #   상단 캠 전용 이름(top_cam)으로 분리되어 있습니다.
 # ==============================================================================
 
-namespace: "/robot4"   # $ARTI_ROBOT_NS가 있으면 그 값이 우선 (arti 저장소 env.bash로 자동 설정)
+namespace: "/robot1"   # $ARTI_ROBOT_NS가 있으면 그 값이 우선 (arti 저장소 env.bash로 자동 설정)
 video_source: "0"   # "0": 노트북 웹캠 | 스마트폰 DroidCam 예: "http://192.168.107.100:4747/video"
 
 topics:
@@ -24,7 +24,7 @@ frames:
 extrinsics:
   x: 0.00      # 앞(+) / 뒤(-) [단위: m]
   y: 0.00      # 왼쪽(+) / 오른쪽(-) [단위: m]
-  z: 0.17      # 위(+) / 아래(-) [단위: m]
+  z: 0.275     # 위(+) / 아래(-) [단위: m]
   roll: 0.0
   pitch: 0.0
   yaw: 0.0
@@ -32,7 +32,7 @@ extrinsics:
 
 # 상단 카메라 수평 화각(HFOV) 설정 (웹캠+라이다 사람 위치 정합용)
 camera_intrinsics:
-  hfov_deg: 65.0     # 일반 스마트폰/웹캠 수평 화각 (기본 65도)
+  hfov_deg: 54.0     # 일반 스마트폰/웹캠 수평 화각 (기본 65도)
 
 # 도킹 스테이션(또는 출발 지점)의 저장된 맵(map) 기준 초기 위치
 # - ros2 run person_tracker init_pose 실행 시 이 값으로 AMCL 초기 위치를 잡습니다.

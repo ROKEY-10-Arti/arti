@@ -113,13 +113,11 @@ def _launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
-    src_cfg = os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml')
-    share_cfg = os.path.join(
+    default_cfg = os.path.join(
         get_package_share_directory('person_tracker'),
         'config',
         'phone_camera.yaml',
     )
-    default_cfg = src_cfg if os.path.isfile(src_cfg) else share_cfg
     args = [
         DeclareLaunchArgument('config_file', default_value=default_cfg, description='카메라 좌표 설정 YAML 경로'),
         DeclareLaunchArgument('namespace', default_value='', description='비워두면 $ARTI_ROBOT_NS, 그것도 없으면 YAML의 namespace'),
