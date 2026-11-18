@@ -19,13 +19,12 @@
 `src/arti_follow/arti_follow/visitor_follower.py`. 플로우차트 "추적 모듈"의 **움직임**만 맡는다.
 팀 결정(11/16): 관람객 좌표는 **인식 모듈이 LiDAR로 구해서 `/robot1/target_person/point_map`(map 좌표)으로 준다** → 이 노드는 좌표를 받아 주행만 한다.
 **localization(AMCL)이 `/robot1`로 떠 있어야 한다** (map→odom 변환).
-장애물은 LiDAR(벽·기둥)와 **OAK-D Depth(바닥에 떨어진 물체)**로 보고 돌아서 간다.
+장애물은 LiDAR(벽·기둥)로 보고 돌아서 간다 (OAK-D depth는 2026-11-18에 뺌). 알고리즘·파라미터 근거: [visitor_follower_주행근거.docx](visitor_follower_주행근거.docx)
 
 | 방향 | 토픽 | 타입 | 내용 |
 |---|---|---|---|
 | 입력 | `target_person/point_map` | PointStamped (`frame_id: map`) | 관람객 좌표 (인식 모듈). TF로 odom 좌표로 바꿔 씀 |
 | 입력 | `scan` | LaserScan | 벽·기둥 등 장애물 |
-| 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 바닥 물체 (base_link 높이 5~30 cm, 1.2 m 안) |
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
@@ -46,7 +45,7 @@
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
 | WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): feedback `registered=true`, "인식되었습니다" 안내 → FOLLOW. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
 | FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
-| SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |
+| SEARCH | 좌표가 1.5 s 안 옴 | 최종 좌표로 이동(0.35 m 안, 최대 5 s) → 거기서 0.63 rad/s로 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
 | LOST | 대기도 지남 | 정지, 액션 끝(`reason: lost`) — 재등록은 인식 모듈·상태 노드, 다시 시작은 액션을 새로 |
 
@@ -58,8 +57,8 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 
 ```
 좌표: 칼만 필터(등속)로 위치·속도를 매끄럽게, 예측에서 너무 먼 좌표는 버림
-목표: 관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
-회피: LiDAR + Depth 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(BFS)
+목표: 관람객이 0.3 s 뒤 있을 곳에서 0.8 m 앞 지점
+회피: LiDAR 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(BFS)
       → (v, w) 후보를 1.5 s 굴려 보고, 안 부딪히면서(로봇 반지름 0.2 + 여유 0.05) 끝점의 그 거리가 가장 작은 것 (DWA)
 ```
 
@@ -75,6 +74,12 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   `multi_tracker_node`가 로봇 정면 ±30°, 2.5 m 안에서 가장 가까운 사람을 타겟으로 잡는다(아무도 없으면 예전 타겟 해제). 첫 요청 뒤 0.5 s 전 좌표는 버린다.
   끄기: `visitor_follower`의 `auto_register:=false`. 범위: `multi_tracker_node`의 `register_front_angle_deg`, `register_max_dist`.
   확인: `ros2 topic echo /robot1/target_person/register_front`
+- **관람 안내 전체 + 제스처 등록**: `ros2 launch arti_follow tour.launch.py tracker:=gesture` (음성·작품 구역 포함)
+- **카메라 + 추종만 (인식 노드는 따로)**: `ros2 launch arti_follow cam_test.launch.py` (= `follow_test.launch.py tracker:=camera`).
+  인식 노드는 다른 터미널·PC에서 하나만: `ros2 run person_tracker gesture_test_node --ros-args -r __ns:=/robot1` 또는 `multi_tracker_node`
+  → 인식 노드 대신 `gesture_test_node`(person_tracker): 카메라 앞에서 '주먹 → 손바닥 펴기' 한 사람을 대상으로 등록하고 `target_person/point_map` 발행.
+  `visitor_follower`의 바로 앞 자동 등록은 끈다. 확인: `ros2 topic echo /robot1/gesture/status` (SCANNING → FIST_ARMED → TRIGGERED → LOCKED).
+  다음 관람객 전에는 제스처 창에서 `R`로 대상 초기화 (gesture_test_node는 아직 `arti/tour_end`를 안 받음)
 - 끊김 원인을 화면 로그로 볼 때만: `ros2 run arti_follow visitor_follower --ros-args -p diag:=true -p diag_events:=true`
 - **관람 안내 실행 (추종 + 작품 설명)**: `ros2 launch arti_follow tour.launch.py`
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).
@@ -92,10 +97,9 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 - 확인한 것 (가상 LiDAR, 2026-11-16): 0.25 m/s 직진 시 0.80~0.85 m 유지, 길 위 바닥 물체(10 cm) 회피,
   상자 뒤로 사라지면 SEARCH → 돌아가서 재발견, 인식이 끊기면 SEARCH(이동→회전) → WAIT → 재인식 시 FOLLOW,
   map이 odom과 어긋나 있어도(1 m, 17°) map 좌표 입력으로 동일하게 추종
-- 실측 (로봇 정지, 도크 앞): depth는 1 m 너머에서 높이 잡음이 ±0.1~0.3 m → 바닥 물체는 1.2 m 안, 10 cm 칸에 점 3개 이상만 씀.
-  **현장에서 앞이 빈 바닥일 때 바닥 물체 점이 안 잡히는지 먼저 확인**한다 (잡히면 `floor_min_height` 올리기, 끄려면 `use_depth:=false`)
+- depth 바닥 물체 회피는 뺐다 (2026-11-18): 빈 바닥이 장애물로 잡혀 1.5 m 넘게 떨어진 관람객을 못 따라감 → [기록](../troubleshooting/follow/2026-11-18-far-visitor-stall-depth-floor.md)
 - 플로우차트와 다른 점: `navigate_to_pose`·`goal_update`·`spin` 액션 대신 노드가 직접 `cmd_vel`로 같은 순서를 수행
-- 한계: 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다. depth 3.2 Hz라 바닥 물체 반응이 늦을 수 있다
+- 한계: 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다. LiDAR 높이 아래 바닥 물체는 못 본다
 
 ## 하드웨어 (SRD 기준)
 

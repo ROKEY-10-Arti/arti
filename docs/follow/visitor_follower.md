@@ -44,9 +44,9 @@ WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버�
   │             확인 중에는 따라가지 않고 바라보기만. 끊기면 처음부터 다시
   ▼ on_registered(): registered=true, guide_message "recognized" ("인식되었습니다")
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
-  │ 좌표가 3 s(lost_timeout) 안 옴
+  │ 좌표가 1.5 s(lost_timeout) 안 옴
   ▼
-SEARCH        마지막 좌표까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색
+SEARCH        마지막 좌표까지 이동(0.35 m 안, 최대 5 s) → 거기서 0.63 rad/s(2π/10 s) 일정 속도로 한 바퀴(odom 360°)
   ▼
 WAIT          정지 대기 10 s
   ▼
@@ -63,11 +63,11 @@ SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 
 ```
 좌표   칼만 필터(등속)로 위치·속도를 매끄럽게. 예측과 너무 다른 좌표는 버림 (5번 연속이면 다시 시작)
-목표   관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
+목표   관람객이 0.3 s 뒤 있을 곳에서 0.8 m 앞 지점
 멈춤   0.85 m 안이면 감속해 서서 관람객 쪽으로 돎, 0.95 m 밖이 되면 다시 출발 (섰다 갔다 방지)
-회피   LiDAR(벽·기둥) + OAK-D depth(바닥 물체 5~30 cm, 1.2 m 안)로 10 cm 격자
+회피   LiDAR(벽·기둥)로 10 cm 격자 (OAK-D depth는 2026-11-18에 뺌)
        → 칸마다 목표까지 돌아가는 거리(BFS) → (v, w) 후보를 1.5 s 굴려 보고 안 부딪히며 가장 가까워지는 것 (DWA)
-속도   최대 0.3 m/s, 1.5 rad/s. 후진하지 않음
+속도   최대 0.3 m/s, 0.8 rad/s. 후진하지 않음
 안전   TF(odom→base_link)가 없거나 scan이 0.5 s 넘게 안 오면 정지
 ```
 
@@ -95,7 +95,6 @@ SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 | 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 키오스크·관제 |
 | 입력 | `target_person/point_map` | PointStamped (map) | person_tracker |
 | 입력 | `scan` | LaserScan | 로봇 LiDAR |
-| 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 로봇 OAK-D |
 | 입력 | `tf`, `tf_static` | | 로봇, AMCL |
 | 입력 | `dock_status` | DockStatus | 로봇 |
 | 입력 | `follow/enable` | Bool | (필요할 때) |
@@ -130,17 +129,27 @@ ros2 topic echo /robot1/follow/state
 |---|---|---|
 | `target_distance` | 0.8 | 유지 거리 [m] |
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 등록 확인 시간 / 끊김으로 보는 간격 [s] |
-| `lost_timeout` | 3.0 | 좌표가 이만큼 안 오면 SEARCH [s] |
-| `search_time` / `wait_time` | 10 / 10 | 회전 탐색 / 정지 대기 [s] |
-| `max_linear` / `max_angular` | 0.3 / 1.5 | 최대 속도 [m/s] / [rad/s] |
+| `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
+| `search_time` / `wait_time` | 10 / 10 | 한 바퀴 회전 탐색(속도 = 2π/search_time) / 정지 대기 [s] |
+| `search_move_time` / `search_arrive` | 5.0 / 0.35 | 마지막 좌표로 이동 시간 상한 [s] / 도착 거리 [m] |
+| `lead_time` | 0.3 | 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] |
+| `kf_accel_std` / `kf_meas_std` | 2.0 / 0.2 | 칼만 가속도 잡음 / 좌표 잡음 |
+| `max_linear` / `max_angular` | 0.3 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠이 사람을 놓침) |
+| `linear_accel` / `linear_decel` / `angular_accel` | 0.8 / 0.8 / 1.5 | 가속·감속 [m/s^2], 각가속 [rad/s^2] |
+| `min_spin_cmd` | 0.1 | 서 있을 때 이보다 작은 회전 명령은 0 (Create 3는 작은 제자리 회전을 0.25 rad/s 이상으로 돎) [rad/s] |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `undock` | true | 시작 때 undock |
-| `use_depth` | true | 바닥 물체 회피 (빈 바닥에서 점이 잡히면 `floor_min_height` 올리기) |
 | `auto_start` | false | 액션 없이 바로 시작 (테스트) |
+
+## 근거
+
+알고리즘·파라미터를 정한 이유와 bag 수치: `visitor_follower_주행근거.docx`
 
 ## 한계
 
-- 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다
-- depth가 3.2 Hz라 바닥 물체 반응이 늦을 수 있다
+- 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있고, 관람객이 로봇 쪽으로 다가오면 0.8 m보다 가까워진다
+- TurtleBot 4 최고 속도가 약 0.3 m/s라 관람객이 그보다 빨리(0.4~0.6 m/s) 걸으면 거리가 벌어진다 (2026-11-18 bag)
+- 바닥에 떨어진 낮은 물체(LiDAR 높이 아래)는 못 본다 (depth 제거)
+- 목표까지 길이 없으면(LiDAR 점에 막힘) 경고 없이 선다 (`dwa()` 동점 처리)
 - 등록은 "1 s 동안 계속 보임"까지만 본다. 특징 수집·한 명 확인(T13)은 아직 없다
 - 관람 끝에 도크로 돌아가는 기능(RETURNING)은 아직 없다
