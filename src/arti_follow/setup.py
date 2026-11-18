@@ -13,7 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
-        ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/config', glob('config/*.yaml') + glob('config/*.json')),
         ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'visitor_follower = arti_follow.visitor_follower:main',
+            'nav2_follow = arti_follow.nav2_follow:main',
             'artwork_zone = arti_follow.artwork_zone:main',
             'zone_viz = arti_follow.zone_viz:main',
         ],

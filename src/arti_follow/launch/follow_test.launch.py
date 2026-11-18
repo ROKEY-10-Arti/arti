@@ -16,6 +16,7 @@
     tracker:=gesture         (기본) gesture_test_node: 손 제스처(주먹 → 손바닥)로 대상 등록
                              (visitor_follower auto_register 끔). 좌표 토픽·형식은 multi_tracker_node와 같음
     auto_start:=true         액션 없이 켜자마자 관람 시작
+    follower:=nav2           visitor_follower 대신 nav2_follow (주행은 Nav2. 전제: nav2를 nav2_follow.yaml로 띄움)
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -55,6 +56,7 @@ BAG_TOPICS = [
     'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
     'target_person/register_front', 'gesture/status',            # 바로 앞 사람 등록 요청, 제스처 상태
     'artwork_zone/state', 'artwork_zone/entered', 'arti/tour_end',  # 작품 구역 (tour.launch.py), 출구 진입, 관람 끝
+    'goal_update',                                               # nav2_follow → Nav2 추종 목표 (follower:=nav2)
 ]
 
 
@@ -110,6 +112,9 @@ def make_nodes(context):
     tracker = arg('tracker').lower()
     if tracker not in TRACKER_MODES:
         raise RuntimeError(f'tracker:={tracker} → {" | ".join(TRACKER_MODES)} 중 하나')
+    follower = arg('follower').lower()
+    if follower not in ('visitor', 'nav2'):
+        raise RuntimeError(f'follower:={follower} → visitor | nav2 중 하나')
     params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true'}
     actions = []
 
@@ -130,7 +135,8 @@ def make_nodes(context):
         params['auto_register'] = False             # 등록은 제스처로 (register_front는 multi_tracker_node만 받음)
 
     actions.append(Node(
-        package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
+        package='arti_follow', executable='nav2_follow' if follower == 'nav2' else 'visitor_follower',
+        namespace=ns, output='screen',
         parameters=[params]))
 
     return actions
@@ -148,6 +154,9 @@ def generate_launch_description():
                                           'camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
                               description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
+        DeclareLaunchArgument('follower', default_value='visitor',
+                              description='visitor(기본): visitor_follower (직접 주행), '
+                                          'nav2: nav2_follow (주행은 Nav2, nav2_follow.yaml로 nav2가 떠 있어야 함)'),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
                               description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),

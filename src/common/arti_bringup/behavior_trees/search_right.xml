@@ -1,0 +1,21 @@
+<!--
+  관람객을 놓쳤을 때 찾기 (nav2_follow SEARCH). 목표 = 마지막으로 본 위치.
+  ① 그 위치로 이동 (최대 5 s, search_move_time) → 못 가도 ForceSuccess로 다음 단계
+  ② 제자리에서 오른쪽(시계)으로 한 바퀴 (spin 속도는 nav2_follow.yaml behavior_server max_rotational_vel 0.63 → 약 10 s)
+  search_left.xml / search_right.xml은 회전 방향(spin_dist 부호)만 다르다. 사람이 가던 쪽부터 돈다.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence name="SearchVisitor">
+      <ForceSuccess>
+        <Timeout msec="5000">
+          <Sequence>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <FollowPath path="{path}" controller_id="FollowPath"/>
+          </Sequence>
+        </Timeout>
+      </ForceSuccess>
+      <Spin spin_dist="-6.28" time_allowance="13.0" is_recovery="false"/>
+    </Sequence>
+  </BehaviorTree>
+</root>

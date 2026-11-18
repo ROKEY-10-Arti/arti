@@ -426,7 +426,7 @@ class VisitorFollower(Node):
         돌려줌: 초 [s] (float)"""
         return self.get_clock().now().nanoseconds / 1e9
 
-    def lookup(self, target, source, stamp=None):
+    def lookup(self, target, source, stamp=None): #로봇 위치를 파악하기 위해 사용
         """TF에서 source 좌표계가 target 좌표계의 어디에 있는지 꺼낸다 (쓰기 편하게 2D만).
         받음: target  기준 좌표계 (예: 'odom')
               source  찾을 좌표계 (예: 'base_link')
@@ -451,6 +451,7 @@ class VisitorFollower(Node):
         받음: msg.header.frame_id, msg.header.stamp (그 시각 TF로 변환), msg.point.x, y
         바뀜: kf.x (위치·속도), seen (마지막으로 본 시각), seen_since (등록 확인: 계속 보이기 시작한 시각)
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
+        # 관람객 좌표를 받아서 주행 계산에 쓸수있게
         if self.state not in ('WAIT_VISITOR', 'FOLLOW', 'SEARCH', 'WAIT'):
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
         if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
@@ -480,7 +481,7 @@ class VisitorFollower(Node):
             vel *= self.p['max_person_speed'] / speed
         return pos, vel
 
-    def on_scan(self, msg):
+    def on_scan(self, msg): # 장애물을 알아내기 위한 함수
         """[구독] scan (LaserScan) — 라이다가 올 때마다.
         거리 → (x, y) 점, inf·nan·로봇 몸(0.2 m 안)·범위 밖은 버림 → 그 시각 TF로 odom 좌표.
         받음: msg.ranges, angle_min, angle_increment, range_max, header
@@ -500,7 +501,7 @@ class VisitorFollower(Node):
         바뀜: docked (undock·dock을 할지 판단), dock_visible (도킹 직전 로그)"""
         self.docked, self.dock_visible = msg.is_docked, msg.dock_visible
 
-    def on_enable(self, msg):
+    def on_enable(self, msg): # 수동 조작 버튼으로 로봇 옮기는 경우
         """[구독] follow/enable (Bool) — false면 바로 정지하고 이후 cmd_vel을 보내지 않음 (다른 노드에 주행을 넘길 때).
         받음: msg.data
         바뀜: enabled"""
@@ -542,7 +543,7 @@ class VisitorFollower(Node):
         if self.diag is not None:
             self.record(t0)
 
-    def step(self):
+    def step(self): # 메인 함수 모든 상태 점검하고 어떻게 할지 파악
         """0.1 s마다 한 번: 지금 상태를 위에서부터 차례로 확인하고, 처음 맞는 곳에서 행동한 뒤 return.
         순서가 중요하다 (안전 확인이 따라가기보다 먼저). if마다 [번호] 주석 = 무엇을 묻고 어디로 가는지.
         받음: (state, kf.x, seen, scan_time, TF odom→base_link)
@@ -753,6 +754,8 @@ class VisitorFollower(Node):
         로봇을 움직이지 않는다 (지도에 '여기 있다' 핀만 꽂음). 로봇이 이미 출발 지점(도크 앞)에 있다는 전제.
         받음: now, (start, TF map→base_link)
         내보냄: initialpose 한 번 → 잡히면 state START_FACE, 위치를 아예 못 잡으면 end_tour(no_localization)"""
+        
+        # 현재 지도위 위치를 알려주는 함수 
         p = self.p
         if self.start is None or not p['set_initial_pose']:
             return self.set_state('START_FACE')     # 초기 위치를 안 보냄 → 지금 AMCL 위치 그대로
@@ -856,7 +859,7 @@ class VisitorFollower(Node):
         self.get_logger().info(f'{why} → 도크 앞 {self.p["return_point"]} {self.home}으로 복귀')
         self.set_state('RETURN')
 
-    def run_tour(self, goal):
+    def run_tour(self, goal): #start_tour 관람이 끄날 때까지 기다림, 마지막 결과를 키오스크에 돌려둠
         """[액션 실행, 관람 내내] start_tour goal 하나를 처음부터 끝까지 맡는다 (goal None = auto_start).
         검사(goal_problem) → begin_tour → undock → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
@@ -1068,7 +1071,7 @@ class VisitorFollower(Node):
         dt = p['control_period']
         # ── ① 후보 만들기 ──────────────────────────────────────────────────────────
         # 입력: v0, w0, 가속 한계(linear_accel 0.8, angular_accel 1.5), 최대 속도(0.3, 0.8)
-        # 출력: vs (7,)  0.1 s 안에 낼 수 있는 전진 속도 7개   예) 0.12 ~ 0.28
+        # 출력: vs (7,)  0.1 s 안에 낼 수 있는 전진 속도 7개   예) 0.15 ~ 0.25
         #       ws (15,) 0.1 s 안에 낼 수 있는 회전 속도 15개  예) -0.15 ~ 0.15
         vs = np.linspace(max(0.0, v0 - p['linear_accel'] * dt),
                          min(p['max_linear'], v0 + p['linear_accel'] * dt), p['v_samples'])
@@ -1134,7 +1137,7 @@ class VisitorFollower(Node):
         i = int(np.argmin(cost))
         return float(V[i]), float(W[i])
 
-    def field(self, goal, here, obs):
+    def field(self, goal, here, obs): # 목표까지 몇 m 돌아가야하는지 지도 만드는 함수 
         """격자 칸마다 goal까지 장애물을 돌아가는 거리 [m] (dwa의 벌점용).
         10 cm 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 BFS로 퍼져 나가며 거리 채움.
         받음: goal (x, y), here 로봇 (x, y), obs 장애물 점 (N, 2)

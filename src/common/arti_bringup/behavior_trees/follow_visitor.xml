@@ -1,0 +1,20 @@
+<!--
+  관람객 따라가기 (nav2_follow FOLLOW·WAIT_VISITOR).
+  Jazzy follow_point.xml에서 TruncatePath를 빼고(목표가 이미 사람에서 0.8 m 앞) 재계획을 1 → 5 Hz로.
+  navigate_to_pose는 한 번만 오고, 그 뒤 목표는 goal_update 토픽으로 바뀐다 (GoalUpdater).
+  KeepRunningUntilFailure: 목표에 도착해도 끝나지 않고 다음 goal_update를 기다린다.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence name="FollowVisitor">
+      <RateController hz="5.0">
+        <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
+          <ComputePathToPose goal="{updated_goal}" path="{path}" planner_id="GridBased"/>
+        </GoalUpdater>
+      </RateController>
+      <KeepRunningUntilFailure>
+        <FollowPath path="{path}" controller_id="FollowPath"/>
+      </KeepRunningUntilFailure>
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

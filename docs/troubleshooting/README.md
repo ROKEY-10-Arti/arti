@@ -53,6 +53,7 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-16 | follow | [사람 좌표는 오는데 로봇이 안 움직임 (localization 꺼져서 map→odom 없음)](follow/2026-11-16-no-map-odom-follower-idle.md) | 해결 | jsy0605 |
 | 2026-11-18 | follow | [제자리에서 저절로 돌고 회전이 들쑥날쑥, 빨리 걸으면 놓침 (Create 3 작은 회전 명령, DWA w=0 후보 없음)](follow/2026-11-18-search-spin-tiny-w-create3.md) | 확인 중 | jsy0605 |
 | 2026-11-18 | follow | [관람객이 1.5 m 넘게 멀어지면 로봇이 서 버리고 최종 인식 지점으로도 안 감 (depth 바닥 점 → DWA 경로 없음)](follow/2026-11-18-far-visitor-stall-depth-floor.md) | 확인 중 | jsy0605 |
+| 2026-11-18 | follow | [start_tour 액션을 보내면 undock 뒤 10초 만에 no_localization으로 끝남 (TF 조회 코드 오타)](follow/2026-11-18-no-localization-tf-lookup-typo.md) | 확인 중 | 이정욱 |
 | 2026-11-17 | env | [localization이 "Configuring amcl"에서 멈춤 (Discovery Server 연결 안 됨)](env/2026-11-17-localization-stuck-discovery.md) | 해결 | jsy0605 |
 | 2026-11-17 | env | [nav2가 활성화되지 않음 (lifecycle 서비스 응답이 Discovery Server 지연으로 사라짐)](env/2026-11-17-nav2-lifecycle-stuck-discovery.md) | 확인 중 | jsy0605 |
 | 2026-11-18 | env | [pull 뒤 colcon build "can't copy ... doesn't exist" (symlink-install 깨진 링크) + send_goal "action type is invalid"](env/2026-11-18-symlink-install-stale-build-link.md) | 해결 | jsy0605 |
