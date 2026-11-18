@@ -1,3 +1,26 @@
+"""
+ReID 디버그 시각화 렌더러 (reid_visualizer.py)
+
+[전체 렌더링 파이프라인 (`ReIDDebugVisualizer.render`)]
+1. 시계열 이력 관리 (`sim_history`):
+   - 타겟이 잠금(`target_id is not None and anchor_bank is not None`)되어 있는 동안
+     매 프레임 각 트랙 ID의 `similarity`를 최대 `history_len`(120 프레임) 길이의 덱에 누적합니다.
+2. 상단 상태 헤더 및 Search Status 출력:
+   - 현재 Adaptive 상태(`IDLE`/`SAFE`/`GUARD`/`SEARCH`/`RECOVERED`), 타겟 ID, 실시간 임계값
+     (`reid_match_thresh`, `coexist_min_sim`, `recover_margin`, `recover_confirm_frames`)과
+     탐색 보류/확정 사유(`metrics.search_reason`)를 표시합니다.
+3. 유사도 시계열 선 그래프:
+   - 최근 120프레임 동안 타겟 및 경쟁 후보들의 유사도 추이를 그리고, `reid_match_thresh`/`coexist_min_sim` 수평 기준선을 표시합니다.
+4. 인원별 부위 유사도 막대 (`Per-ID Part Similarity`):
+   - 상위 3명(타겟 우선, 이후 유사도 내림차순)에 대해 `[TGT]`/`[COEX]`/`[CAND]` 태그와
+     종합(`Tot`), 상의(`U`), 허벅지(`M`), 정강이(`L`), 전체(`F`) 유사도를 가로 막대로 출력합니다.
+5. 304차원 HSV 벡터 히트맵 (`_render_hsv_vector_patch`):
+   - 등록 시점 `Anchor`(Upper/Mid/Full), 시간 적응 EMA `Recent Full`, 비교 대상(`Compare`/`Target`)의
+     304D 벡터를 18x16 Hue-Saturation 컬러 히트맵 + 16-bin Value 막대 이미지로 복원해 나란히 비교합니다.
+6. 하단 가이드 패널:
+   - 상태 정의, 태그 조건 및 트랙바 튜닝 파라미터 설명을 고정 범례로 표시합니다.
+"""
+
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -43,6 +66,11 @@ class ReIDDebugVisualizer:
         """
         304차원 특징 벡터(0:288 -> 18x16 H-S, 288:304 -> 16 V)를
         실제 Hue-Saturation 컬러 히트맵 + 밝기(V) 스트립 이미지로 변환합니다.
+
+        [시각화 원리]
+        - 앞 288차원을 `(18 Hue, 16 Sat)` 분포 행렬로 복원하고 최댓값 기준 `sqrt` 감마 정규화로 작은 빈도 색상도 보이게 합니다.
+        - 각 셀에 실제 `(Hue, Sat, Value=28+227*norm)` 색상을 채운 뒤 x축=Hue(0..180), y축=Sat(255..0)로 전치해 렌더링합니다.
+        - 뒤 16차원은 무채색 밝기(V) 16단계 수평 막대로 우측 스트립에 표시합니다.
         """
         canvas = np.full((patch_h, patch_w + 26, 3), 26, dtype=np.uint8)
         if vec304 is None or len(vec304) < 304:
@@ -91,16 +119,26 @@ class ReIDDebugVisualizer:
         tracker: MultiModelTrackerCore,
         detections: List[UnifiedTrackedPerson],
     ) -> np.ndarray:
-        """현재 프레임의 시계열 유사도, 부위별 막대, 304D 벡터 비교 패널 이미지를 생성합니다."""
+        """
+        현재 프레임의 시계열 유사도, 부위별 막대, 304D 벡터 비교 패널 이미지를 생성합니다.
+
+        [구성 영역]
+        1. 상단 헤더: Adaptive State, Target ID, 4대 임계 파라미터 및 `Search Status` 사유
+        2. 120f 시계열 그래프: `reid_match_thresh` / `coexist_min_sim` 기준선과 ID별 유사도 곡선
+        3. 중단 부위 막대: 상위 3인(`TGT`/`COEX`/`CAND`)의 `Tot / U / M / L / F` 점수 막대
+        4. 하단 304D 히트맵: `Anchor`(Upper/Mid/Full) vs `Compare/Target` 분포 대조
+        5. 최하단 범례(Guide)
+        """
         self.frame_idx += 1
         panel = np.full((self.height, self.width, 3), 20, dtype=np.uint8)
 
-        # 활성 ID 기록 갱신 (타겟이 잠겨 있을 때만 의미 있는 similarity 기록)
+        # 활성 ID 기록 갱신 (타겟이 잠겨 있을 때만 의미 있는 similarity 기록; 미등록 상태에서는 그래프 초기화)
         locked = tracker.target_id is not None and tracker.anchor_bank is not None
         if locked:
             for p in detections:
                 dq = self.sim_history.setdefault(p.track_id, deque(maxlen=self.history_len))
                 dq.append((self.frame_idx, float(p.similarity)))
+            # 그래프 윈도우(120프레임) 밖으로 사라진 오래된 트랙 ID 이력 정리
             stale = [
                 tid for tid, dq in self.sim_history.items()
                 if not dq or (self.frame_idx - dq[-1][0]) > self.history_len
@@ -230,6 +268,7 @@ class ReIDDebugVisualizer:
         )
 
         anchor_bank: Optional[PartFeatureBank] = tracker.anchor_bank
+        recent_bank: Optional[PartFeatureBank] = tracker.recent_bank
         compare_person: Optional[UnifiedTrackedPerson] = None
         if sorted_dets:
             non_targets = [p for p in sorted_dets if not p.is_target and p.feature_bank is not None]
@@ -254,37 +293,50 @@ class ReIDDebugVisualizer:
             406,
         )
 
+        # 하단 왼쪽 2열: 등록 원본(Anchor Full)과 EMA 적응 특징(Recent Full)을 나란히 배치해 변화 확인 가능
+        _place_patch(
+            'Anchor Full',
+            anchor_bank.full if anchor_bank is not None else None,
+            18,
+            520,
+        )
+        _place_patch(
+            'Recent Full (EMA)',
+            recent_bank.full if recent_bank is not None else None,
+            186,
+            520,
+        )
+
         if compare_person is not None and compare_person.feature_bank is not None:
             cb = compare_person.feature_bank
             c_tag = 'Target' if compare_person.is_target else 'Compare'
             lbl_prefix = f'{c_tag} ID:{compare_person.track_id}'
             _place_patch(f'{lbl_prefix} Upper', cb.upper, 368, 406)
             _place_patch(f'{lbl_prefix} Mid', cb.mid, 536, 406)
-
-            _place_patch(
-                'Anchor Full',
-                anchor_bank.full if anchor_bank is not None else None,
-                18,
-                520,
-            )
             _place_patch(f'{lbl_prefix} Full', cb.full, 368, 520)
+
             cv2.putText(
                 panel,
                 f'Total Sim: {compare_person.similarity:.3f}',
-                (536, 560),
+                (536, 554),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
+                0.50,
                 (80, 255, 120) if compare_person.is_target else (0, 200, 255),
                 1,
                 cv2.LINE_AA,
             )
-        else:
-            _place_patch(
-                'Anchor Full',
-                anchor_bank.full if anchor_bank is not None else None,
-                18,
-                520,
-            )
+            if anchor_bank is not None and recent_bank is not None:
+                ar_sim = tracker.current_extractor.hist_sim(anchor_bank.full, recent_bank.full)
+                cv2.putText(
+                    panel,
+                    f'A-R Sim: {ar_sim:.3f}',
+                    (536, 580),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.44,
+                    (190, 220, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         # 5. 하단 지표 안내 (Legend / Guide)
         cv2.rectangle(panel, (10, 614), (self.width - 10, self.height - 8), (28, 28, 28), -1)

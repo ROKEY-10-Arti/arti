@@ -1,0 +1,270 @@
+<mxfile host="app.diagrams.net" modified="2026-11-18T00:17:00.000Z" agent="Antigravity" version="24.7.17" type="device">
+  <diagram id="person-tracker-flow" name="인식 및 등록 모듈 흐름">
+    <mxGraphModel dx="1420" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1160" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 상단 공통 입력 및 1차 추적 -->
+        <mxCell id="rgb_in" value="RGB 영상 입력&#xa;(rgb img: /robot1/top_cam/image_raw/compressed&#xa;또는 웹캠 video_source)&#xa;_compressed_cb / _raw_cb / _poll_local_frame" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="40" width="310" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="handle_start" value="프레임 파이프라인 시작&#xa;GestureTestNode.handle_frame(frame)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="470" y="45" width="280" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="yolo_track" value="사람 탐지 및 1차 추적&#xa;MultiModelTrackerCore.process_frame()&#xa;(YOLO26n-pose + ByteTrack)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="830" y="40" width="320" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="target_check" value="타겟 등록 여부?&#xa;tracker.target_id" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="670" y="155" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- 왼쪽 컨테이너: 인식 모듈 -->
+        <mxCell id="rec_box" value="인식 모듈 (타겟 등록 후: target_id is not None)" style="swimlane;startSize=32;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="760" height="730" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_reid" value="Adaptive ReID 외형·공간 판별&#xa;PoseKeypointFeatureExtractor.extract()&#xa;compute_dual_similarity_detail() (Anchor / Recent 304D HSV)&#xa;COEX · SAFE(4f 이탈) · GUARD · SEARCH" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="150" y="48" width="350" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_found" value="타겟 인식 성공?&#xa;target is not None" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="225" y="158" width="200" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_lost10" value="유실 10초 경과?&#xa;target_lost_elapsed &gt;= 10s" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="510" y="158" width="210" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_wait" value="SEARCH 재식별 대기&#xa;LOST_WAIT 상태 발행" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="525" y="58" width="180" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_reset" value="타겟 자동 초기화&#xa;_reset_target()&#xa;(등록 모듈 상태로 복귀)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="520" y="280" width="190" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_bearing" value="사람 방위각 계산&#xa;localize_target() -&gt; alpha_c, half_sector&#xa;(hfov_deg 기반 핀홀 각도)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="195" y="275" width="260" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_scan" value="라이다 스캔&#xa;/robot1/scan&#xa;-&gt; _on_scan()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="20" y="375" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_dist" value="사람 거리 측정 (cam_dist_m)&#xa;localize_target(): LiDAR p25 클러스터 평균&#xa;(미수신 시 BBox 높이 기반 CamEst 폴백)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="195" y="370" width="260" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_tf" value="/tf_static &amp; /tf&#xa;_on_tf_static_msg()&#xa;_on_tf_msg() / _lookup()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="20" y="510" width="140" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_cam" value="관람객 좌표 계산&#xa;CAM(x,y,z) -&gt; base_link 변환&#xa;localize_target(): cam_xyz -&gt; base_xyz" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="195" y="470" width="260" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_map" value="관람객 맵 좌표 변환 MAP(x,y)&#xa;_get_map_from_base_matrix() (AMCL / Init+Odom)&#xa;-&gt; apply_transform_point() -&gt; map_xyz" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="180" y="562" width="290" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rec_pub" value="관람객 위치 발행&#xa;_publish_target_outputs()&#xa;/robot1/target_person/point_map (+ point_base, marker)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=11;" vertex="1" parent="rec_box">
+          <mxGeometry x="170" y="652" width="310" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- 오른쪽 컨테이너: 등록 모듈 -->
+        <mxCell id="reg_box" value="등록 모듈 (타겟 미등록: target_id is None)" style="swimlane;startSize=32;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="840" y="280" width="720" height="730" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_det_ok" value="인식 성공? (사람 탐지)&#xa;detections 존재 &amp; bw &gt;= 44px" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="160" y="48" width="250" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_skip" value="제스처 스캔 생략&#xa;(다음 프레임 대기)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="495" y="61" width="180" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_roi" value="손목 우선 정사각 ROI 생성&#xa;build_person_hand_rois()&#xa;(미검출 시 폴백: build_person_gesture_roi)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="140" y="162" width="290" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_mp" value="손 제스처 인식 (21관절 검출 및 분류)&#xa;HandGestureDetector.detect_in_roi()&#xa;-&gt; classify_hand_gesture() (FIST / OPEN_PALM)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="130" y="256" width="310" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_filter" value="얼굴 오검출 2단계 제외 &amp; Pose 손목 1:1 매칭&#xa;find_best_hand_owner() -&gt; match_hand_to_person_wrist()&#xa;(is_false_face_detection() 포함)&#xa;-&gt; pick_primary_observation()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="110" y="355" width="350" height="82" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_sm" value="제스처 상태머신 갱신 (주먹 -&gt; 펴기)&#xa;MultiTargetGestureManager.update()&#xa;-&gt; FistOpenStateMachine.update()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="135" y="465" width="300" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_trig" value="특정 제스처를 취했는가?&#xa;(Fist 4f -&gt; Open 4f)&#xa;prog.just_triggered" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="160" y="565" width="250" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reg_lock" value="타겟 등록 확정 및 특징 고정&#xa;select_target_by_id()&#xa;-&gt; _activate_target()&#xa;-&gt; _lock_target_bank() (304D Anchor)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=11;" vertex="1" parent="reg_box">
+          <mxGeometry x="475" y="572" width="220" height="76" as="geometry" />
+        </mxCell>
+
+        <!-- 하단 공통 시각화 및 반복 루프 -->
+        <mxCell id="gui_viz" value="GUI 오버레이 및 ReID Monitor 렌더링&#xa;_draw_top_bar() / _draw_progress_badge() / _draw_hand_skeleton()&#xa;ReIDDebugVisualizer.render() (120f 시계열, 부위 막대, 304D 히트맵)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="515" y="1050" width="550" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- 상단 연결선 -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="rgb_in" target="handle_start">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="handle_start" target="yolo_track">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="yolo_track" target="target_check">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="등록됨 (target_id != None)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;entryX=0.5;entryY=0;fontSize=11;" edge="1" parent="1" source="target_check" target="rec_reid">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="미등록 (target_id is None)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0.5;entryY=0;fontSize=11;" edge="1" parent="1" source="target_check" target="reg_det_ok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 인식 모듈 내부 연결선 -->
+        <mxCell id="e_r1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_reid" target="rec_found">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r2" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_found" target="rec_bearing">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r3" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_found" target="rec_lost10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r4" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_lost10" target="rec_wait">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r5" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_lost10" target="rec_reset">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_bearing" target="rec_dist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_scan" target="rec_dist">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_dist" target="rec_cam">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.25;entryX=0;entryY=0.5;" edge="1" parent="rec_box" source="rec_tf" target="rec_dist">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="175" y="526" />
+              <mxPoint x="175" y="405" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_r10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="rec_box" source="rec_tf" target="rec_cam">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.75;entryX=0;entryY=0.5;" edge="1" parent="rec_box" source="rec_tf" target="rec_map">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="168" y="559" />
+              <mxPoint x="168" y="595" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_r12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_cam" target="rec_map">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_r13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="rec_box" source="rec_map" target="rec_pub">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 등록 모듈 내부 연결선 -->
+        <mxCell id="e_g1" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_det_ok" target="reg_roi">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g2" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_det_ok" target="reg_skip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_roi" target="reg_mp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_mp" target="reg_filter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_filter" target="reg_sm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_sm" target="reg_trig">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g7" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="reg_box" source="reg_trig" target="reg_lock">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 하단 시각화 수렴 및 다음 프레임 반복 -->
+        <mxCell id="e_b1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.2;entryY=0;" edge="1" parent="1" source="rec_pub" target="gui_viz">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_b2" value="유실 대기" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0.35;entryY=0;fontSize=10;" edge="1" parent="1" source="rec_wait" target="gui_viz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="780" y="368" />
+              <mxPoint x="780" y="1025" />
+              <mxPoint x="707" y="1025" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_b3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.45;entryY=0;" edge="1" parent="1" source="rec_reset" target="gui_viz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="655" y="1025" />
+              <mxPoint x="762" y="1025" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_b4" value="No (다음 프레임)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.65;entryY=0;fontSize=10;" edge="1" parent="1" source="reg_trig" target="gui_viz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1125" y="1025" />
+              <mxPoint x="872" y="1025" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_b5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.8;entryY=0;" edge="1" parent="1" source="reg_lock" target="gui_viz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1425" y="1025" />
+              <mxPoint x="955" y="1025" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_b6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0.92;entryY=0;" edge="1" parent="1" source="reg_skip" target="gui_viz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1540" y="369" />
+              <mxPoint x="1540" y="1032" />
+              <mxPoint x="1021" y="1032" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_loop" value="반복 (다음 프레임)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;entryX=0.5;entryY=0;fontStyle=1;fontSize=11;" edge="1" parent="1" source="gui_viz" target="handle_start">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="20" y="1085" />
+              <mxPoint x="20" y="20" />
+              <mxPoint x="610" y="20" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

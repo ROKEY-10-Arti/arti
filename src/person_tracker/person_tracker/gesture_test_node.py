@@ -1,3 +1,32 @@
+"""
+제스처 기반 타겟 등록 및 ReID 추적/위치 추정 통합 실행 노드 (gesture_test_node.py)
+
+[전체 실행 흐름 및 주요 호출 함수]
+1. 영상 입력 수신:
+   - ROS 이미지 토픽 (`_compressed_cb` / `_raw_cb`) 또는 로컬 웹캠 캡처 스레드 (`_capture_loop` -> `_poll_local_frame`)를 통해
+     프레임을 수신하고 `handle_frame(frame)`을 호출합니다.
+2. 사람 탐지·추적 및 ReID (`MultiModelTrackerCore.process_frame`):
+   - `YOLO26n-pose` + ByteTrack 기반 `MODE_ADAPTIVE`로 프레임 내 사람을 추적하고,
+     타겟 잠금 상태일 때는 304D HSV 부위 특징 유사도(`similarity`)와 공간 점수(`_estimate_candidate_spatial`)로
+     SAFE / GUARD / SEARCH / RECOVERED 상태를 갱신합니다.
+3. 타겟 이탈 자동 초기화 (`handle_frame` 내 유실 타이머):
+   - `target_id`가 등록되어 있으나 현재 프레임에서 타겟을 놓친 시간(`target_lost_elapsed`)이
+     `target_lost_reset_sec`(기본 10초) 이상 지속되면 `_reset_target()`을 호출해 대기 상태로 복귀합니다.
+4. 미등록(`target_id is None`) 시 손 제스처 스캔 및 타겟 등록:
+   - 사람별 손목 우선 ROI 생성 (`build_person_hand_rois`)
+   - ROI 내부 MediaPipe 21관절 손 검출 (`HandGestureDetector.detect_in_roi`)
+   - 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 거리 매칭 (`find_best_hand_owner`)
+   - 동일 인물에 복수 손이 매칭되면 대표 1개 선택 (`HandGestureDetector.pick_primary_observation`)
+   - '주먹(Fist 4f) -> 손바닥 펴기(Open 4f)' 상태머신 갱신 (`MultiTargetGestureManager.update`)
+   - `just_triggered=True` 발생 시 `MultiModelTrackerCore.select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정
+5. 3D 공간 좌표 추정 및 발행 (`LidarPersonLocalizer.localize_target`):
+   - 타겟이 확정되면 LiDAR + 카메라 TF(폴백: BBox 높이 기반 거리)로 `base_link`/`map` 좌표를 계산하고
+     `publish_target_topics=True`일 때 타겟 좌표/마커 토픽을 발행합니다.
+6. 시각화 및 실시간 튜닝 (`_draw_top_bar`, `ReIDDebugVisualizer.render`, `_ensure_reid_window`):
+   - 메인 GUI 창에 BBox, ROI, 손 21관절 스켈레톤, 제스처 진행도, 좌표 오버레이를 출력하고,
+     별도 ReID 모니터 창에 유사도 시계열/부위 점수/304D 히트맵과 트랙바(`Match%`, `Coex%`, `Margin%`, `ConfirmF`)를 제공합니다.
+"""
+
 import os
 import threading
 import time
@@ -176,6 +205,7 @@ class GestureTestNode(Node):
         )
 
     def _ensure_reid_window(self):
+        """ReID 모니터 창과 4개 실시간 튜닝 트랙바(Match%, Coex%, Margin%, ConfirmF)를 생성·연동합니다."""
         cv2.namedWindow(self.reid_win_name)
         m_val = int(round((self.tracker.reid_match_thresh if self.tracker else 0.50) * 100))
         c_val = int(round((self.tracker.coexist_min_sim if self.tracker else 0.74) * 100))
@@ -269,6 +299,7 @@ class GestureTestNode(Node):
             self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
 
     def _reset_target(self, reason: str = '[타겟/제스처 초기화] 대기 상태로 복귀합니다.'):
+        """등록된 타겟, 제스처 상태머신, ReID 시계열 그래프 및 유실 타이머를 모두 초기 대기 상태로 되돌립니다."""
         if self.tracker is not None:
             self.tracker.select_target_by_id(None)
         self.gesture_mgr.reset_all()
@@ -486,6 +517,7 @@ class GestureTestNode(Node):
         )
 
     def _estimate_candidate_spatial(self, person: UnifiedTrackedPerson, w: int, h: int):
+        """ReID 후보 검증용 3D 위치 추정 콜백(토픽 발행 없이 map 또는 base_link XY 좌표와 센서 출처 반환)."""
         if self.localizer is None:
             return None
         res = self.localizer.localize_target(person, w, h, publish=False)
@@ -494,6 +526,21 @@ class GestureTestNode(Node):
         return (res.base_xyz[0], res.base_xyz[1]), 'base_link', res.source
 
     def handle_frame(self, frame: np.ndarray):
+        """
+        프레임 1장을 입력받아 전체 추적 -> 제스처 등록 -> 3D 위치 추정 -> GUI 렌더링을 수행하는 메인 파이프라인.
+
+        [단계별 처리 원리]
+        1. 추적/ReID (`tracker.process_frame`): 사람 BBox·Pose 키포인트 추적 및 타겟 잠금 시 SAFE/GUARD/SEARCH 수행.
+        2. 10초 유실 리셋 감시: `target_id`가 등록되어 있으나 현재 프레임에 `target is None`인 상태가
+           `target_lost_reset_sec`(기본 10초) 이상 경과하면 `_reset_target()`을 실행해 새 제스처를 받을 수 있게 함.
+        3. 제스처 스캔 (`target_id is None`일 때만 실행):
+           - 인원별 손목 우선 ROI 생성(`build_person_hand_rois`) -> 손 검출(`detect_in_roi`)
+           - `find_best_hand_owner()`로 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 최단거리 주인 배정
+           - 인원별 대표 손(`pick_primary_observation`)으로 `gesture_mgr.update()` 전이 판정 ->
+             `just_triggered` 시 `select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정.
+        4. 위치 추정 및 발행: 확정된 타겟에 대해 `localizer.localize_target(..., publish=publish_target_topics)` 호출.
+        5. GUI 출력: 메인 영상 오버레이 + `[V]` 활성화 시 `reid_viz.render()` 실시간 표시.
+        """
         t_start = time.perf_counter()
         now_wall = time.time()
         self.last_frame_wall_time = now_wall
@@ -516,6 +563,7 @@ class GestureTestNode(Node):
         t_gesture_ms = 0.0
 
         if self.use_yolo_roi and self.tracker is not None:
+            # ReID 모니터 창이 켜져 있을 때만 비타겟 포함 전원의 유사도·히스토그램 계산 활성화
             want_all_sims = self.show_gui and self.show_reid_viz
             detections, target = self.tracker.process_frame(
                 frame,
@@ -532,6 +580,7 @@ class GestureTestNode(Node):
                     gesture_active = False
                     self._publish_status(f'LOCKED:id={self.tracker.target_id}')
                 else:
+                    # SEARCH 중이지만 일정 시간(target_lost_reset_sec) 이상 재발견 실패 시 자동 잠금 해제
                     if self.last_target_confirmed_time <= 0.0:
                         self.last_target_confirmed_time = now_wall
                     self.target_lost_elapsed = now_wall - self.last_target_confirmed_time
@@ -548,10 +597,12 @@ class GestureTestNode(Node):
                         gesture_active = False
                         self._publish_status(f'LOST_WAIT:{int(self.target_lost_elapsed)}s')
 
+            # 타겟 미등록 상태에서만 사람별 손 ROI 스캔 및 제스처 상태머신 구동
             if self.tracker.target_id is None:
                 t_g0 = time.perf_counter()
                 active_ids = [p.track_id for p in detections]
                 person_tuples = [(p.track_id, p.bbox, p.keypoints) for p in detections]
+                # A의 손 ROI에서 B의 손이 검출되어도 실제 Pose 손목 거리가 더 가까운 주인 ID에 귀속
                 assigned_obs: Dict[int, List[HandGestureObservation]] = {
                     p.track_id: [] for p in detections
                 }
