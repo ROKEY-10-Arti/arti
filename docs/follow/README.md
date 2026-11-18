@@ -43,7 +43,7 @@
 | UNDOCK | 액션 받음 | 도크에 붙어 있으면 undock (도크 밖이면 건너뜀) |
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
-| WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 첫 좌표 → "인식되었습니다" 안내 |
+| WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): feedback `registered=true`, "인식되었습니다" 안내 → FOLLOW. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
 | FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
@@ -77,6 +77,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
   관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
   (관람이 끝나면 `arti/tour_end`로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
+  `artwork_zone`은 `follow/state`가 FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정한다 (그 밖에는 `off (follow ...)`, 단독 테스트는 `need_follow:=false`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`
 - **인식 노드만 빼고 실행**: `ros2 launch arti_follow tour.launch.py tracker:=camera` → `multi_tracker_node`만 뺌 (카메라는 띄움).
   관람객 좌표(`target_person/point_map`)는 다른 PC의 인식 노드·bag 재생·`ros2 topic pub`에서 와야 한다.

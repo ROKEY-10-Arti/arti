@@ -1,6 +1,8 @@
 """작품 구역 판정 → 작품 설명·안내 음성 (T32 정지·구역 판정·설명).
 
 입력  target_person/point_map (PointStamped, frame_id map)  인식 모듈이 준 관람객 좌표
+      follow/state (std_msgs/String, latched)                 visitor_follower 상태. FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정
+                                                            (need_follow:=false면 무시 — 이 노드만 따로 테스트할 때)
       arti/tour_end (std_msgs/Empty)                        관람 끝(visitor_follower) → 이 관람객 데이터 삭제
                                                             (좌표 기록, 설명한 작품, 안내 구역 기록, 진행 중 설명 취소)
 출력  explain_artwork (arti_interfaces/action/ExplainArtwork)  액션 클라이언트 → arti_audio guide_audio_node
@@ -44,7 +46,10 @@ PARAMS = {
     'lost_timeout': 1.0,           # 좌표가 이만큼 안 오면 머무름 초기화·설명 취소 [s]
     'guide_rearm_time': 30.0,      # 같은 안내 구역 안내를 다시 할 수 있는 간격 [s]
     'check_period': 0.2,           # 판정 주기 [s]
+    'need_follow': True,           # visitor_follower가 추종 중(등록 뒤)일 때만 판정. false = 늘 판정 (단독 테스트)
 }
+
+TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')    # visitor_follower follow/state 중 관람객이 등록돼 추종 중인 상태
 
 
 class Zone:
@@ -105,6 +110,7 @@ class ArtworkZone(Node):
         self.guided_at = {}                    # 안내 구역별 마지막 안내 시각
         self.state = None
         self.warned_frame = False
+        self.follow_state = None               # visitor_follower follow/state (아직 못 받으면 None)
 
         self.explain = ActionClient(self, ExplainArtwork, 'explain_artwork')
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
@@ -115,6 +121,7 @@ class ArtworkZone(Node):
         self.explaining_pub.publish(String(data=''))
         self.create_subscription(PointStamped, 'target_person/point_map', self.on_person, 10)
         self.create_subscription(Empty, 'arti/tour_end', self.on_tour_end, 10)
+        self.create_subscription(String, 'follow/state', self.on_follow_state, latched)
         self.create_timer(self.p['check_period'], self.tick)
 
     def now(self):
@@ -132,6 +139,9 @@ class ArtworkZone(Node):
             self.track.popleft()
         self.seen = now
 
+    def on_follow_state(self, msg):
+        self.follow_state = msg.data
+
     def on_tour_end(self, _msg):
         """로봇 1대 = 관람객 1명. 관람이 끝나면 그 사람 데이터를 남기지 않는다."""
         if self.active:
@@ -147,6 +157,12 @@ class ArtworkZone(Node):
 
     def tick(self):
         now = self.now()
+        if self.p['need_follow'] and self.follow_state not in TRACKING:   # 등록 전·관람 밖 → 판정 안 함
+            self.track.clear()
+            self.inside.clear()
+            if self.active:
+                self.cancel(f'추종 중 아님 ({self.follow_state})')
+            return self.set_state(f'off (follow {self.follow_state})')
         if now - self.seen > self.p['lost_timeout']:
             self.track.clear()
             self.inside.clear()
