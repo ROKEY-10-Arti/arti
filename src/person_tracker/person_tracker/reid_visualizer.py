@@ -148,12 +148,12 @@ class ReIDDebugVisualizer:
         else:
             self.sim_history.clear()
 
-        # 1. 상단 헤더 + SEARCH 보류/확정 사유
+        # 1. 상단 헤더 + EMA 상태 + SEARCH 보류/확정 사유
         status_txt = (
-            f'ReID Monitor | State:{tracker.metrics.adaptive_state} | '
-            f'Target:{tracker.target_id} | '
-            f'Match:{tracker.reid_match_thresh:.2f} Coex:{tracker.coexist_min_sim:.2f} '
-            f'Gap:{tracker.recover_margin:.2f} Conf:{tracker.recover_confirm_frames}f'
+            f'State:{tracker.metrics.adaptive_state} Tgt:{tracker.target_id} | '
+            f'EMA:{tracker.metrics.ema_status}(>={tracker.ema_min_sim:.2f},a={tracker.ema_alpha:.2f}) | '
+            f'M:{tracker.reid_match_thresh:.2f} C:{tracker.coexist_min_sim:.2f} '
+            f'G:{tracker.recover_margin:.2f} F:{tracker.recover_confirm_frames}f'
         )
         cv2.putText(panel, status_txt, (12, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1, cv2.LINE_AA)
         reason_txt = tracker.metrics.search_reason

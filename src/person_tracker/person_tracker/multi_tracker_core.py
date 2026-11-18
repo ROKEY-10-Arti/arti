@@ -79,6 +79,7 @@ class MultiTrackerMetrics:
     max_infer_fps: float = 0.0
     adaptive_state: str = 'IDLE'
     search_reason: str = ''
+    ema_status: str = 'IDLE'
 
 
 class MultiModelTrackerCore:
@@ -125,13 +126,23 @@ class MultiModelTrackerCore:
         device: str = '',
         conf: float = 0.15,
         iou: float = 0.55,
+        reid_match_thresh: float = 0.50,
+        search_min_sim: float = 0.48,
+        coexist_min_sim: float = 0.74,
+        recover_margin: float = 0.06,
+        recover_confirm_frames: int = 2,
+        id_switch_thresh: float = 0.48,
+        safe_mismatch_limit: int = 4,
+        ema_min_sim: float = 0.60,
+        ema_alpha: float = 0.04,
+        ema_require_single: bool = True,
     ):
         self.family_idx = family_idx if family_idx in self.FAMILIES else 3
         self.task_idx = task_idx if task_idx in self.TASKS else 3
         self.mode = mode if mode in self.MODE_NAMES else 5
         self.imgsz = imgsz
-        self.conf = conf
-        self.iou = iou
+        self.conf = float(conf)
+        self.iou = float(iou)
 
         if not device:
             self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -159,11 +170,11 @@ class MultiModelTrackerCore:
 
         # 오인식 예방 상태 (SAFE 이탈 검사 + COEX 공존 비타겟 + SEARCH 연속 확정)
         self.safe_mismatch_count: int = 0
-        self.safe_mismatch_limit: int = 4
+        self.safe_mismatch_limit: int = max(1, int(safe_mismatch_limit))
         self.coexisting_non_target_ids: set[int] = set()
         self.recover_candidate_id: Optional[int] = None
         self.recover_confirm_count: int = 0
-        self.recover_confirm_frames: int = 2
+        self.recover_confirm_frames: int = max(1, int(recover_confirm_frames))
         self.last_search_reason: str = ''
 
         # 라이다/맵 3D 위치 기반 타겟 기억 상태 (다른 사람과 혼동 방지용)
@@ -171,11 +182,14 @@ class MultiModelTrackerCore:
         self.last_target_world_frame: str = ''
         self.last_target_seen_time: float = 0.0
 
-        self.reid_match_thresh = 0.50
-        self.search_min_sim = 0.48
-        self.coexist_min_sim = 0.74
-        self.recover_margin = 0.06
-        self.id_switch_thresh = 0.48
+        self.reid_match_thresh = float(reid_match_thresh)
+        self.search_min_sim = float(search_min_sim)
+        self.coexist_min_sim = float(coexist_min_sim)
+        self.recover_margin = float(recover_margin)
+        self.id_switch_thresh = float(id_switch_thresh)
+        self.ema_min_sim = float(ema_min_sim)
+        self.ema_alpha = float(ema_alpha)
+        self.ema_require_single = bool(ema_require_single)
 
         self.current_model_name = self._build_model_filename(self.family_idx, self.task_idx)
         self.model = self._get_or_load_model(self.current_model_name)
@@ -490,6 +504,7 @@ class MultiModelTrackerCore:
             )
 
             person_banks: Dict[int, Optional[PartFeatureBank]] = {}
+            ema_status = 'IDLE'
             compute_all_now = (
                 self.anchor_bank is not None
                 and (self.mode in self.REID_ACTIVE_MODES or compute_all_sims)
@@ -611,10 +626,15 @@ class MultiModelTrackerCore:
                             best_candidate.is_target = True
                             current_target = best_candidate
 
-                    if current_target is not None and current_target.similarity >= 0.62:
+                    if current_target is not None and current_target.similarity >= self.ema_min_sim:
                         extractor.update_recent_bank(
-                            self.recent_bank, person_banks.get(current_target.track_id)
+                            self.recent_bank,
+                            person_banks.get(current_target.track_id),
+                            alpha=self.ema_alpha,
                         )
+                        ema_status = 'ACTIVE'
+                    else:
+                        ema_status = 'HOLD(sim)'
 
                 # 3. 모드 5 (Adaptive 스위칭)
                 elif self.mode == self.MODE_ADAPTIVE and self.anchor_bank is not None:
@@ -667,12 +687,23 @@ class MultiModelTrackerCore:
                             self.safe_mismatch_count = 0
                             self.recover_candidate_id = None
                             self.recover_confirm_count = 0
-                            # 타겟 혼자만 있고 고신뢰도(>=0.72)일 때만 recent_bank EMA 갱신 (타인 혼입 차단)
-                            if len(detections) == 1 and current_target.similarity >= 0.72:
-                                extractor.update_recent_bank(self.recent_bank, t_bank)
+                            # 기본은 타겟 혼자(ema_require_single)이고 유사도>=ema_min_sim일 때만 recent_bank EMA 갱신
+                            if (
+                                (not self.ema_require_single or len(detections) == 1)
+                                and current_target.similarity >= self.ema_min_sim
+                            ):
+                                extractor.update_recent_bank(
+                                    self.recent_bank, t_bank, alpha=self.ema_alpha
+                                )
+                                ema_status = 'ACTIVE'
+                            elif self.ema_require_single and len(detections) != 1:
+                                ema_status = f'HOLD({len(detections)}P)'
+                            else:
+                                ema_status = 'HOLD(sim)'
 
                     if current_target is None:
                         adaptive_state = 'SEARCH'
+                        ema_status = 'HOLD(SEARCH)'
                         scored_search: List[Tuple[float, UnifiedTrackedPerson]] = []
                         for p in detections:
                             b = person_banks.get(p.track_id)
@@ -762,6 +793,7 @@ class MultiModelTrackerCore:
 
                     elif self._is_crowded_near_target(current_target, detections):
                         adaptive_state = 'GUARD'
+                        ema_status = 'HOLD(GUARD)'
                         self.safe_mismatch_count = 0
                         self.recover_candidate_id = None
                         self.recover_confirm_count = 0
@@ -812,6 +844,11 @@ class MultiModelTrackerCore:
                             self.last_target_world_xy, self.last_target_world_frame, _ = est
                             self.last_target_seen_time = time.time()
         else:
+            ema_status = (
+                'HOLD(EMPTY)'
+                if (self.mode == self.MODE_ADAPTIVE and self.target_id is not None)
+                else 'IDLE'
+            )
             if self.mode == self.MODE_ADAPTIVE and self.target_id is not None:
                 adaptive_state = 'SEARCH'
                 self.recover_candidate_id = None
@@ -842,6 +879,7 @@ class MultiModelTrackerCore:
         if adaptive_state == 'SAFE' or adaptive_state == 'GUARD' or adaptive_state == 'IDLE':
             self.last_search_reason = ''
         m.search_reason = self.last_search_reason
+        m.ema_status = ema_status
 
         self.last_detections = detections
         return detections, target_person

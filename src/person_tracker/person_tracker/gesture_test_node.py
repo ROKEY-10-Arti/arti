@@ -99,6 +99,31 @@ class GestureTestNode(Node):
         self.declare_parameter('show_gui', True)
         self.declare_parameter('show_reid_viz', True)
 
+        # 트래커 / ReID / EMA 주요 임계 파라미터 (launch/CLI에서 --ros-args -p 로 일괄 조정 가능)
+        tracker_param_defaults = {
+            'tracker_family_idx': 3,
+            'tracker_task_idx': 3,
+            'tracker_mode': 5,
+            'tracker_conf': 0.15,
+            'tracker_iou': 0.55,
+            'reid_match_thresh': 0.50,
+            'search_min_sim': 0.48,
+            'coexist_min_sim': 0.74,
+            'recover_margin': 0.06,
+            'recover_confirm_frames': 2,
+            'id_switch_thresh': 0.48,
+            'safe_mismatch_limit': 4,
+            'ema_min_sim': 0.60,
+            'ema_alpha': 0.04,
+            'ema_require_single': True,
+        }
+        for p_name, p_default in tracker_param_defaults.items():
+            self.declare_parameter(p_name, p_default)
+        self._tracker_cfg = {
+            p_name: self.get_parameter(p_name).value
+            for p_name in tracker_param_defaults
+        }
+
         self.use_yolo_roi = bool(self.get_parameter('use_yolo_roi').value)
         self.use_localizer = bool(self.get_parameter('use_localizer').value)
         self.publish_target_topics = bool(self.get_parameter('publish_target_topics').value)
@@ -200,10 +225,11 @@ class GestureTestNode(Node):
     def _ensure_reid_window(self):
         """ReID 모니터 창과 4개 실시간 튜닝 트랙바(Match%, Coex%, Margin%, ConfirmF)를 생성·연동합니다."""
         cv2.namedWindow(self.reid_win_name)
-        m_val = int(round((self.tracker.reid_match_thresh if self.tracker else 0.50) * 100))
-        c_val = int(round((self.tracker.coexist_min_sim if self.tracker else 0.74) * 100))
-        g_val = int(round((self.tracker.recover_margin if self.tracker else 0.06) * 100))
-        f_val = int(self.tracker.recover_confirm_frames if self.tracker else 2)
+        cfg = self._tracker_cfg
+        m_val = int(round((self.tracker.reid_match_thresh if self.tracker else float(cfg['reid_match_thresh'])) * 100))
+        c_val = int(round((self.tracker.coexist_min_sim if self.tracker else float(cfg['coexist_min_sim'])) * 100))
+        g_val = int(round((self.tracker.recover_margin if self.tracker else float(cfg['recover_margin'])) * 100))
+        f_val = int(self.tracker.recover_confirm_frames if self.tracker else int(cfg['recover_confirm_frames']))
 
         def _on_match(v):
             if self.tracker is not None:
@@ -230,12 +256,25 @@ class GestureTestNode(Node):
 
     def _ensure_tracker(self):
         if self.tracker is None:
+            cfg = self._tracker_cfg
             self.tracker = MultiModelTrackerCore(
-                family_idx=3,
-                task_idx=3,
-                mode=5,
+                family_idx=int(cfg['tracker_family_idx']),
+                task_idx=int(cfg['tracker_task_idx']),
+                mode=int(cfg['tracker_mode']),
                 imgsz=self.tracker_imgsz,
                 device=self.tracker_device,
+                conf=float(cfg['tracker_conf']),
+                iou=float(cfg['tracker_iou']),
+                reid_match_thresh=float(cfg['reid_match_thresh']),
+                search_min_sim=float(cfg['search_min_sim']),
+                coexist_min_sim=float(cfg['coexist_min_sim']),
+                recover_margin=float(cfg['recover_margin']),
+                recover_confirm_frames=int(cfg['recover_confirm_frames']),
+                id_switch_thresh=float(cfg['id_switch_thresh']),
+                safe_mismatch_limit=int(cfg['safe_mismatch_limit']),
+                ema_min_sim=float(cfg['ema_min_sim']),
+                ema_alpha=float(cfg['ema_alpha']),
+                ema_require_single=bool(cfg['ema_require_single']),
             )
 
     def _start_local_capture(self, src: Union[int, str]):
