@@ -18,6 +18,7 @@
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
       arti/tour_end (Empty)                        관람이 끝나면(취소·LOST·실패) 한 번 → 인식 모듈·artwork_zone이
                                                    그 관람객 데이터(re-ID 특징, 좌표 기록 등)를 지운다. 로봇 1대 = 관람객 1명
+      target_person/register_front (Empty)         WAIT_VISITOR에서 인식 모듈에 '바로 앞 사람을 등록' 요청
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
@@ -30,6 +31,8 @@
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
               (register_gap 안) 들어오면 등록 완료(on_registered: feedback registered, "인식되었습니다") → FOLLOW.
               확인하는 동안은 따라가지 않고 그 자리에서 바라본다. 끊기면 처음부터 다시 기다림
+              auto_register면 WAIT_VISITOR 동안 register_period마다 target_person/register_front를 보내
+              인식 모듈이 로봇 바로 앞 사람을 대상으로 등록하게 한다 (첫 요청 + register_settle 전 좌표 = 예전 대상 → 버림)
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
   SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
@@ -81,6 +84,9 @@ PARAMS = {
     'localize_timeout': 10.0,       # map 위치가 출발 지점 근처로 잡히길 이만큼 기다림 [s]
     'localize_tolerance': 0.3,      # initialpose 뒤 map 위치가 출발 지점에서 이 안이면 잡힌 것 [m]
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
+    'auto_register': True,          # WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)
+    'register_period': 1.0,         # 등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)
+    'register_settle': 0.5,         # 첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
@@ -244,6 +250,8 @@ class VisitorFollower(Node):
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
+        self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
+        self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
         self.artwork_total = self.count_artworks()  # feedback total (FREE)
@@ -349,6 +357,10 @@ class VisitorFollower(Node):
     def on_person(self, msg):
         if self.state not in ('WAIT_VISITOR', 'FOLLOW', 'SEARCH', 'WAIT'):
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
+        if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
+            stamp = Time.from_msg(msg.header.stamp).nanoseconds / 1e9
+            if self.reg_first is None or stamp < self.reg_first + self.p['register_settle']:
+                return                              # 등록 요청 전 좌표 = 예전 대상일 수 있음
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
@@ -498,6 +510,19 @@ class VisitorFollower(Node):
         self.dbg['reason'] = 'wait'
         self.drive(*self.ramp(0.0, 0.0))
 
+    def request_register(self, now):
+        """WAIT_VISITOR: 인식 모듈에 바로 앞 사람 등록을 요청 (등록돼 좌표가 올 때까지 register_period마다)."""
+        p = self.p
+        if self.state != 'WAIT_VISITOR' or not p['auto_register']:
+            return
+        if self.reg_last is not None and now - self.reg_last < p['register_period']:
+            return
+        if self.reg_first is None:
+            self.reg_first = now
+            self.get_logger().info('바로 앞 사람 등록 요청 (target_person/register_front)')
+        self.reg_last = now
+        self.register_pub.publish(Empty())
+
     def face(self, pose, here, person):
         """제자리에서 감속해 서서 person 쪽을 바라봄 (face_deadband 안이면 돌지 않음)."""
         turn = wrap(math.atan2(*(person - here)[::-1]) - pose[2])
@@ -515,6 +540,7 @@ class VisitorFollower(Node):
                 self.get_logger().info('등록 확인 중 끊김 → 다시 기다림')
             self.kf.x, self.seen_since = None, None
             self.dbg['reason'] = 'wait_visitor'
+            self.request_register(now)
             return self.drive(*self.ramp(0.0, 0.0))
         if now - self.seen_since < p['register_confirm_time']:
             self.dbg['reason'] = 'register_confirm'
@@ -617,6 +643,7 @@ class VisitorFollower(Node):
     def begin_tour(self):
         self.kf.x, self.seen, self.holding = None, -1e9, False
         self.face_until = self.loc_at = self.pose_sent = None
+        self.reg_first = self.reg_last = None
         self.active, self.end_reason = True, ''
         self.registered, self.explaining, self.visited = False, '', []
         self.seen_since = None

@@ -2,7 +2,8 @@
 
     ros2 launch arti_follow follow_test.launch.py
     → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
-      인식 창에서 따라갈 사람을 마우스로 클릭하면 "인식되었습니다" 안내 후 따라간다
+      인식 기다림 단계에서 로봇 바로 앞 사람이 자동 등록(target_person/register_front)되면
+      "인식되었습니다" 안내 후 따라간다 (인식 창에서 마우스로 클릭해 바꿀 수도 있음)
       ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{mode: FREE}" --feedback
 
 옵션
@@ -48,6 +49,7 @@ BAG_TOPICS = [
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
     'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
+    'target_person/register_front',                              # 바로 앞 사람 등록 요청
     'artwork_zone/state', 'arti/tour_end',                        # 작품 구역 (tour.launch.py), 관람 끝
 ]
 
