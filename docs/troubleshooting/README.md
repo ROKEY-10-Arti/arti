@@ -53,3 +53,4 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-16 | follow | [사람 좌표는 오는데 로봇이 안 움직임 (localization 꺼져서 map→odom 없음)](follow/2026-11-16-no-map-odom-follower-idle.md) | 해결 | jsy0605 |
 | 2026-11-17 | env | [localization이 "Configuring amcl"에서 멈춤 (Discovery Server 연결 안 됨)](env/2026-11-17-localization-stuck-discovery.md) | 해결 | jsy0605 |
 | 2026-11-17 | env | [nav2가 활성화되지 않음 (lifecycle 서비스 응답이 Discovery Server 지연으로 사라짐)](env/2026-11-17-nav2-lifecycle-stuck-discovery.md) | 확인 중 | jsy0605 |
+| 2026-11-18 | env | [pull 뒤 colcon build "can't copy ... doesn't exist" (symlink-install 깨진 링크) + send_goal "action type is invalid"](env/2026-11-18-symlink-install-stale-build-link.md) | 해결 | jsy0605 |
