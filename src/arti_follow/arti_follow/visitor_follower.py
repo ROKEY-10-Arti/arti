@@ -886,7 +886,10 @@ class VisitorFollower(Node):
         """지금 피해야 할 장애물 점 = 라이다 점 + depth_keep(1 s) 안의 바닥 물체 점.
         받음: (scan_pts, floor_pts, floor_time)
         돌려줌: 장애물 점 (N, 2) odom"""
+        # depth(바닥 물체)는 초당 약 3번만 와서, 마지막으로 받은 걸 depth_keep(1 s) 동안 기억해서 쓴다.
+        # 1 s 넘게 안 왔으면 오래된 점이라 버린다 (이미 치운 물체를 계속 피하지 않게).
         fresh = self.now() - self.floor_time < self.p['depth_keep']
+        # 라이다 점(벽·기둥) + (최근이면) 바닥 물체 점을 한 배열로 합친다 → dwa·field가 장애물로 씀
         return np.concatenate([self.scan_pts] + ([self.floor_pts] if fresh else []))
 
     def dwa(self, pose, goal, face):
