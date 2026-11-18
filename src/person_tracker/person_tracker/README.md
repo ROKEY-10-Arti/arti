@@ -37,35 +37,82 @@
 
 ---
 
-## 3. 전체 실행 흐름
+## 3. 전체 실행 흐름 (알고리즘 · 인터페이스 · 데이터 타입)
 
-```text
-[영상 입력: _compressed_cb / _raw_cb / _poll_local_frame]
-   │
-   ▼
-GestureTestNode.handle_frame()  (./gesture_test_node.py#L511)
-   │
-   ├─▶ MultiModelTrackerCore.process_frame()  (./multi_tracker_core.py#L424)
-   │      └─ YOLO26n-pose + ByteTrack으로 전 인원 bbox, track_id, 17관절 keypoints 추출
-   │
-   ├─ [미등록: target_id is None] ──▶ 등록 모듈 (gesture_core.py)
-   │      ├─ bw < 44px 원거리 제외
-   │      ├─ build_person_hand_rois()         (./gesture_core.py#L514)  손목 연장선 정사각 ROI
-   │      ├─ detect_in_roi()                  (./gesture_core.py#L168)  MediaPipe 21관절 검출
-   │      ├─ classify_hand_gesture()          (./gesture_core.py#L88)   FIST / OPEN_PALM 판정
-   │      ├─ find_best_hand_owner()           (./gesture_core.py#L676)  얼굴 오검출 2단계 제외 + 손목 1:1 매칭
-   │      ├─ pick_primary_observation()       (./gesture_core.py#L239)  대표 손 1개 선정
-   │      ├─ FistOpenStateMachine.update()    (./gesture_core.py#L299)  Fist(4f) -> Open(4f) 전이
-   │      └─ select_target_by_id()            (./multi_tracker_core.py#L404) 타겟 ID & Anchor 고정
-   │
-   └─ [등록됨: target_id is not None] ──▶ 인식 모듈 (Adaptive ReID + Localizer)
-          ├─ PoseKeypointFeatureExtractor.extract()       (./feature_extractors.py#L379)
-          ├─ compute_dual_similarity_detail()             (./feature_extractors.py#L194)
-          ├─ MODE_ADAPTIVE (COEX / SAFE / GUARD / SEARCH) (./multi_tracker_core.py#L620)
-          ├─ 수동 초기화 [R] 클릭 시 _reset_target()       (./gesture_test_node.py#L294)
-          └─ LidarPersonLocalizer.localize_target()       (./lidar_person_localizer.py#L368)
-                 └─ 방위각 + LiDAR p25 거리 -> cam_xyz -> base_xyz -> map_xyz 발행
+> 아래 흐름도는 [`docs/follow/person_tracker_flow.drawio`](../../../docs/follow/person_tracker_flow.drawio)와 1:1로 일치합니다.
+
+```mermaid
+flowchart TD
+    RGB["이미지 캡쳐: _compressed_cb / _raw_cb / _poll_local_frame (최신 1프레임 버퍼링)"]
+    HF["프레임 진입: GestureTestNode.handle_frame (FPS/CPU 계측 및 상태 분기)"]
+    YOLO["사람 탐지 및 1차 추적: process_frame (YOLO26n-pose 17관절 + ByteTrack 칼만 필터)"]
+    CHK{"타겟 등록 여부: tracker.target_id != None"}
+
+    RGB -->|"/robot1/top_cam/image_raw/compressed [CompressedImage] -> frame: np.ndarray(BGR)"| HF
+    HF -->|"frame: np.ndarray(BGR)"| YOLO
+    YOLO -->|"detections: List[UnifiedTrackedPerson] (track_id, bbox, keypoints[17,3])"| CHK
+
+    CHK -->|"True (target_id != None, anchor_bank)"| EXT
+    CHK -->|"False (target_id is None, detections)"| DET_OK
+
+    subgraph REC["왼쪽: 인식 모듈 (Adaptive ReID + LiDAR 3D 좌표 발행)"]
+        EXT["부위별 외형 추출: PoseKeypointFeatureExtractor.extract (어깨·골반·무릎·발목 마스킹, 304D HSV, ALLOW_CROSS_PART=False)"]
+        REID["Adaptive ReID 판별: compute_dual_similarity_detail (COEX/SAFE 4f이탈/GUARD exclude_boxes+공간점수/SEARCH eligible+2f, 1인>=0.72 EMA)"]
+        FOUND{"타겟 인식 성공: target is not None"}
+        WAIT["SEARCH 재식별 대기: _publish_status('LOST_WAIT') (수동 [R] 전까지 anchor_bank 유지)"]
+        BEAR["방위각 계산: localize_target (핀홀 fx, alpha_c, half_sector)"]
+        SCAN["라이다 스캔: _on_scan"]
+        TF["TF 버퍼: _on_tf_static_msg / _on_tf_msg / _lookup"]
+        DIST["거리 측정: localize_target (섹터 p25 클러스터 평균 / CamEst 폴백)"]
+        CAM["좌표 계산: cam_xyz -> apply_transform_point(T_base_cam)"]
+        MAP["맵 좌표 변환: _get_map_from_base_matrix (AMCL / Init+Odom)"]
+        PUB["위치 발행: _publish_target_outputs"]
+
+        EXT -->|"PartFeatureBank(304D): full, upper, mid, lower"| REID
+        REID -->|"target: Optional[UnifiedTrackedPerson] (similarity, part_sims)"| FOUND
+        FOUND -->|"Yes (target.bbox)"| BEAR
+        FOUND -->|"No (SEARCH 유지)"| WAIT
+        BEAR -->|"(alpha_c, half_sector): float [rad]"| DIST
+        SCAN -->|"/robot1/scan [LaserScan]"| DIST
+        TF -->|"/tf_static [TFMessage]"| DIST
+        DIST -->|"cam_dist_m: float [m]"| CAM
+        TF -->|"T_base_cam [TFMessage]"| CAM
+        CAM -->|"CAM(x,y,z) -> base_xyz: Tuple[float,float,float]"| MAP
+        TF -->|"/tf [TFMessage] (map->odom->base)"| MAP
+        MAP -->|"MAP(x,y,z) -> TargetLocalizationResult"| PUB
+    end
+
+    subgraph REG["오른쪽: 등록 모듈 (2단계 손목 매칭 + Fist->Open 상태머신)"]
+        DET_OK{"사람 인식 성공: len(detections) > 0 & bw >= 44px"}
+        SKIP["제스처 스캔 생략 (원거리/미검출 스킵)"]
+        ROI["손목 우선 ROI: build_person_hand_rois (손목 +25% 연장선 정사각 / 상반신 폴백)"]
+        MP["손 검출/분류: detect_in_roi -> classify_hand_gesture (MediaPipe 21관절, palm_scale 비율)"]
+        FLT["얼굴 오검출 2단계 제외 & 손목 1:1 매칭: find_best_hand_owner -> pick_primary_observation"]
+        SM["상태머신 갱신: MultiTargetGestureManager.update -> FistOpenStateMachine (Fist 4f -> Open 4f, grace 3f)"]
+        TRIG{"제스처 완료: prog.just_triggered == True"}
+        LOCK["타겟 확정: select_target_by_id -> _activate_target -> _lock_target_bank (304D Anchor 저장)"]
+
+        DET_OK -->|"Yes: person(bbox, keypoints)"| ROI
+        DET_OK -->|"No"| SKIP
+        ROI -->|"person_rois: List[((x1,y1,x2,y2), kind)]"| MP
+        MP -->|"obs_list: List[HandGestureObservation] (landmarks_px[21,2])"| FLT
+        FLT -->|"primary: Optional[HandGestureObservation]"| SM
+        SM -->|"prog: GestureProgress (state, fist_count, open_count)"| TRIG
+        TRIG -->|"Yes (person.track_id)"| LOCK
+    end
+
+    PUB -->|"ROS 2 Output: point_map, point_base [PointStamped], marker [Marker], status [String]"| VIZ
+    WAIT -->|"LOST_WAIT [std_msgs/String]"| VIZ
+    TRIG -->|"No (SCANNING / FIST_ARMED)"| VIZ
+    LOCK -->|"TRIGGERED -> 다음 프레임 인식 모듈 전환"| VIZ
+    SKIP --> VIZ
+    VIZ["시각화: _draw_top_bar / ReIDDebugVisualizer.render (120f 그래프, 부위 막대, Anchor/Recent EMA/Compare 304D)"] -->|"다음 프레임 반복"| HF
 ```
+
+- **바로 이동 (핵심 흐름별 코드 위치)**:
+  - 프레임 진입: [`handle_frame()`](./gesture_test_node.py#L511) → [`process_frame()`](./multi_tracker_core.py#L424)
+  - 등록 모듈: [`build_person_hand_rois()`](./gesture_core.py#L514) → [`detect_in_roi()`](./gesture_core.py#L168) → [`classify_hand_gesture()`](./gesture_core.py#L88) → [`find_best_hand_owner()`](./gesture_core.py#L676) → [`pick_primary_observation()`](./gesture_core.py#L239) → [`FistOpenStateMachine.update()`](./gesture_core.py#L299) → [`select_target_by_id()`](./multi_tracker_core.py#L404)
+  - 인식 모듈: [`PoseKeypointFeatureExtractor.extract()`](./feature_extractors.py#L379) → [`compute_dual_similarity_detail()`](./feature_extractors.py#L194) → [`MODE_ADAPTIVE`](./multi_tracker_core.py#L620) → [`localize_target()`](./lidar_person_localizer.py#L368) (`[R]` 초기화: [`_reset_target()`](./gesture_test_node.py#L294))
 
 ---
 
