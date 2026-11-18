@@ -19,8 +19,6 @@
 | [`top_cam_tf_node.py`](./top_cam_tf_node.py#L1) | 상단 카메라 정적 TF (`oakd_rgb_camera_frame` -> `top_cam_link` -> `top_cam_optical_frame`) 발행 | `/tf_static` 퍼블리셔 |
 | [`env_bootstrap.py`](./env_bootstrap.py#L1) | `rokey_venv` 파이썬 경로 부트스트랩 및 네임스페이스 토픽·모델 경로 해석 | 공통 유틸 |
 
-- 전체 draw.io 설계도: [`docs/follow/person_tracker_flow.drawio`](../../../docs/follow/person_tracker_flow.drawio)
-
 ---
 
 ## 2. ROS 2 메시지 인터페이스
@@ -38,8 +36,6 @@
 ---
 
 ## 3. 전체 실행 흐름 (알고리즘 · 인터페이스 · 데이터 타입)
-
-> 아래 흐름도는 [`docs/follow/person_tracker_flow.drawio`](../../../docs/follow/person_tracker_flow.drawio)와 1:1로 일치합니다.
 
 ```mermaid
 flowchart TD
