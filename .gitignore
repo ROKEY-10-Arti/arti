@@ -25,3 +25,9 @@ env.bash
 rosbag2_*/
 *.pt
 *.onnx
+*.mcap
+*.db3
+bags/
+
+# 압축 파일 (소스는 풀어서 패키지 폴더로, 자료는 Drive·노션으로)
+*.zip

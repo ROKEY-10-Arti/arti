@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -e
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "$project_dir/setup_sim.sh"
-exec ros2 launch "$project_dir/simulation/arti_sim.launch.py" "$@"

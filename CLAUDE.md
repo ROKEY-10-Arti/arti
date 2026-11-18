@@ -13,6 +13,28 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 - 로봇·지도·작품 위치·관람 구역은 코드에 하드코딩하지 말고 YAML 파라미터로 둔다(확장성 요구사항).
 - 답변은 한국어, 수식은 LaTeX 없이 평문/코드 블록.
 
+## 저장소 폴더 구조 (유지, 2026-11-18 정리)
+
+맨 위(저장소 루트)는 아래만 둔다. **새 파일·폴더를 루트나 아래에 없는 위치에 만들지 않는다.**
+
+```
+arti/
+├ CLAUDE.md  README.md  COMMANDS.txt  requirements.txt
+├ .envrc  .gitignore  env.bash.example        (env.bash는 로컬 전용)
+├ docs/      문서 — common/  follow/  troubleshooting/  (역할 폴더 추가는 가능: docs/<역할>/)
+├ maps/      공용 지도
+├ scripts/   환경 세팅 스크립트 (venv, ROS 네트워크, discovery server)
+├ src/       ROS 패키지 — common/(공용), 역할 패키지는 src/ 바로 아래
+└ build/ install/ log/   colcon 산출물 (gitignore, 각 PC에서 pb로 생성)
+```
+
+- 코드·launch·설정(yaml)은 해당 패키지 안(`src/<패키지>/config/` 등)에, 문서는 `docs/<역할>/`에 둔다.
+- 루트에 `config/`, `simulation/`, `evidence/`, `bags/`, zip·pdf·로그·스크린샷 같은 파일을 만들거나 커밋하지 않는다
+  (11/18에 이런 것들을 지웠다). bag은 `~/arti_bags/`, 자료·결과물은 Drive·노션에 둔다.
+- 테스트용 임시 파일은 저장소 밖(scratchpad, `/tmp`)에 만든다.
+- 이 구조 밖에 무언가를 만들어야 할 것 같으면 **만들지 말고 먼저 사용자에게 어디에 둘지 묻는다.**
+  다른 사람이 루트에 파일을 추가한 것을 발견하면 알려 준다.
+
 ## 트러블슈팅 기록
 
 - 에러를 해결하면 (또는 해결하지 못해도) `docs/troubleshooting/<폴더>/YYYY-MM-DD-slug.md`에 남긴다. 양식은 `TEMPLATE.md`, 폴더 기준과 목록은 `docs/troubleshooting/README.md`.
