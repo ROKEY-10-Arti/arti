@@ -1,0 +1,41 @@
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "UNDOCKED", "detail": "복귀 접근 좌표 저장: (-0.588, -0.063)", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "STARTED", "detail": "1,2,3,4", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "kiosk", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ZONE_ENTERED", "detail": "Nav2 목표 취소 요청", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "KIOSK_STOPPED", "detail": "객체인식 단계는 PC2 단독 시뮬레이션에서 제외", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "1", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ZONE_ENTERED", "detail": "Nav2 목표 취소 요청", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_STOPPED", "detail": "1", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "EXPLANATION_REQUESTED", "detail": "art_01", "completed": [], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_COMPLETED", "detail": "1", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "2", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ZONE_ENTERED", "detail": "Nav2 목표 취소 요청", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_STOPPED", "detail": "2", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "EXPLANATION_REQUESTED", "detail": "art_02", "completed": ["1"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_COMPLETED", "detail": "2", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "3", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ZONE_ENTERED", "detail": "Nav2 목표 취소 요청", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_STOPPED", "detail": "3", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "EXPLANATION_REQUESTED", "detail": "art_03", "completed": ["1", "2"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_COMPLETED", "detail": "3", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "4", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "RECOVERY_REQUIRED", "detail": "Nav2 CANCELED: 현재 반원 도착 미확인; 동일 목표 재검증 필요", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "RECOVERY_RETRY", "detail": "재시도 1/2", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "4", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ZONE_ENTERED", "detail": "Nav2 목표 취소 요청", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_STOPPED", "detail": "4", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "EXPLANATION_REQUESTED", "detail": "art_04", "completed": ["1", "2", "3"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "ARTWORK_COMPLETED", "detail": "4", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "RETURNING_HOME", "detail": "모든 작품 방문 완료; 언도킹 접근 위치 복귀", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "NAVIGATING", "detail": "return_to_undock", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "VERIFY_HOME_STOP", "detail": "목표 위치 내부 및 Odometry 연속 정지 확인", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "HOME_ARRIVED", "detail": "초기 언도킹 접근 위치 도착; Dock 액션 실행", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "DOCK_REQUESTED", "detail": "irobot_create_msgs/action/Dock 요청", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "DOCK_ACTION_SUCCEEDED", "detail": "dock_status.is_docked 확인 대기", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "DOCKED", "detail": "도킹 액션 및 is_docked 상태 확인", "completed": ["1", "2", "3", "4"], "simulation": true}
+{"request_id": "72eef901-c6f8-433a-b77f-41ab6fb3b2bb", "state": "COMPLETED", "detail": "전체 작품 관람 + 원위치 복귀 + 실제 도킹 완료; PC3 예약 해제 요청", "completed": ["1", "2", "3", "4"], "simulation": true}
