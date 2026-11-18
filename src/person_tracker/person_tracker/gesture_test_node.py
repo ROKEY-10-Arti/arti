@@ -8,21 +8,18 @@
 2. 사람 탐지·추적 및 ReID (`MultiModelTrackerCore.process_frame`):
    - `YOLO26n-pose` + ByteTrack 기반 `MODE_ADAPTIVE`로 프레임 내 사람을 추적하고,
      타겟 잠금 상태일 때는 304D HSV 부위 특징 유사도(`similarity`)와 공간 점수(`_estimate_candidate_spatial`)로
-     SAFE / GUARD / SEARCH / RECOVERED 상태를 갱신합니다.
-3. 타겟 이탈 자동 초기화 (`handle_frame` 내 유실 타이머):
-   - `target_id`가 등록되어 있으나 현재 프레임에서 타겟을 놓친 시간(`target_lost_elapsed`)이
-     `target_lost_reset_sec`(기본 10초) 이상 지속되면 `_reset_target()`을 호출해 대기 상태로 복귀합니다.
-4. 미등록(`target_id is None`) 시 손 제스처 스캔 및 타겟 등록:
+     SAFE / GUARD / SEARCH / RECOVERED 상태를 갱신합니다. (유실 시에는 수동 `[R]` 초기화 전까지 SEARCH 유지)
+3. 미등록(`target_id is None`) 시 손 제스처 스캔 및 타겟 등록:
    - 사람별 손목 우선 ROI 생성 (`build_person_hand_rois`)
    - ROI 내부 MediaPipe 21관절 손 검출 (`HandGestureDetector.detect_in_roi`)
    - 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 거리 매칭 (`find_best_hand_owner`)
    - 동일 인물에 복수 손이 매칭되면 대표 1개 선택 (`HandGestureDetector.pick_primary_observation`)
    - '주먹(Fist 4f) -> 손바닥 펴기(Open 4f)' 상태머신 갱신 (`MultiTargetGestureManager.update`)
    - `just_triggered=True` 발생 시 `MultiModelTrackerCore.select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정
-5. 3D 공간 좌표 추정 및 발행 (`LidarPersonLocalizer.localize_target`):
+4. 3D 공간 좌표 추정 및 발행 (`LidarPersonLocalizer.localize_target`):
    - 타겟이 확정되면 LiDAR + 카메라 TF(폴백: BBox 높이 기반 거리)로 `base_link`/`map` 좌표를 계산하고
      `publish_target_topics=True`일 때 타겟 좌표/마커 토픽을 발행합니다.
-6. 시각화 및 실시간 튜닝 (`_draw_top_bar`, `ReIDDebugVisualizer.render`, `_ensure_reid_window`):
+5. 시각화 및 실시간 튜닝 (`_draw_top_bar`, `ReIDDebugVisualizer.render`, `_ensure_reid_window`):
    - 메인 GUI 창에 BBox, ROI, 손 21관절 스켈레톤, 제스처 진행도, 좌표 오버레이를 출력하고,
      별도 ReID 모니터 창에 유사도 시계열/부위 점수/304D 히트맵과 트랙바(`Match%`, `Coex%`, `Margin%`, `ConfirmF`)를 제공합니다.
 """
@@ -96,7 +93,6 @@ class GestureTestNode(Node):
         self.declare_parameter('min_palm_scale_px', 12.0)
         self.declare_parameter('min_person_width_px', 44)
         self.declare_parameter('require_pose_wrist', False)
-        self.declare_parameter('target_lost_reset_sec', 10.0)
         self.declare_parameter('use_localizer', True)
         self.declare_parameter('publish_target_topics', True)
         self.declare_parameter('publish_cam_tf', False)
@@ -104,7 +100,6 @@ class GestureTestNode(Node):
         self.declare_parameter('show_reid_viz', True)
 
         self.use_yolo_roi = bool(self.get_parameter('use_yolo_roi').value)
-        self.target_lost_reset_sec = float(self.get_parameter('target_lost_reset_sec').value)
         self.use_localizer = bool(self.get_parameter('use_localizer').value)
         self.publish_target_topics = bool(self.get_parameter('publish_target_topics').value)
         self.show_gui = bool(self.get_parameter('show_gui').value)
@@ -151,8 +146,6 @@ class GestureTestNode(Node):
         self.last_frame_wall_time = 0.0
         self.last_display_frame: Optional[np.ndarray] = None
         self.last_status_str = 'IDLE'
-        self.last_target_confirmed_time = 0.0
-        self.target_lost_elapsed = 0.0
 
         self.status_pub = self.create_publisher(String, 'gesture/status', 10)
         self.localizer: Optional[LidarPersonLocalizer] = (
@@ -299,13 +292,11 @@ class GestureTestNode(Node):
             self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
 
     def _reset_target(self, reason: str = '[타겟/제스처 초기화] 대기 상태로 복귀합니다.'):
-        """등록된 타겟, 제스처 상태머신, ReID 시계열 그래프 및 유실 타이머를 모두 초기 대기 상태로 되돌립니다."""
+        """등록된 타겟, 제스처 상태머신 및 ReID 시계열 그래프를 초기 대기 상태로 되돌립니다."""
         if self.tracker is not None:
             self.tracker.select_target_by_id(None)
         self.gesture_mgr.reset_all()
         self.reid_viz.reset()
-        self.last_target_confirmed_time = 0.0
-        self.target_lost_elapsed = 0.0
         self.last_loc_result = None
         self.get_logger().info(reason)
 
@@ -342,8 +333,6 @@ class GestureTestNode(Node):
             selected = self.tracker.select_target_by_point(x, y)
             if selected is not None:
                 self.gesture_mgr.reset_all()
-                self.last_target_confirmed_time = time.time()
-                self.target_lost_elapsed = 0.0
                 self.get_logger().info(f'[수동 클릭 잠금] ID={selected}')
             else:
                 self._reset_target()
@@ -450,13 +439,7 @@ class GestureTestNode(Node):
 
         adapt_str = ''
         if self.use_yolo_roi and self.tracker is not None and self.tracker.target_id is not None:
-            lost_str = ''
-            if self.target_lost_elapsed > 0.0 and self.target_lost_reset_sec > 0.0:
-                lost_str = f' LOST:{self.target_lost_elapsed:.1f}/{self.target_lost_reset_sec:.0f}s'
-            adapt_str = (
-                f' | {self.tracker.metrics.adaptive_state}'
-                f'{lost_str}'
-            )
+            adapt_str = f' | {self.tracker.metrics.adaptive_state}'
         pub_tag = ''
         if self.localizer is not None and not self.publish_target_topics:
             pub_tag = ' | PUB:OFF'
@@ -531,15 +514,14 @@ class GestureTestNode(Node):
 
         [단계별 처리 원리]
         1. 추적/ReID (`tracker.process_frame`): 사람 BBox·Pose 키포인트 추적 및 타겟 잠금 시 SAFE/GUARD/SEARCH 수행.
-        2. 10초 유실 리셋 감시: `target_id`가 등록되어 있으나 현재 프레임에 `target is None`인 상태가
-           `target_lost_reset_sec`(기본 10초) 이상 경과하면 `_reset_target()`을 실행해 새 제스처를 받을 수 있게 함.
-        3. 제스처 스캔 (`target_id is None`일 때만 실행):
+           (유실 시에도 타임아웃 자동 해제 없이 `SEARCH` 상태를 유지하며 수동 `[R]` 초기화 전까지 재식별 대기)
+        2. 제스처 스캔 (`target_id is None`일 때만 실행):
            - 인원별 손목 우선 ROI 생성(`build_person_hand_rois`) -> 손 검출(`detect_in_roi`)
            - `find_best_hand_owner()`로 얼굴 오검출 제외 + Pose 손목(9,10) 1:1 최단거리 주인 배정
            - 인원별 대표 손(`pick_primary_observation`)으로 `gesture_mgr.update()` 전이 판정 ->
              `just_triggered` 시 `select_target_by_id()`로 타겟 및 Anchor 특징 뱅크 고정.
-        4. 위치 추정 및 발행: 확정된 타겟에 대해 `localizer.localize_target(..., publish=publish_target_topics)` 호출.
-        5. GUI 출력: 메인 영상 오버레이 + `[V]` 활성화 시 `reid_viz.render()` 실시간 표시.
+        3. 위치 추정 및 발행: 확정된 타겟에 대해 `localizer.localize_target(..., publish=publish_target_topics)` 호출.
+        4. GUI 출력: 메인 영상 오버레이 + `[V]` 활성화 시 `reid_viz.render()` 실시간 표시.
         """
         t_start = time.perf_counter()
         now_wall = time.time()
@@ -574,28 +556,11 @@ class GestureTestNode(Node):
                 compute_all_sims=want_all_sims,
             )
             if self.tracker.target_id is not None:
+                gesture_active = False
                 if target is not None:
-                    self.last_target_confirmed_time = now_wall
-                    self.target_lost_elapsed = 0.0
-                    gesture_active = False
                     self._publish_status(f'LOCKED:id={self.tracker.target_id}')
                 else:
-                    # SEARCH 중이지만 일정 시간(target_lost_reset_sec) 이상 재발견 실패 시 자동 잠금 해제
-                    if self.last_target_confirmed_time <= 0.0:
-                        self.last_target_confirmed_time = now_wall
-                    self.target_lost_elapsed = now_wall - self.last_target_confirmed_time
-                    if (
-                        self.target_lost_reset_sec > 0.0
-                        and self.target_lost_elapsed >= self.target_lost_reset_sec
-                    ):
-                        self._reset_target(
-                            f'[타겟 이탈 타임아웃] {self.target_lost_elapsed:.1f}초 경과 -> '
-                            '자동 초기화 (새 제스처 등록 대기)'
-                        )
-                        self._publish_status('LOST_TIMEOUT_RESET')
-                    else:
-                        gesture_active = False
-                        self._publish_status(f'LOST_WAIT:{int(self.target_lost_elapsed)}s')
+                    self._publish_status('LOST_WAIT')
 
             # 타겟 미등록 상태에서만 사람별 손 ROI 스캔 및 제스처 상태머신 구동
             if self.tracker.target_id is None:
@@ -637,8 +602,6 @@ class GestureTestNode(Node):
                         locked_id = self.tracker.select_target_by_id(person.track_id)
                         person.is_target = True
                         target = person
-                        self.last_target_confirmed_time = now_wall
-                        self.target_lost_elapsed = 0.0
                         gesture_active = False
                         self.get_logger().info(
                             f'[제스처 타겟 등록] ID={locked_id} (주먹->펴기 완료)'

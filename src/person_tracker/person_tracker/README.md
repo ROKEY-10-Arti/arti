@@ -9,7 +9,7 @@
 
 | 파일 | 역할 | 설계도 위치 |
 |---|---|---|
-| [`gesture_test_node.py`](./gesture_test_node.py#L68) | 메인 ROS 2 노드 (`GestureTestNode`), 영상 입력·추적·제스처 등록·위치 추정·GUI 통합 제어 | 전체 루프(`handle_frame`) |
+| [`gesture_test_node.py`](./gesture_test_node.py#L65) | 메인 ROS 2 노드 (`GestureTestNode`), 영상 입력·추적·제스처 등록·위치 추정·GUI 통합 제어 | 전체 루프(`handle_frame`) |
 | [`multi_tracker_core.py`](./multi_tracker_core.py#L84) | YOLO26n-pose + ByteTrack 1차 추적 및 Adaptive ReID (`COEX` / `SAFE` / `GUARD` / `SEARCH`) | 사람 탐지 · 인식 판별 |
 | [`feature_extractors.py`](./feature_extractors.py#L368) | 304D HSV 히스토그램 + Pose 17관절 해부학 부위 마스킹(`upper`/`mid`/`lower`/`full`) 및 유사도 비교 | 외형 특징 추출 · EMA |
 | [`gesture_core.py`](./gesture_core.py#L145) | 손목 정사각 ROI, MediaPipe 21관절 분류, 2단계 얼굴 오검출 필터, 1:1 손목 매칭, `Fist->Open` 상태머신 | 등록 모듈 |
@@ -33,7 +33,7 @@
 | **출력 (타겟 맵 좌표)** | `/<ns>/target_person/point_map` | `geometry_msgs/PointStamped` | `map` 기준 타겟 관람객 좌표 (`frame_id: map`) |
 | **출력 (로봇 기준 좌표)** | `/<ns>/target_person/point_base` | `geometry_msgs/PointStamped` | 로봇 `base_link` 기준 타겟 상대 좌표 |
 | **출력 (RViz 마커)** | `/<ns>/target_person/marker` | `visualization_msgs/Marker` | 타겟 위치 실린더 마커 (`LiDAR`=초록, `CamEst`=주황) |
-| **출력 (제스처 상태)** | `/<ns>/gesture/status` | `std_msgs/String` | `SCANNING`, `FIST_ARMED`, `TRIGGERED`, `LOCKED`, `LOST_WAIT`, `LOST_TIMEOUT_RESET` |
+| **출력 (제스처 상태)** | `/<ns>/gesture/status` | `std_msgs/String` | `SCANNING`, `FIST_ARMED`, `TRIGGERED`, `LOCKED`, `LOST_WAIT` |
 
 ---
 
@@ -43,7 +43,7 @@
 [영상 입력: _compressed_cb / _raw_cb / _poll_local_frame]
    │
    ▼
-GestureTestNode.handle_frame()  (./gesture_test_node.py#L528)
+GestureTestNode.handle_frame()  (./gesture_test_node.py#L511)
    │
    ├─▶ MultiModelTrackerCore.process_frame()  (./multi_tracker_core.py#L424)
    │      └─ YOLO26n-pose + ByteTrack으로 전 인원 bbox, track_id, 17관절 keypoints 추출
@@ -62,7 +62,7 @@ GestureTestNode.handle_frame()  (./gesture_test_node.py#L528)
           ├─ PoseKeypointFeatureExtractor.extract()       (./feature_extractors.py#L379)
           ├─ compute_dual_similarity_detail()             (./feature_extractors.py#L194)
           ├─ MODE_ADAPTIVE (COEX / SAFE / GUARD / SEARCH) (./multi_tracker_core.py#L620)
-          ├─ 유실 10초 초과 시 _reset_target()            (./gesture_test_node.py#L301)
+          ├─ 수동 초기화 [R] 클릭 시 _reset_target()       (./gesture_test_node.py#L294)
           └─ LidarPersonLocalizer.localize_target()       (./lidar_person_localizer.py#L368)
                  └─ 방위각 + LiDAR p25 거리 -> cam_xyz -> base_xyz -> map_xyz 발행
 ```
@@ -72,15 +72,15 @@ GestureTestNode.handle_frame()  (./gesture_test_node.py#L528)
 ## 4. 모듈별 주요 함수 인덱스 (클릭 이동)
 
 ### ① [`gesture_test_node.py`](./gesture_test_node.py) — 진입점 · 루프 제어
-- [`main()`](./gesture_test_node.py#L803): ROS 2 노드 초기화, `spin_once()` + 유휴 GUI 갱신(`refresh_idle_gui`) 루프
-- [`GestureTestNode.__init__()`](./gesture_test_node.py#L78): 파라미터 선언, 제스처/트래커/로컬라이저/시각화 객체 초기화 및 입력 소스 연결
-- [`_ensure_reid_window()`](./gesture_test_node.py#L207): `ReID Monitor` 실시간 튜닝 트랙바(`Match%`, `Coex%`, `Margin%`, `ConfirmF`) 생성
-- [`_start_local_capture()`](./gesture_test_node.py#L248) / [`_capture_loop()`](./gesture_test_node.py#L264) / [`_poll_local_frame()`](./gesture_test_node.py#L278): `video_source` 지정 시 V4L2 비동기 캡처 스레드 + 최신 1프레임 소비
-- [`_compressed_cb()`](./gesture_test_node.py#L285) / [`_raw_cb()`](./gesture_test_node.py#L294): ROS 이미지 토픽 수신 디코딩
-- [`_reset_target()`](./gesture_test_node.py#L301): 타겟 잠금, 제스처 상태머신, ReID 그래프, 유실 타이머 일괄 초기화
-- [`_estimate_candidate_spatial()`](./gesture_test_node.py#L519): ReID 후보 점수 계산용 3D 좌표 콜백 (토픽 미발행)
-- [`handle_frame()`](./gesture_test_node.py#L528): **매 프레임 메인 파이프라인** (추적 → 10초 유실 리셋 → 제스처 스캔 → 위치 추정·발행 → GUI 출력)
-- [`_on_mouse_click()`](./gesture_test_node.py#L325) / [`_process_key()`](./gesture_test_node.py#L351): 상단 UI 클릭, 수동 타겟 지정, `[Y]/[R]/[1~4]/[D]/[V]/[P]` 단축키 처리
+- [`main()`](./gesture_test_node.py#L766): ROS 2 노드 초기화, `spin_once()` + 유휴 GUI 갱신(`refresh_idle_gui`) 루프
+- [`GestureTestNode.__init__()`](./gesture_test_node.py#L75): 파라미터 선언, 제스처/트래커/로컬라이저/시각화 객체 초기화 및 입력 소스 연결
+- [`_ensure_reid_window()`](./gesture_test_node.py#L200): `ReID Monitor` 실시간 튜닝 트랙바(`Match%`, `Coex%`, `Margin%`, `ConfirmF`) 생성
+- [`_start_local_capture()`](./gesture_test_node.py#L241) / [`_capture_loop()`](./gesture_test_node.py#L257) / [`_poll_local_frame()`](./gesture_test_node.py#L271): `video_source` 지정 시 V4L2 비동기 캡처 스레드 + 최신 1프레임 소비
+- [`_compressed_cb()`](./gesture_test_node.py#L278) / [`_raw_cb()`](./gesture_test_node.py#L287): ROS 이미지 토픽 수신 디코딩
+- [`_reset_target()`](./gesture_test_node.py#L294): 타겟 잠금, 제스처 상태머신 및 ReID 그래프 일괄 초기화
+- [`_estimate_candidate_spatial()`](./gesture_test_node.py#L502): ReID 후보 점수 계산용 3D 좌표 콜백 (토픽 미발행)
+- [`handle_frame()`](./gesture_test_node.py#L511): **매 프레임 메인 파이프라인** (추적 → 제스처 스캔 → 위치 추정·발행 → GUI 출력)
+- [`_on_mouse_click()`](./gesture_test_node.py#L316) / [`_process_key()`](./gesture_test_node.py#L340): 상단 UI 클릭, 수동 타겟 지정, `[Y]/[R]/[1~4]/[D]/[V]/[P]` 단축키 처리
 
 ### ② [`multi_tracker_core.py`](./multi_tracker_core.py) — 추적 · Adaptive ReID 상태머신
 - [`MultiModelTrackerCore.__init__()`](./multi_tracker_core.py#L119): 기본 `yolo26n-pose.pt` + `MODE_ADAPTIVE` + `COEX`/`SAFE`/`SEARCH` 임계값 설정
