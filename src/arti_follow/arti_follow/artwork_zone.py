@@ -6,6 +6,8 @@
 출력  explain_artwork (arti_interfaces/action/ExplainArtwork)  액션 클라이언트 → arti_audio guide_audio_node
       guide_message (std_msgs/String)                         안내 구역(출구·키오스크) 안내 키
       artwork_zone/state (std_msgs/String)                    지금 판단 (바뀔 때만): idle, dwell art_01 3.2s, explaining art_01 ...
+      artwork_zone/explaining (std_msgs/String, latched)      설명 중인 artwork_id (시작할 때), 끝나면 '' → visitor_follower feedback
+      artwork_zone/explained (std_msgs/String)                끝까지 설명한 artwork_id (한 번씩) → visitor_follower result visited_ids
 
 구역은 arti_common/config/artworks.yaml (map 좌표 반원). 코드에 좌표를 두지 않는다.
 
@@ -29,6 +31,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Empty, String
 import yaml
 
@@ -106,6 +109,10 @@ class ArtworkZone(Node):
         self.explain = ActionClient(self, ExplainArtwork, 'explain_artwork')
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.state_pub = self.create_publisher(String, 'artwork_zone/state', 10)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.explaining_pub = self.create_publisher(String, 'artwork_zone/explaining', latched)
+        self.explained_pub = self.create_publisher(String, 'artwork_zone/explained', 10)
+        self.explaining_pub.publish(String(data=''))
         self.create_subscription(PointStamped, 'target_person/point_map', self.on_person, 10)
         self.create_subscription(Empty, 'arti/tour_end', self.on_tour_end, 10)
         self.create_timer(self.p['check_period'], self.tick)
@@ -203,6 +210,7 @@ class ArtworkZone(Node):
             return self.set_state(f'dwell {zone.id} (explain_artwork 서버 없음)')
         self.get_logger().info(f'{zone.name}({zone.id}) 앞에서 멈춤 → 설명 시작')
         self.active = {'id': zone.id, 'anchor': anchor, 'handle': None, 'why': None}
+        self.explaining_pub.publish(String(data=zone.id))
         goal = ExplainArtwork.Goal(artwork_id=zone.id)
         self.explain.send_goal_async(goal).add_done_callback(self.on_goal)
         self.set_state(f'explaining {zone.id}')
@@ -212,6 +220,7 @@ class ArtworkZone(Node):
         if not handle.accepted:
             self.get_logger().warn(f'설명 goal 거절됨: {self.active["id"]}')
             self.active = None
+            self.explaining_pub.publish(String(data=''))
             return
         self.active['handle'] = handle
         if self.active['why']:                  # 수락되기 전에 취소 요청이 있었음
@@ -223,8 +232,10 @@ class ArtworkZone(Node):
         a, self.active = self.active, None
         why = f' ({a["why"]})' if a['why'] else ''
         self.get_logger().info(f'설명 끝 {a["id"]}: completed={res.completed}, reason={res.reason}{why}')
+        self.explaining_pub.publish(String(data=''))
         if res.completed:
             self.explained.add(a['id'])
+            self.explained_pub.publish(String(data=a['id']))
         self.track.clear()                      # 다시 dwell_time 동안 머물러야 다음 설명
 
     def cancel(self, why):

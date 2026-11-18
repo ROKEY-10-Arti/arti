@@ -28,7 +28,8 @@
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
-| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 관람 시작. 취소하면 관람 끝. feedback `state`, result `reason` |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 관람 시작 (goal `mode` FREE만, COURSE·관람 중이면 바로 `success=false`, `message` unsupported_mode·busy). 취소하면 관람 끝. feedback `state`(MOVING·ARRIVED·FOLLOW·EXPLAINING), `registered`(첫 인식 = 등록 완료), `current_artwork_id`, `current_index`/`total`. result `success`(취소로 끝남), `message`(끝난 이유), `visited_ids`(끝까지 설명한 작품, art_02 → 2) |
+| 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | String | `artwork_zone`이 알려 주는 설명 중 작품(latched) / 끝까지 설명한 작품 → feedback·result |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
 | 출력 | `guide_message` | String | 관람객 인식 때 `recognized` → arti_audio가 "인식되었습니다…" |
@@ -51,7 +52,7 @@
 SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW. 액션을 취소하면 언제든 정지 → READY.
 
 ```bash
-ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{}" --feedback   # 관람 시작 (Ctrl+C = 취소)
+ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{mode: FREE}" --feedback   # 관람 시작 (Ctrl+C = 취소)
 ```
 
 ```
