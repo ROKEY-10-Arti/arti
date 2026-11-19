@@ -83,6 +83,7 @@ local_costmap:
     ros__parameters:
       enable_stamped_cmd_vel: true
       update_frequency: 5.0
+      transform_tolerance: 1.0   # 기본 0.3 s. 와이파이·서버 경유로 AMCL map->odom TF가 0.9 s 늦어 Nav2가 바로 실패한 적 있음 (2026-11-19)
       publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_link
@@ -135,6 +136,7 @@ global_costmap:
     ros__parameters:
       enable_stamped_cmd_vel: true
       update_frequency: 1.0
+      transform_tolerance: 1.0   # 기본 0.3 s. 와이파이·서버 경유로 AMCL map->odom TF가 0.9 s 늦어 Nav2가 바로 실패한 적 있음 (2026-11-19)
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link

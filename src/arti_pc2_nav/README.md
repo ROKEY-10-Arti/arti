@@ -9,19 +9,20 @@ PC 간 약속은 팀 명세서(`docs/common/ros2_interfaces.md`, CLAUDE.md "PC �
 ```
 ① 키오스크 [로봇 호출]  PC3 ──/robot4/arti/prepare_tour {start: true}──▶ a_course_node
      feedback  UNDOCKING → MOVING → ARRIVED → REGISTERING → REGISTERED
-     언독 → Nav2로 키오스크 → 정지 확인 → guide 'register'(주먹→손바닥 안내)
-     → person_tracker target_person/point_map 1초 연속 → guide 'recognized'
+     언독 → Nav2로 키오스크 → 정지 확인 → guide 'course_register'(주먹→손바닥 안내)
+     → person_tracker target_person/point_map 1초 연속 → guide 'course_recognized'
      result    success=true, message='registered'   → 키오스크 앞에서 대기 (130초 안에 ②가 없으면 도킹 복귀)
 
 ② 키오스크 [관람 시작]  PC3 ──/robot4/arti/start_tour {artwork_ids: [1, 3, 4]}──▶ a_course_node
-     guide 'start' → 작품마다 (YAML 코스 순서):
+     guide 'course_start'(저를 따라오세요) → 작품마다 (YAML 코스 순서):
         feedback MOVING(작품 번호) → 반원 진입·정지 → EXPLAINING(번호) → ARTWORK_COMPLETED(번호)
         작품 설명: explain_artwork(번호) → guide_audio_node → PC3 /arti/description(번호) → edge-tts 재생
      → 출구 (guide 'tour_end') → feedback RETURNING → 도킹 접근점 → Dock → dock_status 확인
      result    success=true, message='completed'   (도킹이 끝난 뒤)
 ```
 
-- **위치는 로봇 PC 고정**: 키오스크·작품·출구·도킹 좌표는 `config/a_course.yaml`. PC3는 작품 **번호**만 보낸다.
+- **위치는 로봇 PC 고정**: 키오스크·작품·도킹 좌표는 `config/a_course.yaml`. PC3는 작품 **번호**만 보낸다.
+- **출구 구역은 follow 팀과 공통**: `arti_common/config/artworks.yaml`의 `exit` 직사각형(x -0.82~0.13, y 1.36~1.91)을 `arti_common.zones`(follow 팀과 같은 코드)로 읽어서 도착 판정과 RViz 표시에 쓴다.
 - **작품 번호** = `a_course.yaml`의 `artwork_id` = PC3 DB 번호 (int). 설명 문장은 PC3 DB에만 있다.
 - `artwork_ids: []`이면 전체 작품. 순서는 요청 순서가 아니라 YAML 코스 순서(동선대로).
 
@@ -31,8 +32,10 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 
 | 상황 | 동작 |
 |---|---|
-| 관람객이 `far_distance`(1.5 m)보다 멀어짐 / `lost_timeout`(3 s) 넘게 안 보임 | Nav2 goal 취소(정지) + guide `come_here` (feedback은 MOVING 유지) |
-| 다시 `resume_distance`(0.95 m) 안으로 옴 | 같은 목표를 Nav2에 다시 보내 이어서 이동 |
+| 관람객이 `far_distance`(2.5 m)보다 멀어짐 / `lost_timeout`(3 s) 넘게 안 보임, 이 상태가 `far_hold`(1 s) 계속 | Nav2 goal 취소(정지) + guide `course_come_here`(저를 따라오세요, `come_here_interval` 8 s에 한 번까지) (feedback은 MOVING 유지) |
+| 다시 `resume_distance`(1.8 m) 안으로 옴, `near_hold`(0.5 s) 계속 | 같은 목표를 Nav2에 다시 보내 이어서 이동 |
+
+거리는 최근 `distance_window`(1 s) 동안 받은 관람객 좌표의 **중앙값**으로 잰다. 인식 위치가 가끔 튀어도(카메라 추정·LiDAR 매칭이 번갈아 나옴) 멈춤·출발이 반복되지 않게 하려는 것.
 | 멈춘 뒤 `visitor_give_up`(10 s) 동안 안 옴 | guide `register_failed` → 도킹 복귀 → result `visitor_lost` |
 
 판단 값(1.0 s 등록, 0.5 s 끊김, 3 s 분실, 0.8+0.15 m)은 arti_follow와 같다. 주행 값(속도·가감속)은 Nav2 설정을 따른다.
@@ -56,7 +59,7 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 | 노드 | 패키지 | 역할 |
 |---|---|---|
 | `a_course_node` | arti_pc2_nav | 상태 기계 실행. 액션 서버 2개, Nav2·Undock·Dock·explain_artwork 클라이언트 |
-| `arti_zone_markers` | arti_pc2_nav | RViz 반원 마커 (`arti/a_course/zones`) |
+| `arti_zone_markers` | arti_pc2_nav | RViz 구역 마커 (`arti/a_course/zones`): 키오스크·작품 반원 + 출구 직사각형(arti_common) |
 | `guide_audio_node` | arti_audio | 안내·작품 설명 음성 (`audio:=true`) |
 | `top_camera_publisher_node`, `top_cam_tf_node` | person_tracker | 노트북 웹캠 → `top_cam/image_raw/compressed`, 카메라 TF (`tracker:=true`) |
 | `multi_person_tracker_node` | person_tracker | YOLO 인식 + LiDAR → `target_person/point_map` (`tracker:=true`) |
@@ -76,14 +79,17 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 | 발행 | `/arti/course_status` | `std_msgs/String` JSON (전역) | 로그·디버그용. PC3와의 약속 아님 |
 
 안내 키(`guide_message`)는 `arti_audio/config/guide_lines.yaml`에 있어야 소리가 난다:
-`register`, `recognized`, `start`, `come_here`, `tour_end`, `register_failed` (키 이름은 파라미터로 바꿀 수 있음).
+robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_come_here`(follow 팀 문장과 따로) + 공용 `tour_end`, `register_failed` (키 이름은 파라미터로 바꿀 수 있음).
 
 ## 실행
 
 터미널마다 먼저 `source ~/arti/install/setup.bash`. localization → Nav2 → RViz를 먼저 띄운다 (`docs/common/navigation.md`).
 
 Nav2는 이 패키지의 `config/nav2_real.yaml`로 띄운다. TurtleBot4 기본 `nav2.yaml`과 다른 값은
-`xy_goal_tolerance` 0.25 → **0.12** 하나 (작품 4 반원 r=0.43이 작아서 0.25면 반원 밖에 정지):
+두 가지다.
+- `xy_goal_tolerance` 0.25 → **0.12** (작품 4 반원 r=0.43이 작아서 0.25면 반원 밖에 정지)
+- local·global costmap `transform_tolerance` 0.3 → **1.0** s (와이파이·서버 경유로 AMCL TF가 0.9 s 늦게 와서 Nav2가 출발하자마자 실패한 적 있음)
+
 
 ```
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 \
@@ -149,9 +155,11 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 끊김 없이 1 s 보이면 등록, 0.5 s 넘게 끊기면 다시 셈 [s] |
 | `register_timeout` | 60.0 | 키오스크 도착 후 등록 제한 [s] |
 | `ready_timeout` | 130.0 | 등록 후 start_tour 대기 [s] (robot1과 같음, 키오스크 120 s보다 김) |
-| `far_distance` / `resume_distance` | 1.5 / 0.95 | 멈춤 / 다시 출발 거리 [m] |
+| `far_distance` / `resume_distance` | 2.5 / 1.8 | 멈춤 / 다시 출발 거리 [m] (2026-11-19 실주행: 1.5 / 0.95는 너무 자주 멈춤) |
+| `distance_window` / `far_hold` / `near_hold` | 1.0 / 1.0 / 0.5 | 거리 중앙값 구간 / 멈추기 전 유지 / 출발 전 유지 [s] |
+| `come_here_interval` | 8.0 | '따라오세요' 음성 최소 간격 [s] |
 | `lost_timeout` / `visitor_give_up` | 3.0 / 10.0 | 안 보임 판정 / 포기 [s] |
-| `*_guide` | `register`, `recognized`, `register_failed`, `start`, `come_here` | guide_lines.yaml 키 |
+| `*_guide` | `course_register`, `course_recognized`, `register_failed`, `course_start`, `course_come_here` | guide_lines.yaml 키 |
 
 ## config/a_course.yaml
 
@@ -160,9 +168,9 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `kiosk.goal_pose`, `kiosk.zone` | 만남 장소. 카메라가 뒤쪽이므로 관람객이 서는 쪽으로 로봇이 **등을 대도록** yaw를 잡는다 |
 | `artworks[].artwork_id` | 작품 번호 (int, PC3 DB 번호). YAML 순서 = 방문 순서 |
 | `artworks[].goal_pose`, `zone` | Nav2 목표 / 도착 판정 반원. goal_pose는 자기 반원 안이어야 함 (아니면 로드 실패) |
-| `exit.goal_pose` | 출구 정지점 (0.30 m 거리 판정) |
+| `exit.goal_pose` | 출구 Nav2 목표점 (공통 출구 직사각형 안이어야 함) |
 | `exit.farewell` | 출구 안내 키 (기본 `tour_end`) |
-| `exit.marker_diameter` | RViz 출구 반원(표시용) 지름 끝점 `[[ax, ay], [bx, by]]` |
+| `exit.zone` | `arti_common` → 출구 도착 = arti_common `artworks.yaml` exit 직사각형 안 (없으면 목표점 0.30 m) |
 | `dock.station`, `dock.approach_pose` | 충전 스테이션 / Nav2로 가는 정면 접근점 (마지막 정밀 접근은 Dock 액션) |
 
 ## 파일
@@ -172,9 +180,9 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `arti_pc2_nav/course_engine.py` | 상태 기계 `TourMachine` (ROS 없음 — Event 목록만 돌려줌) |
 | `arti_pc2_nav/a_course_node.py` | ROS 어댑터: 센서 → `tick()`, Event → Nav2·Dock·음성, 액션 서버 2개 |
 | `arti_pc2_nav/guided_tour_plan.py` | YAML 파서, `Pose2D`·`Semicircle`·`CoursePlan` |
-| `arti_pc2_nav/zone_geometry.py`, `zone_marker_node.py` | 반원 계산, RViz 마커 |
+| `arti_pc2_nav/zone_geometry.py`, `zone_marker_node.py` | 반원 호 계산, RViz 구역 마커 |
 | `launch/a_course.launch.py` | 위 노드 전부 |
-| `config/nav2_real.yaml` | robot4 Nav2 설정 (기본값 + xy_goal_tolerance 0.12) |
+| `config/nav2_real.yaml` | robot4 Nav2 설정 (기본값 + xy_goal_tolerance 0.12, costmap transform_tolerance 1.0) |
 | `test/test_full_course.py` | 상태 기계 단위 테스트 |
 
 액션 실행 함수(`_prepare_execute`, `_tour_execute`)는 별도 스레드에서 기다리며 feedback/result만 보내고,
@@ -188,7 +196,5 @@ cd ~/arti/src/arti_pc2_nav && python3 -m pytest -q test/
 
 ## 아직 실물에서 확인 못 한 것 (2026-11-19)
 
-- 뒤쪽 웹캠(`camera_yaw` 180)으로 관람객 map 좌표가 맞게 나오는지, `far_distance` 1.5 m가 적당한지
+- 뒤쪽 웹캠(`camera_yaw` 180)으로 관람객 map 좌표가 맞게 나오는지, `far_distance` 2.5 m가 적당한지
 - 키오스크 `goal_pose` yaw (관람객 쪽으로 등)
-- `start`·`recognized` 문구가 자유관람 기준("작품 앞에서 잠시 멈추시면…") — 코스용 문구는 arti_audio `guide_lines.yaml`
-- RViz 출구 반원(표시용)과 `exit.goal_pose`가 약 3 cm 어긋남 (판정에는 영향 없음)

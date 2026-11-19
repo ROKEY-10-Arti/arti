@@ -29,9 +29,9 @@ exit:
   goal_pose: {x: -0.345, y: 1.635, yaw: -1.4111}   # 2026-11-19: 공통 출구 직사각형(arti_common artworks.yaml exit, x -0.82~0.13, y 1.36~1.91)의 중심.
                                                    #   지도 빈칸, 벽까지 0.50 m. yaw: 충전 스테이션 방향 (이전 -0.04, 2.04는 직사각형 밖)
   farewell: 'tour_end'   # 출구 도착 안내 키 (arti_audio/config/guide_lines.yaml의 guides)
-  # RViz 출구 반원(표시용) 지름 끝점 [[ax, ay], [bx, by]] — A->B 왼쪽(갤러리 안쪽 -X)으로 열림. 2026-11-17 실측
-  #   표시용일 뿐 도착 판정에는 안 씀. goal_pose를 공통 직사각형 중심으로 옮긴 뒤로는 위치가 서로 다름 (현장 확인 후 정리)
-  marker_diameter: [[0.167, 1.95], [0.147, 2.28]]
+  # 출구 구역 = arti_common/config/artworks.yaml guide_zones의 exit (follow 팀과 같은 직사각형, 같은 판정 코드).
+  #   이 구역 안에 들어와 멈추면 출구 도착. RViz에도 이 직사각형을 그린다. goal_pose는 이 구역 안이어야 함.
+  zone: arti_common
 dock:
   station: {x: 0.304, y: -0.0957}                 # 충전 스테이션 실측 위치
   approach_pose: {x: -0.35, y: -0.0957, yaw: 0.0}  # 스테이션 정면 약 0.65m 앞(0.5m는 costmap 팽창 때문에 도달 불가), 스테이션(+X)을 바라봄

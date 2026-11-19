@@ -2,21 +2,26 @@
 
 실행: cd src/arti_pc2_nav && python3 -m pytest -q test/
 흐름: start()(prepare_tour) -> 키오스크 -> 등록 -> WAIT_START -> begin_tour()(start_tour) -> 작품 -> 출구 -> 도킹.
-반원 판정, 출구 반원(YAML), 등록, 관람객 거리 감시, 도킹 확인, 도킹 복귀(실패·취소)를 검사합니다.
+반원 판정, 출구 직사각형(arti_common), 등록, 관람객 거리 감시, 도킹 확인, 도킹 복귀(실패·취소)를 검사합니다.
 """
+import sys
 import unittest
 from pathlib import Path
 
-from arti_pc2_nav.course_engine import TourMachine, Event
-from arti_pc2_nav.guided_tour_plan import load_course_config, Pose2D
-from arti_pc2_nav.zone_geometry import semicircle_from_diameter
+ROOT = Path(__file__).resolve().parents[1]
+# 출구 구역은 arti_common(공통, follow 팀과 같은 파일·코드)에서 읽는다 → 저장소 안의 소스를 바로 씀
+sys.path.insert(0, str(ROOT.parent / 'common' / 'arti_common'))
 
-P = Path(__file__).resolve().parents[1] / 'config/a_course.yaml'
+from arti_pc2_nav.course_engine import TourMachine, Event  # noqa: E402
+from arti_pc2_nav.guided_tour_plan import load_course_config, Pose2D  # noqa: E402
+
+P = ROOT / 'config/a_course.yaml'
+Z = str(ROOT.parent / 'common' / 'arti_common' / 'config' / 'artworks.yaml')
 
 
 def machine(**kw):
     """도킹 위치 (0, 0)에서 prepare_tour를 시작한 상태 기계 (NAV_KIOSK)."""
-    m = TourMachine(load_course_config(P), **kw)
+    m = TourMachine(load_course_config(P, Z), **kw)
     m.start('test', 0, Pose2D(0, 0))
     return m
 
@@ -49,12 +54,16 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(z.contains((z.cx - .1, z.cy)))
         self.assertTrue(z.contains((z.cx + .1, z.cy)))
 
-    def test_exit_marker_from_yaml(self):
-        self.assertIsNotNone(self.m.plan.exit_marker)      # exit.marker_diameter
-        z = semicircle_from_diameter(*self.m.plan.exit_marker)
-        self.assertAlmostEqual(z.cx, .157)
-        self.assertAlmostEqual(z.cy, 2.115)
-        self.assertTrue(z.contains((.1, 2.115)))
+    def test_exit_zone_from_arti_common(self):
+        """출구 = arti_common artworks.yaml의 exit 직사각형 (follow 팀과 같은 구역)."""
+        z = self.m.plan.exit_zone
+        self.assertIsNotNone(z)                             # exit.zone: arti_common
+        self.assertEqual(z.shape, 'rect')
+        self.assertEqual(z.box, (-0.82, 0.13, 1.36, 1.91))
+        g = self.m.plan.exit_goal
+        self.assertTrue(z.contains((g.x, g.y)))             # 목표점은 구역 안
+        self.assertTrue(z.contains((-0.75, 1.40)))          # 목표점에서 0.30m 넘게 떨어져도 구역 안이면 도착
+        self.assertFalse(z.contains((0.20, 1.60)))          # 오른쪽 벽 너머
 
     def test_artwork_ids_are_int(self):
         self.assertEqual([a.artwork_id for a in self.m.plan.artworks], [1, 2, 3, 4])
@@ -171,7 +180,7 @@ class TourTests(unittest.TestCase):
         self.m.visitor_seen(t, (pose.x + d, pose.y))
 
     def test_not_prepared(self):
-        m = TourMachine(load_course_config(P))
+        m = TourMachine(load_course_config(P, Z))
         with self.assertRaises(ValueError):
             m.begin_tour([1], 0)
 
@@ -203,18 +212,55 @@ class TourTests(unittest.TestCase):
         p = Pose2D(-1.5, 0.5)                                 # 작품 1 반원 밖, 이동 중
         self.near(t + .5, p, 0.5)
         self.assertEqual(m.tick(t + .5, p, 0, .2, 0), [])
-        self.near(t + 1, p, 2.0)                              # 2 m > far 1.5
-        ev = m.tick(t + 1, p, 0, .2, 0)
+        self.near(t + 1, p, 3.0)                              # 3 m > far 2.5 (중앙값이 3 m가 되도록 1초 뒤 값만 남김)
+        self.assertEqual(m.tick(t + 1.6, p, 0, .2, 0), [])    # 처음 '멀다' → far_hold 1초 기다림
+        self.near(t + 2.4, p, 3.0)
+        m.tick(t + 2.4, p, 0, .2, 0)
+        self.assertEqual(m.state, 'NAV_ARTWORK')
+        self.near(t + 2.7, p, 3.0)
+        ev = m.tick(t + 2.7, p, 0, .2, 0)                     # 1초 넘게 계속 멂 → 멈춤
         self.assertEqual(m.state, 'WAIT_VISITOR')
         self.assertIn(Event('cancel', None), ev)
         self.assertIn(Event('guide', 'come_here'), ev)
-        self.near(t + 2, p, 1.2)                              # 1.2 m: 아직 (resume 0.95)
-        m.tick(t + 2, p, 0, 0, 0)
+        self.near(t + 4, p, 2.0)                              # 2.0 m: 아직 (resume 1.8)
+        m.tick(t + 4, p, 0, 0, 0)
         self.assertEqual(m.state, 'WAIT_VISITOR')
-        self.near(t + 3, p, 0.9)
-        ev = m.tick(t + 3, p, 0, 0, 0)
+        self.near(t + 5.2, p, 1.0)
+        m.tick(t + 5.2, p, 0, 0, 0)                           # 처음 '가깝다' → near_hold 0.5초
+        self.assertEqual(m.state, 'WAIT_VISITOR')
+        self.near(t + 5.8, p, 1.0)
+        ev = m.tick(t + 5.8, p, 0, 0, 0)
         self.assertEqual(m.state, 'NAV_ARTWORK')
         self.assertIn("Event(kind='navigate', value=(1,", str(ev))
+
+    def test_jumpy_position_does_not_stop(self):
+        """인식 위치가 가끔 튀어도(1.0 m 사이에 3.5 m 한 번씩) 중앙값이라 멈추지 않는다."""
+        m, t = self.m, self.t
+        m.begin_tour([1], t)
+        p = Pose2D(-1.5, 0.5)
+        for i in range(30):                                   # 3초, 0.1초 간격
+            now = t + 0.1 * i
+            self.near(now, p, 3.5 if i % 4 == 0 else 1.0)
+            m.tick(now, p, 0, .2, 0)
+            self.assertEqual(m.state, 'NAV_ARTWORK', i)
+
+    def test_come_here_voice_has_cooldown(self):
+        """멈춤이 반복돼도 '따라오세요'는 come_here_interval(8초)에 한 번만."""
+        m, t = self.m, self.t
+        m.begin_tour([1], t)
+        p = Pose2D(-1.5, 0.5)
+        guides = []
+        now = t
+        for cycle in range(3):                                # 멂(1.2초) → 가까움(0.7초) 반복
+            for _ in range(13):
+                self.near(now, p, 3.0)
+                guides += [e for e in m.tick(now, p, 0, .2, 0) if e.kind == 'guide']
+                now += 0.1
+            for _ in range(7):
+                self.near(now, p, 0.5)
+                guides += [e for e in m.tick(now, p, 0, 0, 0) if e.kind == 'guide']
+                now += 0.1
+        self.assertEqual(guides, [Event('guide', 'come_here')])
 
     def test_lost_visitor_pauses(self):
         m, t = self.m, self.t
@@ -223,7 +269,9 @@ class TourTests(unittest.TestCase):
         self.near(t, p)
         m.tick(t + 2.9, p, 0, .2, 0)
         self.assertEqual(m.state, 'NAV_ARTWORK')
-        m.tick(t + 3.1, p, 0, .2, 0)                          # 3초 넘게 안 보임
+        m.tick(t + 3.1, p, 0, .2, 0)                          # 3초 넘게 안 보임 → far_hold 시작
+        self.assertEqual(m.state, 'NAV_ARTWORK')
+        m.tick(t + 4.2, p, 0, .2, 0)                          # 1초 더 → 멈춤
         self.assertEqual(m.state, 'WAIT_VISITOR')
 
     def test_give_up_after_10s_returns_to_dock(self):
@@ -232,10 +280,13 @@ class TourTests(unittest.TestCase):
         p = Pose2D(-1.5, 0.5)
         self.near(t, p, 3.0)
         m.tick(t, p, 0, .2, 0)
+        self.near(t + 1.1, p, 3.0)
+        m.tick(t + 1.1, p, 0, .2, 0)
         self.assertEqual(m.state, 'WAIT_VISITOR')
-        m.tick(t + 9.9, p, 0, 0, 0)
+        w = t + 1.1                                           # 멈춘 시각
+        m.tick(w + 9.9, p, 0, 0, 0)
         self.assertEqual(m.state, 'WAIT_VISITOR')
-        ev = m.tick(t + 10, p, 0, 0, 0)
+        ev = m.tick(w + 10, p, 0, 0, 0)
         self.assertEqual(m.state, 'NAV_HOME')
         self.assertEqual(m.end_reason, 'visitor_lost')
         self.assertIn(Event('guide', 'register_failed'), ev)
@@ -258,12 +309,20 @@ class TourTests(unittest.TestCase):
         self.assertEqual(m.state, 'NAV_HOME')
 
     def test_exit_far_is_nav_failure(self):
-        """출구 Nav2 SUCCEEDED인데 0.30m 밖 -> WAIT_RECOVERY (노드가 도킹 복귀)."""
+        """출구 Nav2 SUCCEEDED인데 출구 직사각형 밖 -> WAIT_RECOVERY (노드가 도킹 복귀)."""
         m = self.m
         m.state, m.exit_pending = 'NAV_EXIT', True
         m.last_pose, m.last_pose_at = Pose2D(0.185, 1.5), 1
         m.nav_result('SUCCEEDED', 1)
         self.assertEqual(m.state, 'WAIT_RECOVERY')
+
+    def test_exit_arrival_anywhere_in_rect(self):
+        """출구 목표점에서 0.30m 넘게 떨어져도 직사각형 안에서 멈추면 출구 도착 (follow 팀과 같은 판정)."""
+        m = self.m
+        m.state, m.exit_pending, m.touring = 'NAV_EXIT', True, False
+        p = Pose2D(-0.70, 1.45, 0)                          # 목표점 (-0.345, 1.635)에서 약 0.40 m
+        m.tick(2, p, 0, 0, 0)
+        self.assertEqual(m.state, 'CANCELING_EXIT')
 
     def test_full_tour_every_artwork_then_physical_dock(self):
         m, t = self.m, self.t

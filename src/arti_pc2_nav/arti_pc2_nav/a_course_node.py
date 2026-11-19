@@ -105,17 +105,21 @@ class ACourseNode(Node):
         self.declare_parameter('register_timeout', 60.0)       # 키오스크 도착 후 등록 제한 -> 실패, 도킹 복귀 [s]
         self.declare_parameter('ready_timeout', 130.0)         # 등록 후 start_tour 대기 제한 -> 도킹 복귀 [s] (robot1과 같음)
         self.declare_parameter('skip_register', False)         # true면 인식 없이 등록 (person_tracker 없이 시험)
-        self.declare_parameter('register_guide', 'register')            # guide_lines.yaml 키: 손바닥 안내
-        self.declare_parameter('recognized_guide', 'recognized')        # 인식 완료
+        self.declare_parameter('register_guide', 'course_register')     # guide_lines.yaml 키: 주먹→손바닥 안내 (robot4 전용)
+        self.declare_parameter('recognized_guide', 'course_recognized') # 인식 완료 (robot4 전용)
         self.declare_parameter('register_failed_guide', 'register_failed')  # 등록 실패 / 관람객 분실
         # [start_tour] 관람 중 관람객 거리 감시 (판단 값은 arti_follow와 같게. 주행은 Nav2라 주행 값은 안 씀)
         self.declare_parameter('watch_visitor', True)          # false면 감시 안 함
-        self.declare_parameter('far_distance', 1.5)            # 이보다 멀면 Nav2 goal 취소(정지) + come_here [m]
-        self.declare_parameter('resume_distance', 0.95)        # 멈춘 뒤 이 안으로 오면 같은 목표 다시 전송 [m] (0.8+0.15)
+        self.declare_parameter('far_distance', 2.5)            # 이보다 멀면 Nav2 goal 취소(정지) + come_here [m] (2026-11-19 실주행: 1.5는 너무 자주 멈춤)
+        self.declare_parameter('resume_distance', 1.8)         # 멈춘 뒤 이 안으로 오면 같은 목표 다시 전송 [m]
+        self.declare_parameter('distance_window', 1.0)         # 거리 = 최근 이 시간 좌표들의 거리 중앙값 [s] (인식 위치 튐 무시)
+        self.declare_parameter('far_hold', 1.0)                # '멀다'가 이만큼 계속돼야 멈춤 [s]
+        self.declare_parameter('near_hold', 0.5)               # '가깝다'가 이만큼 계속돼야 다시 출발 [s]
+        self.declare_parameter('come_here_interval', 8.0)      # '따라오세요' 음성 최소 간격 [s]
         self.declare_parameter('lost_timeout', 3.0)            # 인식이 이만큼 끊기면 안 보이는 것 [s] (arti_follow)
         self.declare_parameter('visitor_give_up', 10.0)        # 멈춘 뒤 이만큼 안 오면 관람 끝 -> 도킹 복귀 [s]
-        self.declare_parameter('start_guide', 'start')         # guide_lines.yaml 키: 관람 시작
-        self.declare_parameter('come_here_guide', 'come_here') # 따라오세요 (관람객이 멀어짐)
+        self.declare_parameter('start_guide', 'course_start')  # guide_lines.yaml 키: 관람 시작 '저를 따라오세요' (robot4 전용)
+        self.declare_parameter('come_here_guide', 'course_come_here')  # 관람객이 멀어짐 → '저를 따라오세요' (robot4 전용)
 
         # Nav2/AMCL lifecycle 상태 확인용 클라이언트
         # _lifecycle[name] = [GetState 클라이언트, 진행 중 future, active 여부]
@@ -181,6 +185,10 @@ class ACourseNode(Node):
                 resume_distance=float(self.get_parameter('resume_distance').value),
                 lost_timeout=float(self.get_parameter('lost_timeout').value),
                 visitor_give_up=float(self.get_parameter('visitor_give_up').value),
+                distance_window=float(self.get_parameter('distance_window').value),
+                far_hold=float(self.get_parameter('far_hold').value),
+                near_hold=float(self.get_parameter('near_hold').value),
+                come_here_interval=float(self.get_parameter('come_here_interval').value),
                 start_guide=str(self.get_parameter('start_guide').value),
                 come_here_guide=str(self.get_parameter('come_here_guide').value))
         except Exception as exc:

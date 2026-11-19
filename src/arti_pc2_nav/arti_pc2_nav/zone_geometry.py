@@ -1,26 +1,9 @@
 """반원 지오메트리 유틸 (RViz 표시용).
 
-출구 반원(RViz 표시용)의 지름 끝점은 config/a_course.yaml의 exit.marker_diameter에 둔다 (코드에 좌표 없음).
-실제 출구 도착 판정은 반원이 아니라 exit.goal_pose 기준 0.30m 거리로 한다.
-
-두 점 A, B는 반원의 중심/반지름이 아니라 '지름(밑변)'의 양 끝점입니다.
-반원은 A->B의 왼쪽(갤러리 안쪽)으로 열리므로 YAML에 적는 순서가 방향을 정합니다.
+키오스크·작품 반원의 호 위 점을 만든다. 출구는 반원이 아니라 arti_common 공통 직사각형이다.
 """
 import math
-from .guided_tour_plan import Semicircle
-
-
-def semicircle_from_diameter(a, b) -> Semicircle:
-    """지름 끝점 A, B (map 좌표 (x, y))로 반원(중심, 반지름, 방향)을 계산. 방향 = A->B의 왼쪽 법선."""
-    ax, ay = a
-    bx, by = b
-    cx, cy = (ax + bx) / 2.0, (ay + by) / 2.0     # 중심 = 지름의 중점
-    dx, dy = bx - ax, by - ay
-    radius = math.hypot(dx, dy) / 2.0             # 반지름 = 지름 길이 / 2
-    if radius <= 0:
-        raise ValueError('출구 지름 끝점 A, B가 같습니다')
-    direction = math.atan2(dx, -dy)               # 왼쪽 법선 (-dy, dx)의 각도
-    return Semicircle(cx, cy, radius, direction)
+from .guided_tour_plan import Semicircle  # noqa: F401 (타입 설명용)
 
 
 def boundary_points(zone: Semicircle, steps: int = 40):

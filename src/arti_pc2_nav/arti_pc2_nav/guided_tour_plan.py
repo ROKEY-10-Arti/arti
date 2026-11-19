@@ -113,7 +113,7 @@ class CoursePlan:
     farewell_text: str = 'tour_end'             # 출구 도착 시 안내 키 (arti_audio guide_lines.yaml)
     dock_station: Optional[Pose2D] = None        # 충전 스테이션 실측 위치(참고용)
     dock_approach: Optional[Pose2D] = None       # Nav2로 가는 스테이션 정면 접근점
-    exit_marker: Optional[tuple] = None          # RViz 출구 반원 지름 끝점 ((ax, ay), (bx, by)), 표시용
+    exit_zone: Optional[Any] = None              # 출구 구역 (arti_common.zones.Zone, follow 팀과 같은 직사각형). 도착 판정·RViz
 
     def selected(self, ids: Optional[tuple[int, ...]]) -> 'CoursePlan':
         """선택 관람: 지정한 작품만 지정 순서로 남긴 새 계획을 반환 (start_tour artwork_ids).
@@ -138,8 +138,10 @@ class CoursePlan:
 # 파서
 # ---------------------------------------------------------------------------
 
-def load_course_config(path: str | Path) -> CoursePlan:
+def load_course_config(path: str | Path, zones_file: Optional[str] = None) -> CoursePlan:
     """config/a_course.yaml을 읽어 CoursePlan 생성.
+
+    zones_file: exit.zone이 'arti_common'일 때 읽을 공통 구역 파일 (None = 설치된 arti_common/config/artworks.yaml).
 
     누락된 좌표는 즉시 실패시켜 로봇의 잘못된 이동을 방지.
     goal_pose가 자기 반원 밖에 있으면 '도착 판정 불가'이므로 역시 거부합니다.
@@ -176,7 +178,7 @@ def load_course_config(path: str | Path) -> CoursePlan:
 
     # --- [실물 로봇 추가] 출구 정지점 (선택 섹션) ---
     exit_goal = None
-    exit_marker = None
+    exit_zone = None
     farewell = 'tour_end'
     exit_cfg = data.get('exit')
     if exit_cfg is not None:
@@ -184,13 +186,19 @@ def load_course_config(path: str | Path) -> CoursePlan:
             raise ValueError('exit 설정은 객체여야 합니다')
         exit_goal = Pose2D.parse(exit_cfg.get('goal_pose'))
         farewell = str(exit_cfg.get('farewell', farewell))
-        marker = exit_cfg.get('marker_diameter')
-        if marker is not None:
-            if not isinstance(marker, list) or len(marker) != 2 or \
-                    any(not isinstance(pt, list) or len(pt) != 2 for pt in marker):
-                raise ValueError('exit.marker_diameter: [[ax, ay], [bx, by]] 형식이어야 합니다')
-            exit_marker = tuple((number(pt[0], 'exit.marker_diameter.x'),
-                                 number(pt[1], 'exit.marker_diameter.y')) for pt in marker)
+        source = exit_cfg.get('zone')
+        if source is not None:
+            if source != 'arti_common':
+                raise ValueError("exit.zone은 'arti_common'만 쓸 수 있습니다 (arti_common/config/artworks.yaml의 exit)")
+            # follow 팀(arti_follow artwork_zone)과 같은 파일·같은 판정 코드로 출구 구역을 읽는다
+            from arti_common.zones import load_zones
+            _, guides = load_zones(zones_file)
+            found = [g for g in guides if g.id == 'exit']
+            if not found:
+                raise ValueError('arti_common artworks.yaml에 zone_id: exit 구역이 없습니다')
+            exit_zone = found[0]
+            if not exit_zone.contains((exit_goal.x, exit_goal.y)):
+                raise ValueError('exit.goal_pose가 arti_common 출구 구역 바깥입니다')
 
     # --- [실물 로봇 추가] 충전 스테이션 / 도킹 접근점 (선택 섹션) ---
     station = approach = None
@@ -201,4 +209,4 @@ def load_course_config(path: str | Path) -> CoursePlan:
         station = Pose2D.parse(dock_cfg.get('station'))
         approach = Pose2D.parse(dock_cfg.get('approach_pose'))
     return CoursePlan(kiosk_goal, kiosk_zone, tuple(works),
-                      exit_goal, farewell, station, approach, exit_marker)
+                      exit_goal, farewell, station, approach, exit_zone)

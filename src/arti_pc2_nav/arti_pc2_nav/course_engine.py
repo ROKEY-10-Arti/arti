@@ -10,7 +10,7 @@
   WAIT_VISITOR로 멈추고 come_here 안내 -> 가까이 오면(resume_distance) 이어서 이동,
   visitor_give_up(10초) 넘으면 register_failed 안내 후 도킹 복귀(end_reason visitor_lost).
 
-- EXIT는 계획에 exit_goal이 있을 때만 사용합니다(반원 없는 점 목표, 거리 판정).
+- EXIT는 계획에 exit_goal이 있을 때만 사용합니다. 도착 판정 = arti_common 출구 직사각형 안 (없으면 목표점 0.30m).
 - 관람객 인식(visitor_seen())은 등록 판정과 관람 중 거리 감시에 씀. 이동은 전부 Nav2.
 
 설계 방식:
@@ -29,7 +29,7 @@
   WAIT_VISITOR      관람 중 이동하다 관람객이 멀어져 멈춤, 가까이 오길 기다림 (start_tour)
   EXPLAINING        작품 해설(TTS) 재생 중, 끝날 때까지 대기
   NAV_EXIT          출구 정지점으로 이동 중
-  CANCELING_EXIT    출구 0.30m 진입 -> 취소 결과 대기
+  CANCELING_EXIT    출구 구역 진입 -> 취소 결과 대기
   VERIFY_EXIT_STOP  출구에서 정지 확인 중
   FAREWELL          '안녕히가세요' 재생 시간 대기
   NAV_HOME          충전 스테이션 접근점으로 이동 중
@@ -77,10 +77,12 @@ class TourMachine:
                  skip_register: bool = False,
                  register_guide: str = 'register', recognized_guide: str = 'recognized',
                  register_failed_guide: str = 'register_failed',
-                 watch_visitor: bool = True, far_distance: float = 1.5,
-                 resume_distance: float = 0.95, lost_timeout: float = 3.0,
+                 watch_visitor: bool = True, far_distance: float = 2.5,
+                 resume_distance: float = 1.8, lost_timeout: float = 3.0,
                  visitor_give_up: float = 10.0,
-                 start_guide: str = 'start', come_here_guide: str = 'come_here'):
+                 start_guide: str = 'start', come_here_guide: str = 'come_here',
+                 distance_window: float = 1.0, far_hold: float = 1.0,
+                 near_hold: float = 0.5, come_here_interval: float = 8.0):
         # --- 설정값 (단위: 초 / m) ---
         self.base_plan = plan                      # YAML 원본 계획
         self.plan = plan                           # 이번 관람에 쓰는 계획(start_tour 작품 선택 반영)
@@ -112,6 +114,11 @@ class TourMachine:
         self.visitor_give_up = visitor_give_up     # 멈춘 뒤 이만큼 안 오면 관람 끝 -> 도킹 복귀 [s]
         self.start_guide = start_guide             # guide 키: 관람 시작 / 따라오세요
         self.come_here_guide = come_here_guide
+        # 인식 위치가 튀는 것(카메라 추정·LiDAR 매칭이 번갈아 나옴) 때문에 멈춤·출발이 반복되지 않게:
+        self.distance_window = distance_window     # 거리 = 최근 이 시간 동안 받은 좌표들의 거리 중앙값 [s]
+        self.far_hold = far_hold                   # '멀다'가 이만큼 계속돼야 멈춤 [s]
+        self.near_hold = near_hold                 # '가깝다'가 이만큼 계속돼야 다시 출발 [s]
+        self.come_here_interval = come_here_interval  # '따라오세요' 음성 최소 간격 [s]
         # --- 실행 중 상태 ---
         self.state = 'IDLE'
         self.request_id = ''
@@ -131,6 +138,10 @@ class TourMachine:
         self.visitor_since: Optional[float] = None # 관람객이 끊김 없이 보이기 시작한 시각
         self.visitor_last = float('-inf')          # 마지막으로 관람객을 본 시각
         self.visitor_xy: Optional[tuple[float, float]] = None   # 마지막 관람객 map 좌표
+        self.visitor_samples: list[tuple[float, float, float]] = []   # 최근 (시각, x, y) — 거리 중앙값용
+        self.far_since: Optional[float] = None     # '멀다/안 보임'이 시작된 시각
+        self.near_since: Optional[float] = None    # WAIT_VISITOR에서 '가깝다'가 시작된 시각
+        self.come_here_at = float('-inf')          # 마지막 '따라오세요' 음성 시각
         self.touring = False                       # start_tour로 관람 중 (관람객 거리 감시)
         self.resume_state = ''                     # WAIT_VISITOR 끝나면 돌아갈 상태 (NAV_ARTWORK/NAV_EXIT)
 
@@ -218,10 +229,14 @@ class TourMachine:
         return zone.contains(pose)
 
     def _fresh_exit(self, now: float) -> bool:
-        """출구 정지점 0.30m 이내인지 (반원 대신 거리 판정)."""
+        """출구 도착인지: 공통 출구 구역(arti_common, follow 팀과 같은 직사각형)이 있으면 그 안,
+        없으면 출구 정지점 0.30m 이내."""
         goal = self.plan.exit_goal
-        return (self._fresh_pose(now) and goal is not None and
-                math.hypot(self.last_pose.x-goal.x, self.last_pose.y-goal.y)
+        if not self._fresh_pose(now) or goal is None:
+            return False
+        if self.plan.exit_zone is not None:
+            return self.plan.exit_zone.contains((self.last_pose.x, self.last_pose.y))
+        return (math.hypot(self.last_pose.x-goal.x, self.last_pose.y-goal.y)
                 <= self.exit_position_tolerance)
 
     def _go_home(self, now: float, detail: str) -> list[Event]:
@@ -287,12 +302,21 @@ class TourMachine:
             # [start_tour] 작품·출구로 이동 중 관람객이 멀어지거나 안 보이면 멈추고 '따라오세요'
             if self.touring and self.watch_visitor and self.state in ('NAV_ARTWORK', 'NAV_EXIT'):
                 why = self._visitor_problem(now)
-                if why:
+                if not why:
+                    self.far_since = None
+                elif self.far_since is None:
+                    self.far_since = now             # 처음 '멀다' → far_hold 동안 계속되는지 봄
+                elif now-self.far_since >= self.far_hold:
+                    self.far_since = None
+                    self.near_since = None
                     self.resume_state = self.state
                     self.state = 'WAIT_VISITOR'
                     self.state_since = now
-                    return [self._event('VISITOR_WAIT', why), Event('cancel', None),
-                            Event('guide', self.come_here_guide)]
+                    events = [self._event('VISITOR_WAIT', why), Event('cancel', None)]
+                    if now-self.come_here_at >= self.come_here_interval:
+                        self.come_here_at = now
+                        events.append(Event('guide', self.come_here_guide))
+                    return events
             if now-self.state_since >= self.navigation_timeout:
                 return self._recover('Nav2 이동 시간 초과', now)
 
@@ -375,7 +399,12 @@ class TourMachine:
 
         # (4-3) [start_tour] 관람객 기다림: 가까이 오면 이어서 이동, visitor_give_up 넘으면 도킹 복귀
         elif self.state == 'WAIT_VISITOR':
-            if self._visitor_near(now):
+            if not self._visitor_near(now):
+                self.near_since = None
+            elif self.near_since is None:
+                self.near_since = now                # 처음 '가깝다' → near_hold 동안 계속되는지 봄
+            if self.near_since is not None and now-self.near_since >= self.near_hold:
+                self.near_since = None
                 self.state = self.resume_state
                 self.state_since = now               # 이동 시간 초과는 다시 셈
                 if self.state == 'NAV_EXIT':
@@ -549,13 +578,20 @@ class TourMachine:
         self.visitor_last = now
         if xy is not None:
             self.visitor_xy = (float(xy[0]), float(xy[1]))
+            self.visitor_samples.append((now, self.visitor_xy[0], self.visitor_xy[1]))
+            self.visitor_samples = [smp for smp in self.visitor_samples if now-smp[0] <= self.distance_window]
 
     def _visitor_distance(self, now: float) -> Optional[float]:
         """로봇-관람객 거리 [m]. 위치나 인식이 오래됐으면 None."""
         if (not self._fresh_pose(now) or self.visitor_xy is None
                 or now-self.visitor_last > self.lost_timeout):
             return None
-        return math.hypot(self.visitor_xy[0]-self.last_pose.x, self.visitor_xy[1]-self.last_pose.y)
+        # 최근 distance_window 동안 받은 좌표들의 거리 중앙값 (튀는 값 한두 개는 무시됨)
+        recent = [smp for smp in self.visitor_samples if now-smp[0] <= self.distance_window] \
+            or [(now, self.visitor_xy[0], self.visitor_xy[1])]
+        dists = sorted(math.hypot(x-self.last_pose.x, y-self.last_pose.y) for _, x, y in recent)
+        mid = len(dists) // 2
+        return dists[mid] if len(dists) % 2 else (dists[mid-1]+dists[mid]) / 2.0
 
     def _visitor_problem(self, now: float) -> str:
         """이동 중 멈춰야 하는 이유 ('' = 괜찮음)."""
@@ -585,6 +621,9 @@ class TourMachine:
         self.completed = []
         self.index = 0
         self.touring = True
+        self.far_since = None
+        self.near_since = None
+        self.come_here_at = float('-inf')
         self.state = 'NAV_ARTWORK'
         self.state_since = now
         self.still_since = None
