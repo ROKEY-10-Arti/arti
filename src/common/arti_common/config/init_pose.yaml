@@ -1,4 +1,5 @@
-# 로봇별 도킹·언독 위치 (map 프레임, m) — T06. 로봇 2대 중 robot1만 사용.
+# 로봇별 도킹·출발 위치 (map 프레임, m) — T06. 두 로봇이 같은 갤러리·작품 구역(artworks.yaml)을 쓰고,
+# 로봇마다 다른 것은 이 파일(도크·출발 위치)뿐이다.
 # 측정: 2026-11-17, 사용자가 RViz로 확인한 값.
 #
 #   dock   : 도크에 붙어 있을 때 로봇 위치 (충전). 방향은 안 잼 (오른쪽 벽의 도크를 봄)
@@ -13,3 +14,8 @@ robots:
   /robot1:
     dock:   {x: -0.04, y: 0.7}
     undock: {x: -0.5,  y: 0.7, yaw_deg: 180}
+  /robot4:   # 2026-11-19 arti_pc2_nav a_course.yaml dock 값을 옮김 (robot4 실측)
+    dock:   {x: 0.304, y: -0.0957}                 # 충전 스테이션
+    dock_approach: {x: -0.35, y: -0.0957, yaw_deg: 0}   # 스테이션 정면 약 0.65 m 앞 (Nav2 복귀 목표, 스테이션 +x를 봄)
+    # undock(언독 직후 위치·방향)은 아직 안 잼 → 없으면 localization.launch.py가 AMCL 시작 위치를 자동으로 넣지 않음
+    #   (지금처럼 RViz 2D Pose Estimate). robot4 담당이 재서 undock: {x, y, yaw_deg}로 추가

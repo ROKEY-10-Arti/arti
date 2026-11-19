@@ -5,8 +5,8 @@
 | 파일 | 맡는 것 |
 |---|---|
 | `visitor_follower.py` | 노드 본체: 파라미터, 구독·발행·액션 서버 등록, 입력 콜백(`on_person` 등), `control`/`step`(상태 분기), 진단 |
-| `prepare.py` | ① 호출·등록 `prepare_tour`: `run_prepare`, `undock`, `localize`, `face_start`, `wait_visitor`, `registered_wait` |
-| `tour.py` | ② 관람 `start_tour`: `run_tour`, `follow`, `search`, `end_tour`, 작품 설명 feedback |
+| `prepare_tour.py` | ① 호출·등록 `prepare_tour`: `run_prepare`, `undock`, `localize`, `face_start`, `wait_visitor`, `registered_wait` |
+| `start_tour.py` | ② 관람 `start_tour`: `run_tour`, `follow`, `search`, `end_tour`, 작품 설명 feedback |
 | `motion.py` | 주행·추정 공통: `PersonKF`(칼만 필터), `face`, `obstacles`·`field`·`dwa`, `ramp`, `drive` |
 
 `class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node)` — 세 파일의 함수를 상속해서 한 노드로 쓴다 (`self.state`, lock 공유).

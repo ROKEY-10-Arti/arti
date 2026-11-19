@@ -2,8 +2,8 @@
 
 파일 구성 (노드는 visitor_follower 하나. 기능별로 파일만 나눔, 클래스 하나가 셋을 상속)
   visitor_follower.py  노드 본체: 파라미터, 구독·발행·액션 서버 등록, 입력 콜백, control/step(상태 분기), 진단, main
-  prepare.py           ① 호출·등록 (prepare_tour): run_prepare, undock, localize, face_start, wait_visitor, registered_wait
-  tour.py              ② 관람 (start_tour): run_tour, follow, search, end_tour, 작품 설명 feedback
+  prepare_tour.py      ① 호출·등록 (prepare_tour): run_prepare, undock, localize, face_start, wait_visitor, registered_wait
+  start_tour.py        ② 관람 (start_tour): run_tour, follow, search, end_tour, 작품 설명 feedback
   motion.py            주행·추정 공통: PersonKF(칼만 필터), face, obstacles·field·dwa, ramp, drive
 
 입력  target_person/point_map (PointStamped, frame_id map)  인식 모듈이 준 관람객 좌표
@@ -84,8 +84,8 @@ from tf2_ros import Buffer
 import yaml
 
 from arti_follow.motion import apply, MotionMixin, PersonKF, yaw_of
-from arti_follow.prepare import PrepareMixin
-from arti_follow.tour import TourMixin, TRACKING
+from arti_follow.prepare_tour import PrepareMixin
+from arti_follow.start_tour import TourMixin, TRACKING
 
 LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받는 상태 (그 밖에는 버림)
 
@@ -423,7 +423,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         """0.1 s마다 한 번: 지금 상태를 위에서부터 차례로 확인하고, 처음 맞는 곳에서 행동한 뒤 return.
         순서가 중요하다 (안전 확인이 따라가기보다 먼저). if마다 [번호] 주석 = 무엇을 묻고 어디로 가는지.
         받음: (state, kf.x, seen, scan_time, TF odom→base_link)
-        단계별 함수: prepare.py(localize·face_start·wait_visitor·registered_wait), tour.py(follow·search)
+        단계별 함수: prepare_tour.py(localize·face_start·wait_visitor·registered_wait), start_tour.py(follow·search)
         내보냄: drive() → cmd_vel, set_state() → follow/state, 필요하면 end_tour()"""
         p, now = self.p, self.now()
         # [1] 지금 상태가 READY·UNDOCK·LOST인가? → 예: 아무것도 안 하고 끝 / 아니오: 아래로
@@ -461,7 +461,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
         if self.kf.x is not None and now - self.seen < p['lost_timeout']:
-            return self.follow(now, pose, here)      # [7]~[9] → tour.py follow()
+            return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
         self.holding = False
         # [10] 사람 정보가 아예 없나? (kf.x == None) → 예: 정지 / 아니오: 아래로(탐색)
         # 사람을 한 번도 못 봤으면 탐색할 기준(마지막 위치)이 없다 → 그냥 정지
@@ -469,10 +469,10 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.dbg['reason'] = 'idle'
             return self.drive(*self.ramp(0.0, 0.0))
 
-        # [11]~[14] 사람을 놓침 (3 s 넘게 좌표가 안 옴) → tour.py search(): 마지막 위치로 이동 → 회전 탐색 → 대기 → LOST
+        # [11]~[14] 사람을 놓침 (3 s 넘게 좌표가 안 옴) → start_tour.py search(): 마지막 위치로 이동 → 회전 탐색 → 대기 → LOST
         return self.search(now, pose, here)
 
-    # ---------- 액션 (호출·등록 = prepare.py, 관람 = tour.py) ----------
+    # ---------- 액션 (호출·등록 = prepare_tour.py, 관람 = start_tour.py) ----------
 
     def on_goal(self, _goal):
         """[액션] prepare_tour·start_tour goal이 오면 일단 다 받는다.
