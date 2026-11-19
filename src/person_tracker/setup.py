@@ -48,6 +48,7 @@ setup(
             'seg_tracker_node = person_tracker.seg_tracker_node:main',
             'multi_tracker_node = person_tracker.multi_tracker_node:main',
             'gesture_test_node = person_tracker.gesture_test_node:main',
+            'front_tracker_node = person_tracker.front_tracker_node:main',
             'camera_pub = person_tracker.camera_publisher_node:main',
             'top_cam_tf = person_tracker.top_cam_tf_node:main',
             'init_pose = person_tracker.init_pose_node:main',

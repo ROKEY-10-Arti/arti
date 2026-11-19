@@ -1,3 +1,23 @@
+"""
+손 제스처('주먹 -> 손바닥 펴기') 기반 타겟 등록 코어 모듈 (gesture_core.py)
+
+[전체 처리 흐름 및 주요 함수]
+1. 손목 우선 정사각 ROI 생성 (`build_person_hand_rois` -> `_clamp_square_roi`, 폴백: `build_person_gesture_roi`):
+   - YOLO-Pose 관절(어깨 5/6, 팔꿈치 7/8, 손목 9/10)을 이용해 손목 앞쪽(+25% 팔꿈치->손목 연장선)에
+     어깨 폭 비례 정사각 ROI를 생성합니다. 손목이 보이지 않을 때만 코/눈 아래쪽 상반신 폴백 ROI를 사용합니다.
+2. MediaPipe 손 랜드마크 검출 및 제스처 판별 (`HandGestureDetector.detect_in_roi` -> `classify_hand_gesture`):
+   - ROI 크롭 이미지에서 최대 2개 손의 21개 랜드마크를 검출하고 원본 프레임 픽셀 좌표로 복원한 뒤,
+     손바닥 기준 스케일(`palm_scale = dist(wrist[0], middle_mcp[9])`) 대비 손가락 관절 비율로
+     `FIST` / `OPEN_PALM` / `UNKNOWN`을 판정합니다.
+3. 2단계 얼굴 오검출 제외 및 1:1 손-사람 매칭 (`find_best_hand_owner` -> `match_hand_to_person_wrist` -> `is_false_face_detection`):
+   - 원거리 소형 인원(`bw < 44`) 및 극소/과대 손(`palm_scale < 12` 또는 `> 0.85*bw`)을 제거하고,
+     Pose 얼굴 영역(0~4) 내부이면서 실제 손목(9,10) 근접이 아닌 오검출을 걸러낸 뒤,
+     MediaPipe 손목(`landmark[0]`)과 Pose 손목(9,10) 거리가 가장 가까운 사람 ID에게 1:1 귀속시킵니다.
+4. 대표 손 선택 및 다중 프레임 상태머신 (`HandGestureDetector.pick_primary_observation` -> `MultiTargetGestureManager.update` -> `FistOpenStateMachine.update`):
+   - 한 사람에게 여러 손이 매칭된 경우 명확도와 크기 기준 대표 손 1개를 선택한 뒤,
+     인물별 상태머신에서 `IDLE -> FIST_ARMED(주먹 4f) -> TRIGGERED(손 펴기 4f)` 전이를 판정합니다.
+"""
+
 from dataclasses import dataclass
 import math
 import time
@@ -68,9 +88,21 @@ def _dist(pt_a: np.ndarray, pt_b: np.ndarray) -> float:
 def classify_hand_gesture(
     landmarks_px: np.ndarray,
 ) -> Tuple[str, Tuple[bool, bool, bool, bool, bool], int, float]:
-    """21개 손 랜드마크(px)로 5개 손가락 펼침 여부와 FIST/OPEN_PALM/UNKNOWN을 판정합니다."""
+    """
+    21개 손 랜드마크(px)로 5개 손가락 펼침 여부와 FIST/OPEN_PALM/UNKNOWN을 판정합니다.
+
+    [알고리즘 원리]
+    1. 스케일 불변 기준치(`palm_scale`): 손목(0)과 중지 뿌리(9) 거리로 카메라 원근/손 크기 영향을 정규화합니다.
+       (`palm_scale < 6.0` px 이하는 너무 작아 노이즈로 간주하고 `UNKNOWN` 처리)
+    2. 엄지(Thumb) 펼침 판정: 소지 뿌리(17) 기준 끝(4) 거리가 IP 관절(3)의 1.10배보다 멀고,
+       검지 뿌리(5)로부터 `palm_scale * 0.42` 이상 벌어져 있을 때만 열림으로 봅니다.
+    3. 4지(검지·중지·약지·소지) 펼침 판정: 손목(0) 기준으로 `TIP` 거리가 `PIP`의 1.15배 & `MCP`의 1.30배를
+       모두 넘을 때만 펴진 것으로 간주해 손 각도 기울어짐에도 안정적으로 판별합니다.
+    4. 최종 분류: 4지가 모두 접히고 엄지도 모였으면 `FIST`, 4지가 모두 펴졌거나 3지+엄지 포함 4개 이상이면 `OPEN_PALM`.
+    """
     wrist = landmarks_px[0]
     middle_mcp = landmarks_px[9]
+    # 손목~중지 뿌리 거리: 카메라 거리/해상도 변화에 무관한 기준 척도(px)
     palm_scale = _dist(wrist, middle_mcp)
     if palm_scale < 6.0:
         return GESTURE_UNKNOWN, (False, False, False, False, False), 0, palm_scale
@@ -80,11 +112,13 @@ def classify_hand_gesture(
     thumb_ip = landmarks_px[3]
     thumb_tip = landmarks_px[4]
 
+    # 엄지는 다른 4지와 굽힘 축이 달라 소지 뿌리(17)·검지 뿌리(5)와의 이격 거리비로 폄 판정
     thumb_open = (
         _dist(thumb_tip, pinky_mcp) > _dist(thumb_ip, pinky_mcp) * 1.10
         and _dist(thumb_tip, index_mcp) > palm_scale * 0.42
     )
 
+    # 4지는 손목 대비 끝(TIP)이 중간 마디(PIP)·뿌리(MCP)보다 일정 비율 이상 멀면 펴짐으로 판정
     four_open: List[bool] = []
     for mcp_i, pip_i, tip_i in ((5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20)):
         d_tip = _dist(wrist, landmarks_px[tip_i])
@@ -97,6 +131,7 @@ def classify_hand_gesture(
     four_count = sum(1 for v in four_open if v)
     total_count = sum(1 for v in finger_states if v)
 
+    # 주먹: 4지가 모두 접히고 엄지도 검지 뿌리에 밀착 / 손바닥: 4지 모두 펴지거나 3지+엄지 펼침
     if four_count == 0 and (not thumb_open or _dist(thumb_tip, index_mcp) < palm_scale * 0.78):
         gesture = GESTURE_FIST
     elif four_count == 4 or (four_count >= 3 and thumb_open and total_count >= 4):
@@ -135,7 +170,15 @@ class HandGestureDetector:
         frame_bgr: np.ndarray,
         roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[HandGestureObservation]:
-        """프레임 전체 또는 지정된 ROI 내부에서 손을 검출하고 원본 좌표계로 복원합니다."""
+        """
+        프레임 전체 또는 지정된 ROI 내부에서 손을 검출하고 원본 좌표계로 복원합니다.
+
+        [구현 원리]
+        - 전체 화면에서 실행하면 원거리 작은 손 검출률이 떨어지고 얼굴 오검출이 늘어나므로,
+          사람별 ROI(`rx1:rx2, ry1:ry2`)만 잘라 MediaPipe `HandLandmarker(RunningMode.IMAGE)`에 입력합니다.
+        - 정규화 좌표 `[0..1]`로 반환되는 21개 랜드마크를 `(rx1 + lm.x * rw, ry1 + lm.y * rh)`로
+          원본 프레임 좌표계로 역변환한 뒤 `classify_hand_gesture()`를 호출합니다.
+        """
         h, w = frame_bgr.shape[:2]
         if roi is None:
             rx1, ry1, rx2, ry2 = 0, 0, w, h
@@ -258,6 +301,17 @@ class FistOpenStateMachine:
         obs: Optional[HandGestureObservation],
         now: Optional[float] = None,
     ) -> GestureProgress:
+        """
+        현재 프레임의 대표 손 관측 결과(`obs`)를 받아 'IDLE -> FIST_ARMED -> TRIGGERED' 상태를 전이시킵니다.
+
+        [알고리즘 원리]
+        - `IDLE`: `FIST`가 연속 `fist_hold_frames`(기본 4f) 감지되면 `FIST_ARMED`로 진입합니다.
+          잠깐의 블러/가림은 `grace_frames`(기본 3f) 동안 카운트를 초기화하지 않고 버팁니다.
+        - `FIST_ARMED`: `armed_timeout_sec`(2.5초) 이내에 `OPEN_PALM`이 연속 `open_hold_frames`(기본 4f)
+          감지되면 `just_triggered=True`와 함께 `TRIGGERED` 상태로 확정합니다.
+          중간에 다시 주먹을 쥐면 `armed_time`을 연장해 자연스러운 준비 유지를 허용합니다.
+        - `TRIGGERED`: 타겟 중복 등록 방지를 위해 `cooldown_sec`(1.5초) 동안 트리거를 잠근 뒤 자동 리셋됩니다.
+        """
         t = time.time() if now is None else now
         gesture = obs.gesture if obs is not None else GESTURE_IDLE
         if obs is not None:
@@ -280,6 +334,7 @@ class FistOpenStateMachine:
                     self.open_count = 0
                     self.miss_count = 0
             else:
+                # 일시적 미검출(grace_frames 이내)은 무시하고 초과 시에만 주먹 누적 초기화
                 self.miss_count += 1
                 if self.miss_count > self.grace_frames:
                     self.fist_count = 0
@@ -296,10 +351,12 @@ class FistOpenStateMachine:
                     self.last_trigger_time = t
                     just_triggered = True
             elif gesture == GESTURE_FIST:
+                # 손을 펴기 전에 주먹을 계속 쥐고 있으면 타임아웃 기준 시각을 갱신해 준비 유지
                 self.armed_time = t
                 self.open_count = 0
                 self.miss_count = 0
             else:
+                # 펴기 동작 도중 잠깐 흔들릴 때는 즉시 리셋하지 않고 open_count만 1씩 감쇠
                 self.miss_count += 1
                 if self.miss_count > self.grace_frames:
                     self.open_count = max(0, self.open_count - 1)
@@ -463,6 +520,12 @@ def build_person_hand_rois(
     YOLO-Pose 팔꿈치(7,8)->손목(9,10) 연장선 기반의 정사각 손 ROI 목록을 우선 반환합니다.
     손목 키포인트가 없을 때만 상반신 폴백 ROI를 반환합니다.
     반환: [((x1, y1, x2, y2), 'wrist'|'upper_fallback'), ...]
+
+    [알고리즘 원리]
+    - MediaPipe HandLandmarker는 직사각형 전체 몸체 ROI보다 손 주변 정사각형(1:1 비율)에서 검출 정확도가 높습니다.
+    - 손목(9/10)이 보이면 `손목 + 0.25 * (손목 - 팔꿈치)` 지점을 손바닥 중심으로 예측하고,
+      반폭은 어깨 폭(5-6)의 0.62배(어깨 미검출 시 BBox 폭의 0.42배, 최소 44px)로 정사각 크롭을 만듭니다.
+    - 이렇게 하면 얼굴·배경이 잘려 나가므로 1단계 얼굴 오검출 방지 효과가 있습니다.
     """
     x1, _, x2, _ = bbox
     bw = max(1, x2 - x1)
@@ -503,6 +566,12 @@ def is_false_face_detection(
     """
     검출된 손이 Pose 얼굴 영역(코·눈·귀)과 겹치면서 근처에 실제 손목(9,10)이 없으면
     얼굴 오검출로 판정해 True를 반환합니다.
+
+    [2단계 얼굴 오검출 필터 원리]
+    - 코(0)/눈(1,2)/귀(3,4) 평균 중심 반경 `max(24px, bw * 0.30)` 내부(또는 키포인트 없을 때 상단 26%)에
+      손 중심이 위치하면 우선 얼굴 인접 영역으로 의심합니다.
+    - 단, 얼굴 옆에서 인사하듯 실제로 손을 들어 올린 경우를 살리기 위해
+      MediaPipe 손목(`landmarks_px[0]`)과 YOLO Pose 손목(9,10) 거리가 `wrist_tol` 이내면 정상 손으로 통과시킵니다.
     """
     hx1, hy1, hx2, hy2 = obs.hand_bbox
     hcx = 0.5 * (hx1 + hx2)
@@ -512,6 +581,7 @@ def is_false_face_detection(
     bw = max(1, x2 - x1)
     bh = max(1, y2 - y1)
 
+    # 1차 의심 구간: 얼굴 키포인트(0~4) 평균 중심 반경 이내면 얼굴 영역으로 간주 (미검출 시 박스 상단 26% 폴백)
     in_face_zone = False
     face_radius = max(24.0, bw * 0.30)
     if keypoints is not None and len(keypoints) >= 5:
@@ -526,7 +596,7 @@ def is_false_face_detection(
     if not in_face_zone:
         return False
 
-    # 얼굴 바로 옆으로 실제로 손을 들어 올린 경우(손목 키포인트가 근접)는 통과
+    # 2차 검증: 얼굴 바로 옆으로 실제로 손을 들어 올린 경우(Pose 손목 키포인트가 허용 반경 내 근접)는 통과
     if keypoints is not None and len(keypoints) >= 11:
         hand_wrist_px = obs.landmarks_px[0]
         wrist_tol = max(45.0, obs.palm_scale_px * 1.6, bw * 0.40)
@@ -547,8 +617,15 @@ def match_hand_to_person_wrist(
 ) -> Optional[float]:
     """
     검출된 손(MediaPipe 손목 landmark[0])과 사람의 YOLO-Pose 손목(9, 10)을 거리 매칭합니다.
-    - 너무 멀리 있는 사람/작은 손(노이즈·원거리 얼굴 조각)을 크기 하한으로 제외합니다.
-    - Pose 손목이 보이면 반드시 허용 반경 이내여야 통과시키며, 매칭 거리(px)를 반환합니다.
+
+    [필터링 및 매칭 원리]
+    1. 원거리/크기 하한 필터: 사람 폭 `< min_person_width_px`(44px) 또는
+       손바닥 크기 `< min_palm_scale_px`(12px) / `> bw * 0.85`인 비정상 스케일을 제거합니다.
+    2. 얼굴 오검출 제외: `is_false_face_detection()` 통과 여부 검사.
+    3. 1:1 손목 매칭: Pose 손목(9,10)이 보이면 허용 반경(`max(32px, 어깨폭*0.72, palm_scale*2.2)`)
+       이내의 최소 픽셀 거리를 반환합니다.
+    4. 폴백 매칭: `require_pose_wrist=False`이고 Pose 손목이 가려진 경우에만 상반신 영역 포함 여부를 검사하고
+       손목 매칭보다 항상 불리한 페널티 거리(`max(60px, bw*0.85)`)를 반환합니다.
     - 조건 불충족 시 None을 반환합니다.
     """
     x1, y1, x2, y2 = bbox
@@ -563,6 +640,7 @@ def match_hand_to_person_wrist(
     if is_false_face_detection(obs, bbox, keypoints):
         return None
 
+    # Pose 양 손목(9:왼손목, 10:오른손목) 중 가시성 기준 통과 좌표 수집
     visible_wrists = []
     if keypoints is not None and len(keypoints) >= 11:
         for wrist_i in (9, 10):
@@ -570,13 +648,14 @@ def match_hand_to_person_wrist(
                 visible_wrists.append(keypoints[wrist_i, :2])
 
     if visible_wrists:
+        # 손목 매칭 허용 반경: 어깨 폭 또는 BBox·손 크기에 비례해 원거리/근거리 모두 적응
         if float(keypoints[5, 2]) >= 0.30 and float(keypoints[6, 2]) >= 0.30:
             shoulder_w = _dist(keypoints[5, :2], keypoints[6, :2])
             wrist_tol = max(32.0, shoulder_w * 0.72, obs.palm_scale_px * 2.2)
         else:
             wrist_tol = max(32.0, bw * 0.45, obs.palm_scale_px * 2.2)
 
-        hand_wrist_px = obs.landmarks_px[0]
+        hand_wrist_px = obs.landmarks_px[0]  # MediaPipe 0번 랜드마크(손목 중심)
         min_d = min(_dist(hand_wrist_px, w_pt) for w_pt in visible_wrists)
         if min_d <= wrist_tol:
             return float(min_d)

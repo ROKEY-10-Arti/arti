@@ -75,9 +75,16 @@ def resolve_image_topic(ns: str, use_compressed: bool, custom_topic: str = '') -
         return ns_prefix + sub_suffix
 
     cfg_candidates = [
-        os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml'),
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
     ]
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        cfg_candidates.insert(
+            0,
+            os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
+        )
+    except Exception:
+        pass
     for cfg_path in cfg_candidates:
         if os.path.isfile(cfg_path):
             try:

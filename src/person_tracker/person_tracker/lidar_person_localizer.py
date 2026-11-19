@@ -1,9 +1,12 @@
+from collections import deque
 from dataclasses import dataclass
 import math
 import os
+import threading
 import time
 from typing import Optional, Tuple
 
+from builtin_interfaces.msg import Time as BuiltinTime
 import numpy as np
 import yaml
 import rclpy
@@ -34,6 +37,13 @@ class TargetLocalizationResult:
     map_xyz: Optional[Tuple[float, float, float]]
     map_source: str                  # 'AMCL' | 'Init+Odom' | 'None'
     matched_rays: int                # 매칭된 라이다 포인트 개수
+    sync_dt_ms: Optional[float] = None  # 이미지 대비 선택된 scan 시각 차이 [ms]
+
+
+def _stamp_to_sec(stamp) -> float:
+    if stamp is None:
+        return 0.0
+    return float(getattr(stamp, 'sec', 0)) + float(getattr(stamp, 'nanosec', 0)) * 1e-9
 
 
 @dataclass
@@ -145,6 +155,8 @@ class LidarPersonLocalizer:
         yaw = float(_param_or_cfg('cam_yaw', float(ext_cfg.get('yaw', 0.0))))
         use_deg = bool(_param_or_cfg('cam_use_degrees', bool(ext_cfg.get('use_degrees', True))))
         publish_cam_tf = bool(_param_or_cfg('publish_cam_tf', True))
+        self.scan_sync_slop_sec = float(_param_or_cfg('scan_sync_slop_sec', 0.25))
+        self.require_scan_sync = bool(_param_or_cfg('require_scan_sync', True))
 
         self.xyz = (cam_x, cam_y, cam_z)
         if use_deg:
@@ -179,10 +191,12 @@ class LidarPersonLocalizer:
             TFMessage, self.tf_static_topic, self._on_tf_static_msg, static_qos
         )
 
-        # 2. 2D LiDAR (/robot4/scan) 구독 및 도킹 시 모터 자동 기동 클라이언트
+        # 2. 2D LiDAR (/robot4/scan) 버퍼 구독 및 도킹 시 모터 자동 기동 클라이언트
         self.latest_scan: Optional[LaserScan] = None
         self.last_scan_WallTime: float = 0.0
         self.scan_fps: float = 0.0
+        self._scan_lock = threading.Lock()
+        self._scan_buffer: deque = deque(maxlen=40)
         self.scan_sub = node.create_subscription(
             LaserScan, self.scan_topic, self._on_scan, qos_profile_sensor_data
         )
@@ -204,13 +218,24 @@ class LidarPersonLocalizer:
 
     def _load_yaml_defaults(self) -> dict:
         candidates = [
-            os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml'),
             os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 'config',
                 'phone_camera.yaml',
             ),
         ]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            candidates.insert(
+                0,
+                os.path.join(
+                    get_package_share_directory('person_tracker'),
+                    'config',
+                    'phone_camera.yaml',
+                ),
+            )
+        except Exception:
+            pass
         for path in candidates:
             if os.path.isfile(path):
                 try:
@@ -254,6 +279,36 @@ class LidarPersonLocalizer:
                 self.scan_fps = 0.85 * self.scan_fps + 0.15 * inst if self.scan_fps > 0 else inst
         self.last_scan_WallTime = now
         self.latest_scan = msg
+        scan_sec = _stamp_to_sec(msg.header.stamp)
+        if scan_sec <= 0.0:
+            scan_sec = self.node.get_clock().now().nanoseconds * 1e-9
+        with self._scan_lock:
+            self._scan_buffer.append((scan_sec, now, msg))
+
+    def _select_scan_for_stamp(
+        self, frame_stamp: Optional[BuiltinTime]
+    ) -> Tuple[Optional[LaserScan], Optional[float], bool]:
+        """이미지 타임스탬프와 가장 가까운 LiDAR 스캔을 선택합니다."""
+        now_wall = time.time()
+        with self._scan_lock:
+            live = [(s_sec, w_t, m) for (s_sec, w_t, m) in self._scan_buffer if (now_wall - w_t) < 2.5]
+        if not live:
+            if self.latest_scan is not None and (now_wall - self.last_scan_WallTime) < 2.5:
+                return self.latest_scan, None, False
+            return None, None, False
+
+        frame_sec = _stamp_to_sec(frame_stamp)
+        if frame_sec <= 0.0:
+            return live[-1][2], None, False
+
+        best_sec, _, best_msg = min(live, key=lambda item: abs(item[0] - frame_sec))
+        abs_dt = abs(best_sec - frame_sec)
+        dt_ms = (best_sec - frame_sec) * 1000.0
+        if abs_dt <= self.scan_sync_slop_sec:
+            return best_msg, dt_ms, True
+        if not self.require_scan_sync:
+            return best_msg, dt_ms, False
+        return None, dt_ms, False
 
     def _check_lidar_motor(self):
         """도킹 스테이션 위에서 라이다 모터가 멈춰 있을 때 자동으로 1회 기동."""
@@ -267,25 +322,30 @@ class LidarPersonLocalizer:
                 )
                 self.motor_client.call_async(Empty.Request())
 
-    def _lookup(self, target_frame: str, source_frame: str) -> Optional[TransformStamped]:
-        try:
-            if self.tf_buffer.can_transform(target_frame, source_frame, Time()):
-                return self.tf_buffer.lookup_transform(target_frame, source_frame, Time())
-        except Exception:
-            pass
+    def _lookup(
+        self, target_frame: str, source_frame: str, stamp: Optional[Time] = None
+    ) -> Optional[TransformStamped]:
+        for t in ([stamp] if stamp is not None else []) + [Time()]:
+            try:
+                if self.tf_buffer.can_transform(target_frame, source_frame, t):
+                    return self.tf_buffer.lookup_transform(target_frame, source_frame, t)
+            except Exception:
+                pass
         return None
 
-    def _get_map_from_base_matrix(self) -> Tuple[Optional[np.ndarray], str]:
+    def _get_map_from_base_matrix(
+        self, stamp: Optional[Time] = None
+    ) -> Tuple[Optional[np.ndarray], str]:
         """
         1순위: AMCL이 발행하는 map -> base_link TF 사용 ('AMCL')
         2순위: 도킹 등으로 라이다가 0Hz라 AMCL TF가 아직 없을 때,
                initial_pose + (시작 시점 대비 odom 변화량)으로 map 좌표 계산 ('Init+Odom')
         """
-        tf_map_base = self._lookup(self.map_frame, self.base_frame)
+        tf_map_base = self._lookup(self.map_frame, self.base_frame, stamp)
         if tf_map_base is not None:
             return transform_to_matrix(tf_map_base), 'AMCL'
 
-        tf_odom_base = self._lookup(self.odom_frame, self.base_frame)
+        tf_odom_base = self._lookup(self.odom_frame, self.base_frame, stamp)
         if tf_odom_base is not None:
             mat_odom_base = transform_to_matrix(tf_odom_base)
             if self._initial_odom_inv is None:
@@ -360,6 +420,7 @@ class LidarPersonLocalizer:
         frame_width: int,
         frame_height: int,
         publish: bool = True,
+        frame_stamp: Optional[BuiltinTime] = None,
     ) -> TargetLocalizationResult:
         x1, y1, x2, y2 = target.bbox
         cx, cy = target.center
@@ -379,12 +440,18 @@ class LidarPersonLocalizer:
         cam_dist_m: Optional[float] = None
         matched_rays = 0
         source = 'CamEst'
+        frame_time = Time.from_msg(frame_stamp) if _stamp_to_sec(frame_stamp) > 0.0 else None
 
-        # 1. 최신 라이다 스캔을 top_cam_link 좌표계로 변환하여 바운딩 박스 방향 거리 추출
-        scan = self.latest_scan
-        if scan is not None and (time.time() - self.last_scan_WallTime) < 2.5:
+        # 1. 이미지 시각과 동기화된 라이다 스캔을 선택해 top_cam_link 좌표계로 변환
+        scan, sync_dt_ms, _ = self._select_scan_for_stamp(frame_stamp)
+        if scan is not None:
             lidar_frame = scan.header.frame_id or 'rplidar_link'
-            tf_cam_from_lidar = self._lookup(self.camera_link_frame, lidar_frame)
+            scan_time = (
+                Time.from_msg(scan.header.stamp)
+                if _stamp_to_sec(scan.header.stamp) > 0.0
+                else frame_time
+            )
+            tf_cam_from_lidar = self._lookup(self.camera_link_frame, lidar_frame, scan_time)
             if tf_cam_from_lidar is not None:
                 mat_cam_from_lidar = transform_to_matrix(tf_cam_from_lidar)
             else:
@@ -447,7 +514,7 @@ class LidarPersonLocalizer:
         cam_xyz = (cam_x, cam_y, cam_z)
 
         # 3. 로봇 몸체(base_link) 기준 타겟 3D 좌표 변환
-        tf_base_from_cam = self._lookup(self.base_frame, self.camera_link_frame)
+        tf_base_from_cam = self._lookup(self.base_frame, self.camera_link_frame, frame_time)
         if tf_base_from_cam is not None:
             mat_base_from_cam = transform_to_matrix(tf_base_from_cam)
             base_xyz = apply_transform_point(mat_base_from_cam, cam_xyz)
@@ -460,7 +527,7 @@ class LidarPersonLocalizer:
 
         # 4. 저장된 맵(map) 기준 타겟 3D 좌표 변환 (AMCL 또는 도킹 시 Init+Odom 폴백)
         map_xyz: Optional[Tuple[float, float, float]] = None
-        mat_map_from_base, map_source = self._get_map_from_base_matrix()
+        mat_map_from_base, map_source = self._get_map_from_base_matrix(frame_time)
         if mat_map_from_base is not None:
             map_xyz = apply_transform_point(mat_map_from_base, base_xyz)
 
@@ -476,13 +543,22 @@ class LidarPersonLocalizer:
             map_xyz=map_xyz,
             map_source=map_source,
             matched_rays=matched_rays,
+            sync_dt_ms=sync_dt_ms,
         )
         if publish:
-            self._publish_target_outputs(res)
+            self._publish_target_outputs(res, out_stamp=frame_stamp)
         return res
 
-    def _publish_target_outputs(self, res: TargetLocalizationResult):
-        now_msg = self.node.get_clock().now().to_msg()
+    def _publish_target_outputs(
+        self,
+        res: TargetLocalizationResult,
+        out_stamp: Optional[BuiltinTime] = None,
+    ):
+        now_msg = (
+            out_stamp
+            if _stamp_to_sec(out_stamp) > 0.0
+            else self.node.get_clock().now().to_msg()
+        )
 
         pt_base = PointStamped()
         pt_base.header.stamp = now_msg
