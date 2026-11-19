@@ -9,11 +9,13 @@ import math
 import time
 
 from arti_interfaces.action import StartTour
+from irobot_create_msgs.action import Dock
 import numpy as np
 from std_msgs.msg import Empty
 
 from arti_follow.motion import wrap
 
+RETURNING = ('RETURN', 'DOCK_FACE', 'DOCK')   # 관람 끝 → 도크 복귀 중
 TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')     # 관람 중 = 관람객을 따라가거나 찾는 상태 (start_tour 뒤)
 
 
@@ -32,10 +34,9 @@ class TourMixin:
             self.get_logger().info('관람 시작 → 추종')
             self.set_state('FOLLOW')                # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
         while self.active:
-            if goal is not None and goal.is_cancel_requested:
+            if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
                 with self.lock:
-                    self.end_tour('READY', 'canceled')
-                break
+                    self.end_tour('READY', 'canceled')   # 돌아가 도킹할 때까지 루프가 계속 돌며 RETURNING feedback
             self.send_feedback(goal)
             time.sleep(0.2)
         reason = self.end_reason
@@ -55,6 +56,9 @@ class TourMixin:
         받음: goal, (state, explaining, visited, reported)
         내보냄: feedback (state, artwork_id)"""
         if goal is None:
+            return
+        if self.state in RETURNING:
+            goal.publish_feedback(StartTour.Feedback(state='RETURNING', artwork_id=0))
             return
         if self.reported < len(self.visited):
             done = self.visited[self.reported]
@@ -149,12 +153,80 @@ class TourMixin:
               reason  끝난 이유 → 액션 result.message ('canceled', 'lost', 'undock_failed' ...)
         바뀜: active = False → run_prepare·run_tour 루프가 끝나 result를 보냄
         내보냄: cmd_vel 0, arti/tour_end, follow/state"""
-        self.active, self.end_reason = False, reason
+        self.end_reason = reason
         self.drive(0.0, 0.0)
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
         self.tour_end_pub.publish(Empty())
         self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
+        if self.p['return_to_dock'] and self.home is not None and self.docked is not True:
+            # 언독했으면 돌아가 도킹한 뒤에 끝 (active는 그때 내림 → 액션 result도 도킹 뒤)
+            self.final_state, self.ret_at, self.dock_future, self.dock_result = state, None, None, None
+            self.get_logger().info('언독 지점으로 돌아가 도킹 (RETURN)')
+            return self.set_state('RETURN')
+        self.active = False
         self.set_state(state)
+
+    def go_home(self, now, pose):
+        """[RETURN → DOCK_FACE → DOCK] step [3-1]: 관람이 끝난 뒤 도크로 돌아간다 (map·AMCL 안 씀, odom만).
+        RETURN     언독이 끝난 곳(home, odom)까지 go_to (return_timeout 넘으면 그 자리에서 다음)
+        DOCK_FACE  도크 쪽으로 제자리 회전 (도크는 언독 지점에서 등 뒤 = home yaw + 180°)
+        DOCK       Create 3 dock 액션 (Create 3가 IR로 도크를 찾아 스스로 올라감) → 끝나면 finish_return()
+        받음: now, pose (x, y, yaw) odom, (home, ret_at, dock_future)
+        내보냄: drive(...), dock 액션, 끝나면 active = False, state = final_state"""
+        p = self.p
+        hx, hy, hyaw = self.home
+        if self.ret_at is None:
+            self.ret_at = now
+        if self.state == 'RETURN':
+            dist = math.hypot(hx - pose[0], hy - pose[1])
+            if dist > p['return_arrive'] and now - self.ret_at < p['return_timeout']:
+                self.dbg['reason'] = 'return'
+                return self.go_to(pose, (hx, hy))
+            if dist > p['return_arrive']:
+                self.get_logger().warn(f'언독 지점까지 {dist:.2f} m 남았지만 {p["return_timeout"]:.0f} s 지남 → 여기서 도킹 시도')
+            self.ret_at = now
+            self.set_state('DOCK_FACE')
+        if self.state == 'DOCK_FACE':
+            err = float(wrap(hyaw + math.pi - pose[2]))
+            if abs(err) > p['face_tolerance'] and now - self.ret_at < p['face_timeout']:
+                self.dbg['reason'] = 'dock_face'
+                w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
+                return self.drive(*self.ramp(0.0, w))
+            self.drive(0.0, 0.0)
+            self.ret_at = now
+            self.set_state('DOCK')
+        # DOCK: cmd_vel은 보내지 않는다 (Create 3가 스스로 움직임)
+        self.dbg['reason'] = 'dock'
+        if self.dock_future is None:
+            if not self.dock_client.server_is_ready():
+                if now - self.ret_at > 5.0:
+                    self.get_logger().error('dock 액션 서버 없음 → 도킹 못 함 (로봇을 손으로 도크에 올리기)')
+                    return self.finish_return('no_dock_server')
+                return
+            self.get_logger().info('Create 3 dock 요청')
+            self.dock_future = self.dock_client.send_goal_async(Dock.Goal())
+            return
+        if self.docked is True and now - self.ret_at > 2.0 and self.dock_result is None:
+            return self.finish_return('docked')     # dock_status로 확인 (결과 응답이 늦을 때)
+        if self.dock_future.done() and self.dock_result is None:
+            handle = self.dock_future.result()
+            if not handle.accepted:
+                return self.finish_return('dock_rejected')
+            self.dock_result = handle.get_result_async()
+        if self.dock_result is not None and self.dock_result.done():
+            res = self.dock_result.result()
+            return self.finish_return('docked' if res.result.is_docked or self.docked else f'dock_status_{res.status}')
+        if now - self.ret_at > p['dock_timeout']:
+            return self.finish_return('dock_timeout')
+
+    def finish_return(self, how):
+        """도크 복귀 끝: 로그 → active = False (액션 result가 나감) → final_state.
+        받음: how  'docked' / 'dock_timeout' / 'dock_rejected' / 'no_dock_server' ..."""
+        log = self.get_logger().info if how == 'docked' else self.get_logger().warn
+        log(f'도크 복귀 끝 ({how}, dock_status is_docked={self.docked}) → 관람 결과 {self.end_reason}')
+        self.home, self.dock_future, self.dock_result = None, None, None
+        self.active = False
+        self.set_state(self.final_state)
 
     def on_explaining(self, msg):
         """[구독] artwork_zone/explaining (Int32) — 설명 중인 작품 번호. 관람 중일 때만 저장.

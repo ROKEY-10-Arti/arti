@@ -53,10 +53,10 @@ READY
 UNDOCK        Create 3 undock 액션 (로봇이 스스로 움직임). 관람은 항상 도크에서 시작
   │             도크 밖이면 거절 (not_docked), 실패 → 관람 끝 (undock_failed / no_undock_server)
   ▼
-LOCALIZE      AMCL에 initialpose(출발 지점)를 보내고 map 위치가 근처(0.3 m)로 잡힐 때까지 기다림
-  │             10 s 안에 map 위치가 아예 없으면 → 관람 끝 (no_localization)
+LOCALIZE      AMCL에 initialpose(출발 지점 = 언독 지점)를 한 번 보내고 바로 다음 (AMCL 수렴은 안 기다림)
   ▼
-START_FACE    제자리 회전으로 키오스크 쪽을 봄 (15 s 안에 못 돌면 그냥 넘어감)
+START_FACE    언독 지점 → 키오스크 방향으로 돌 각도를 계산해 odom 기준으로 그만큼 제자리 회전
+              (map 위치 안 씀, face_offset_deg로 보정, 15 s 안에 못 돌면 그냥 넘어감)
   ▼
 WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버림
   │             좌표가 1 s 동안 끊김 없이(간격 0.5 s 이하) 들어오면 → 등록 완료
@@ -76,7 +76,16 @@ WAIT          정지 대기 10 s
 LOST          관람 끝 (lost)
 
 SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
-액션 취소(cancel)는 언제든 → 정지 → READY (canceled)
+액션 취소(cancel)는 언제든 → 정지 → 관람 끝 (canceled)
+
+관람 끝 (취소·분실·등록 뒤 start_tour 안 옴 등, 이번에 언독했을 때만, return_to_dock)
+  ▼
+RETURN        언독이 끝난 곳(odom 기록)까지 이동 (뒤쪽이면 먼저 회전, 최대 60 s)
+  ▼
+DOCK_FACE     도크 쪽(언독 지점에서 등 뒤)으로 제자리 회전
+  ▼
+DOCK          Create 3 dock 액션 (스스로 IR로 도크에 올라감, 최대 90 s) → READY / LOST
+              그동안 start_tour feedback = RETURNING, 액션 result는 도킹이 끝난 뒤에 나감
 ```
 
 ### 3-1. step·on_person은 누가 시작시키나
@@ -211,13 +220,16 @@ ros2 topic echo /robot1/follow/state
 | `search_time` / `wait_time` | 10 / 10 | 회전 탐색 / 정지 대기 [s] |
 | `max_linear` / `max_angular` | 0.3 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
+| `face_offset_deg` | -15 | 시작 때 바라볼 방향 보정 [deg] (+ 왼쪽, - 오른쪽) |
 | `undock` | true | 시작 때 undock |
 | `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
 | `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
+| `return_to_dock` | true | 관람이 끝나면 언독 지점으로 돌아와 도킹 |
+| `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점까지 이동 / Create 3 도킹 대기 [s] |
 
 ## 한계
 
 - 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다
 - LiDAR 평면보다 낮은 바닥 물체(가방 등)는 못 본다 (depth를 뺐음)
 - 등록은 "1 s 동안 계속 보임"까지만 본다. 특징 수집·한 명 확인(T13)은 아직 없다
-- 관람 끝에 도크로 돌아가는 기능(RETURNING)은 아직 없다
+- 도크 복귀는 odom만 쓴다 (AMCL 없이도 동작, 대신 오래 관람하면 바퀴 미끄러짐 오차가 쌓여 언독 지점이 몇십 cm 어긋날 수 있음 → Create 3 도킹이 IR로 마지막을 맞춤)

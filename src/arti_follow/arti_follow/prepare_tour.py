@@ -15,6 +15,7 @@ import numpy as np
 from std_msgs.msg import String
 
 from arti_follow.motion import wrap
+from arti_follow.start_tour import RETURNING
 
 
 class PrepareMixin:
@@ -25,8 +26,9 @@ class PrepareMixin:
         바뀜: kf.x, seen, holding, 단계 타이머, explaining, visited, seen_since, active, end_reason
               state → UNDOCK (undock 파라미터 false면 LOCALIZE)"""
         self.kf.x, self.seen, self.holding = None, -1e9, False
-        self.face_until = self.loc_at = self.pose_sent = self.loc_log_at = self.face_log_at = None
+        self.face_until = self.loc_at = self.pose_sent = self.loc_log_at = self.face_log_at = self.face_goal = None
         self.active, self.end_reason, self.ready_at = True, '', None
+        self.home = None                            # 이번 관람에서 언독하면 그 자리를 기록
         self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
@@ -55,12 +57,12 @@ class PrepareMixin:
                 if why:
                     self.end_tour('READY', why)
                 elif self.active:
+                    self.home = self.lookup(self.p['odom_frame'], self.p['base_frame'])   # 관람 끝나면 돌아올 곳
                     self.set_state('LOCALIZE')
         while self.active and self.state != 'REGISTERED':
-            if goal is not None and goal.is_cancel_requested:
+            if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
                 with self.lock:
-                    self.end_tour('READY', 'canceled')
-                break
+                    self.end_tour('READY', 'canceled')   # 언독했으면 돌아가 도킹한 뒤 result (루프가 계속 돎)
             self.send_prepare_feedback(goal)
             time.sleep(0.2)
         if self.active and self.state == 'REGISTERED':
@@ -98,7 +100,7 @@ class PrepareMixin:
             state = 'REGISTERING' if seeing else 'ARRIVED'
         elif self.state == 'REGISTERED':
             state = 'REGISTERED'
-        else:                                       # READY·LOCALIZE·START_FACE
+        else:                                       # READY·LOCALIZE·START_FACE·RETURN·DOCK_FACE·DOCK
             state = 'MOVING'
         goal.publish_feedback(PrepareTour.Feedback(state=state))
 
@@ -119,19 +121,79 @@ class PrepareMixin:
         if not self.undock_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error(f'undock 액션 서버 없음 ({self.get_namespace().rstrip("/")}/undock)')
             return 'no_undock_server'
-        self.get_logger().info('undock 시작')
+        age = self.now() - self.docked_at if self.docked_at is not None else float('nan')
+        self.get_logger().info(f'undock 시작 (dock_status is_docked={self.docked}, {age:.1f} s 전에 받음)')
+        log = self.get_logger()
+        t0 = time.monotonic()
         sent = self.undock_client.send_goal_async(Undock.Goal())
-        if not self.wait_future(sent, 5.0, goal) or not sent.result().accepted:
-            return 'canceled' if goal is not None and goal.is_cancel_requested else 'undock_failed'
+        # ① Create 3가 요청을 받았는지. Wi-Fi가 느리면 응답이 수 초~수십 초 늦거나 사라진다 (2026-11-19: ping 0.5~1.5 s,
+        #    응답 없이 13 s 뒤 실제로 언독됨). 그래서 undock_timeout까지 기다리고, 응답이 없어도
+        #    dock_status가 False가 되면 실제로 언독된 것으로 본다 → 로봇이 멈출 때까지 기다린 뒤 성공
+        end = time.monotonic() + self.p['undock_timeout']
+        while not sent.done():
+            if goal is not None and goal.is_cancel_requested:
+                return 'canceled'
+            if self.docked is False:
+                log.warn(f'undock 요청 응답은 아직 없지만 dock_status is_docked=False ({time.monotonic() - t0:.1f} s) '
+                         f'→ 언독된 것으로 보고 로봇이 멈추길 기다림 (네트워크 지연)')
+                return self.wait_undock_motion(end, goal, t0)
+            if time.monotonic() > end:
+                log.error(f'undock 실패: {self.p["undock_timeout"]:.0f} s 동안 요청 응답도 없고 도크에서도 안 떨어짐 '
+                          f'(네트워크·discovery 확인: ping 로봇 IP). 지금 dock_status is_docked={self.docked}')
+                return 'undock_failed'
+            time.sleep(0.1)
+        if not sent.result().accepted:
+            log.error(f'undock 실패: Create 3가 요청을 거절함 ({time.monotonic() - t0:.1f} s). '
+                      f'지금 dock_status is_docked={self.docked} (도크 밖이면 거절됨 → 로봇을 도크에 다시 올리기)')
+            return 'undock_failed'
+        log.info(f'undock 요청 받아들여짐 ({time.monotonic() - t0:.1f} s) → 끝나길 기다림')
         handle = sent.result()
         done = handle.get_result_async()
-        if not self.wait_future(done, self.p['undock_timeout'], goal):
+        # ② 언독 동작이 끝났는지 (결과 응답도 늦거나 사라질 수 있음 → 그때는 dock_status False + 로봇 정지로 판단)
+        if not self.wait_future(done, max(end - time.monotonic(), 0.0), goal):
+            if goal is not None and goal.is_cancel_requested:
+                handle.cancel_goal_async()
+                return 'canceled'
+            if self.docked is False:
+                log.warn('undock 결과 응답은 없지만 dock_status is_docked=False → 로봇이 멈추길 기다림 (네트워크 지연)')
+                return self.wait_undock_motion(time.monotonic() + 15.0, goal, t0)
             handle.cancel_goal_async()
-            return 'canceled' if goal is not None and goal.is_cancel_requested else 'undock_failed'
+            log.error(f'undock 실패: {self.p["undock_timeout"]:.0f} s 안에 안 끝남 → 취소 요청. '
+                      f'지금 dock_status is_docked={self.docked}')
+            return 'undock_failed'
+        # ③ 결과: 성공 status이고 도크에서 떨어졌는지
         res = done.result()
         ok = (not res.result.is_docked) if res.status == GoalStatus.STATUS_SUCCEEDED else self.docked is False
-        self.get_logger().info('undock 끝' if ok else f'undock 실패 (status {res.status})')
+        if ok:
+            log.info(f'undock 끝 ({time.monotonic() - t0:.1f} s, status {res.status})')
+        else:
+            log.error(f'undock 실패: 결과 status {res.status} (4=성공, 5=취소, 6=중단), '
+                      f'result is_docked={res.result.is_docked}, 지금 dock_status is_docked={self.docked}')
         return '' if ok else 'undock_failed'
+
+    def wait_undock_motion(self, end, goal, t0):
+        """응답 없이 언독된 경우: Create 3가 스스로 움직이는 중일 수 있으므로 멈출 때까지 기다린다
+        (멈추기 전에 initialpose·회전 명령을 보내면 언독 동작과 겹침).
+        odom→base_link가 1 s 동안 1 cm·1° 안이면 멈춘 것. end(시각)까지 못 멈추면 그래도 진행.
+        받음: end (time.monotonic 기준 마감), goal (취소 확인), t0 (언독 요청 시각, 로그용)
+        돌려줌: '' (진행) / 'canceled'"""
+        log, last, still_since = self.get_logger(), None, None
+        while time.monotonic() < end:
+            if goal is not None and goal.is_cancel_requested:
+                return 'canceled'
+            pose = self.lookup(self.p['odom_frame'], self.p['base_frame'])
+            now = time.monotonic()
+            if pose is not None and last is not None and math.hypot(pose[0] - last[0], pose[1] - last[1]) < 0.01 \
+                    and abs(float(wrap(pose[2] - last[2]))) < math.radians(1.0):
+                still_since = still_since or now
+                if now - still_since >= 1.0:
+                    log.info(f'undock 끝 (응답 없이 dock_status·odom으로 판단, {now - t0:.1f} s)')
+                    return ''
+            else:
+                still_since, last = None, pose
+            time.sleep(0.2)
+        log.warn('언독 뒤 로봇이 멈췄는지 확인 못 함 (odom TF 없음 또는 계속 움직임) → 그래도 다음 단계로')
+        return ''
 
     def wait_future(self, future, timeout, goal):
         """future(서비스·액션 응답)가 끝날 때까지 기다린다 (다른 스레드가 채움).
@@ -145,101 +207,71 @@ class PrepareMixin:
         return True
 
     def localize(self, now):
-        """[LOCALIZE] AMCL에 initialpose(출발 지점)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다린다.
-        로봇을 움직이지 않는다 (지도에 '여기 있다' 핀만 꽂음). 로봇이 이미 출발 지점(도크 앞)에 있다는 전제.
-        받음: now, (start, TF map→base_link)
-        내보냄: initialpose 한 번 → 잡히면 state START_FACE, 위치를 아예 못 잡으면 end_tour(no_localization).
-        1 s마다 map 위치·목표·거리·남은 시간 로그 (diag=false여도 출력 → 좌표 틀림 확인용)"""
+        """[LOCALIZE] AMCL에 initialpose(출발 지점 = 언독 지점)를 한 번 보내고 바로 START_FACE로 넘어간다.
+        AMCL 수렴은 기다리지 않는다 (2026-11-19: Wi-Fi·AMCL 문제로 map 위치가 안 나와 관람 준비가 계속 실패).
+        언독 지점은 init_pose.yaml로 정해져 있고, 시작 회전은 그 값으로 계산해 odom 기준으로 돈다 (face_start).
+        map 위치(AMCL)는 그 뒤 추종·구역 판정에서 쓰이므로 initialpose는 그대로 보낸다.
+        받음: now, (start)
+        내보냄: initialpose 한 번 (AMCL이 구독 중일 때) → state START_FACE"""
         p = self.p
-        if self.start is None or not p['set_initial_pose']:
-            return self.set_state('START_FACE')     # 초기 위치를 안 보냄 → 지금 AMCL 위치 그대로
-        if self.loc_at is None:
-            self.loc_at = now
-        x, y, yaw = self.start
-        if self.pose_sent is None:
+        if self.start is not None and p['set_initial_pose']:
+            x, y, yaw = self.start
             subscribers = self.pose_pub.get_subscription_count()
-            if subscribers == 0:                                # AMCL이 아직 initialpose를 구독하지 않음
-                self.dbg['reason'] = 'localize_wait_amcl'
-                if self.loc_log_at is None or now - self.loc_log_at >= 1.0:
-                    self.loc_log_at = now
-                    self.get_logger().warn('LOCALIZE: initialpose 수신 구독자 없음 (AMCL 대기 중)')
-                if now - self.loc_at > p['localize_timeout']:
-                    self.get_logger().error('LOCALIZE 실패: 제한 시간 안에 initialpose 구독자를 찾지 못함')
-                    self.end_tour('READY', 'no_localization')
-                return
-            msg = PoseWithCovarianceStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = p['map_frame']
-            msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
-            msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-            cov = [0.0] * 36
-            cov[0] = cov[7] = 0.05                  # x, y 분산 [m^2]
-            cov[35] = 0.05                          # yaw 분산 [rad^2]
-            msg.pose.covariance = cov
-            self.pose_pub.publish(msg)
-            self.pose_sent = now
-            self.get_logger().info(f'LOCALIZE: initialpose 발행 (구독자 {subscribers}, '
-                                   f'map {x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)')
-        self.dbg['reason'] = 'localize'
-        pose = self.lookup(p['map_frame'], p['base_frame'])
-        dist = math.hypot(pose[0] - x, pose[1] - y) if pose is not None else None
-        remain = max(0.0, p['localize_timeout'] - (now - self.loc_at))
-        if self.loc_log_at is None or now - self.loc_log_at >= 1.0:   # 1 s마다 진행 상황 (diag=false여도 로그)
-            self.loc_log_at = now
-            if dist is None:
-                self.get_logger().warn(f'LOCALIZE: {p["map_frame"]}→{p["base_frame"]} TF 없음 '
-                                       f'(목표 {x:.2f}, {y:.2f} / 남은 {remain:.1f} s)')
+            if subscribers == 0:
+                self.get_logger().warn('LOCALIZE: initialpose 구독자(AMCL) 없음 → 초기 위치 못 보냄, 그래도 진행 '
+                                       '(localization이 떠 있는지 확인)')
             else:
-                self.get_logger().info(f'LOCALIZE: map 위치 ({pose[0]:.2f}, {pose[1]:.2f}) / '
-                                       f'목표 ({x:.2f}, {y:.2f}) / 거리 {dist:.2f} m '
-                                       f'(허용 {p["localize_tolerance"]:.2f}) / 남은 {remain:.1f} s')
-        near = dist is not None and dist < p['localize_tolerance']
-        if near and now - self.pose_sent > 1.0:     # AMCL이 새 위치로 map→odom을 낼 시간
-            self.get_logger().info(f'LOCALIZE 성공: map→base TF가 초기 위치에 수렴 '
-                                   f'(거리 {dist:.2f} m, 허용 {p["localize_tolerance"]:.2f} m) '
-                                   '→ face_zone 방향 회전')
-            return self.set_state('START_FACE')
-        if now - self.loc_at > p['localize_timeout']:
-            if pose is None:
-                return self.end_tour('READY', 'no_localization')
-            self.get_logger().warn(f'map 위치가 출발 지점에서 {dist:.2f} m '
-                                   '떨어져 있음 (AMCL 확인) → 그래도 바라볼 곳 쪽으로 회전')
-            self.set_state('START_FACE')
+                msg = PoseWithCovarianceStamped()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = p['map_frame']
+                msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
+                msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+                cov = [0.0] * 36
+                cov[0] = cov[7] = 0.05                  # x, y 분산 [m^2]
+                cov[35] = 0.05                          # yaw 분산 [rad^2]
+                msg.pose.covariance = cov
+                self.pose_pub.publish(msg)
+                self.get_logger().info(f'LOCALIZE: initialpose 발행 (구독자 {subscribers}, '
+                                       f'map {x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°) → 기다리지 않고 시작 회전')
+        self.pose_sent = now
+        self.set_state('START_FACE')
 
     def face_start(self, now):
-        """[START_FACE] 제자리 회전으로 face_zone(키오스크) 쪽을 본다. 관람객이 키오스크에서 오므로 카메라에 잡히게.
-        map 좌표 필요 (그래서 LOCALIZE 뒤). face_timeout(15 s) 안에 못 돌면 포기하고 WAIT_VISITOR.
-        받음: now, (face_point, start, TF map→base_link)
+        """[START_FACE] 언독 지점에서 face_zone(키오스크) 쪽으로 제자리 회전. 관람객이 키오스크에서 오므로 카메라에 잡히게.
+        map 위치(AMCL)를 쓰지 않는다: 언독 지점(init_pose.yaml start_point)과 키오스크 좌표가 정해져 있으므로
+        돌 각도 = (언독 지점에서 키오스크 방향 + face_offset_deg) - 언독 지점 yaw 를 처음 한 번 계산하고,
+        odom yaw로 그만큼 돌았는지 잰다. face_timeout(15 s) 안에 못 돌면 그대로 WAIT_VISITOR.
+        받음: now, (face_point, start, TF odom→base_link)
         내보냄: drive(ramp(0, w)), 다 돌면 state WAIT_VISITOR"""
         p = self.p
-        if self.face_point is None and self.start is None:   # 바라볼 곳을 모름 → 돌지 않음
-            self.get_logger().error('START_FACE 불가: face_zone과 출발 위치가 모두 없음 → 회전 생략')
+        if self.start is None:                      # 언독 지점을 모름 → 돌 각도를 계산할 수 없음
+            self.get_logger().error('START_FACE 불가: init_pose.yaml에 출발 지점이 없음 → 회전 생략')
             return self.set_state('WAIT_VISITOR')
-        if self.face_until is None:
-            self.face_until = now + p['face_timeout']
-        pose = self.lookup(p['map_frame'], p['base_frame'])
-        if pose is None or now > self.face_until:
-            if pose is None and (self.face_log_at is None or now - self.face_log_at >= 1.0):
-                self.face_log_at = now
-                self.get_logger().warn(f'START_FACE 대기: {p["map_frame"]}→{p["base_frame"]} TF 없음 '
-                                       f'(cmd_vel enabled={self.enabled}, '
-                                       f'구독자={self.cmd_pub.get_subscription_count()})')
-            if now > self.face_until:
-                self.get_logger().warn(f'시작 회전 {p["face_timeout"]} s 안에 못 끝냄'
-                                       + (' (map TF 없음: localization 확인)' if pose is None else '')
-                                       + ' → WAIT_VISITOR')
-                self.set_state('WAIT_VISITOR')
-            self.dbg['reason'] = 'start_face_wait'
+        pose = self.lookup(p['odom_frame'], p['base_frame'])
+        if pose is None:                            # step [3]에서 걸러지지만 혹시 모를 때
             return self.drive(*self.ramp(0.0, 0.0))
-        x, y, yaw = pose
-        if self.face_point is not None:             # 바라볼 곳(키오스크 등) 쪽
-            want = math.atan2(self.face_point[1] - y, self.face_point[0] - x)
-        else:                                       # 없으면 출발 지점의 방향
-            want = self.start[2]
-        err = float(wrap(want - yaw))
+        yaw = pose[2]
+        if self.face_until is None:                 # 처음 한 번: 돌 각도 계산 → odom 목표 yaw
+            self.face_until = now + p['face_timeout']
+            sx, sy, syaw = self.start
+            if self.face_point is not None:
+                want = math.atan2(self.face_point[1] - sy, self.face_point[0] - sx)
+            else:
+                want = syaw
+            turn = float(wrap(want + math.radians(p['face_offset_deg']) - syaw))
+            self.face_goal = yaw + turn
+            self.get_logger().info(f'START_FACE: 언독 지점 yaw {math.degrees(syaw):.0f}° → 키오스크 쪽 '
+                                   f'{math.degrees(want):.0f}° (보정 {p["face_offset_deg"]:+.0f}°) '
+                                   f'= {math.degrees(turn):+.0f}° 회전 (+ 왼쪽, odom 기준)')
+        err = float(wrap(self.face_goal - yaw))
         self.dbg['reason'] = 'start_face'
         if abs(err) < p['face_tolerance'] and abs(self.cmd[1]) < 0.2:
             self.get_logger().info(f'시작 회전 끝 (오차 {math.degrees(err):.0f}°) → 관람객 인식 기다림')
+            self.set_state('WAIT_VISITOR')
+            return self.drive(*self.ramp(0.0, 0.0))
+        if now > self.face_until:
+            self.get_logger().warn(f'시작 회전 {p["face_timeout"]} s 안에 못 끝냄 (남은 {math.degrees(err):.0f}°) '
+                                   '→ WAIT_VISITOR')
             self.set_state('WAIT_VISITOR')
             return self.drive(*self.ramp(0.0, 0.0))
         w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
@@ -247,9 +279,8 @@ class PrepareMixin:
             self.face_log_at = now
             subscribers = self.cmd_pub.get_subscription_count()
             level = self.get_logger().warn if not self.enabled or subscribers == 0 else self.get_logger().info
-            level(f'START_FACE 회전 명령: yaw={math.degrees(yaw):.1f}°, '
-                  f'목표={math.degrees(want):.1f}°, 오차={math.degrees(err):.1f}°, '
-                  f'angular.z={w:.3f} rad/s, enabled={self.enabled}, cmd_vel 구독자={subscribers}')
+            level(f'START_FACE 회전 명령: 남은 {math.degrees(err):.1f}°, angular.z={w:.3f} rad/s, '
+                  f'enabled={self.enabled}, cmd_vel 구독자={subscribers}')
         return self.drive(*self.ramp(0.0, w))
 
     def wait_visitor(self, now, pose, here):

@@ -22,6 +22,7 @@
                                   작품 ID는 int (artworks.yaml artwork_id = PC3 작품 DB 번호)
 출력  cmd_vel (TwistStamped), follow/state (String)
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
+      dock (irobot_create_msgs/Dock, 액션 클라이언트)         관람이 끝나면 언독 지점으로 돌아와 Create 3 도킹
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
       arti/tour_end (Empty)                        관람이 끝나면(취소·LOST·실패) 한 번 → 인식 모듈·artwork_zone이
@@ -33,9 +34,9 @@
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
   ── 여기부터 REGISTERED까지 = prepare_tour ──
   UNDOCK      Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 관람은 항상 도크에서 시작 → 도크 밖이면 거절(not_docked)
-  LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다림
-  START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
-              face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
+  LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 한 번 보내고 바로 START_FACE (AMCL 수렴은 안 기다림)
+  START_FACE  출발 지점에서 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽으로 돌 각도를 계산해
+              odom 기준으로 그만큼 제자리 회전 (map 위치 안 씀). 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
               (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → REGISTERED.
               확인하는 동안은 따라가지 않고 그 자리에서 바라본다. 끊기면 처음부터 다시 기다림
@@ -65,7 +66,7 @@ import time
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from arti_interfaces.action import PrepareTour, StartTour
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
-from irobot_create_msgs.action import Undock
+from irobot_create_msgs.action import Dock, Undock
 from irobot_create_msgs.msg import DockStatus
 import numpy as np
 import rclpy
@@ -84,7 +85,7 @@ import yaml
 
 from arti_follow.motion import apply, MotionMixin, PersonKF, yaw_of
 from arti_follow.prepare_tour import PrepareMixin
-from arti_follow.start_tour import TourMixin, TRACKING
+from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
 
 LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받는 상태 (그 밖에는 버림)
 
@@ -95,13 +96,16 @@ PARAMS = {
                                     #   키오스크는 120 s 뒤 처음 화면으로 → 로봇이 더 길어야 [관람 시작]이 끝난 관람에 오지 않음
     'undock': True,                 # 관람 시작 때 도크에 붙어 있으면 undock
     'undock_timeout': 60.0,         # undock 액션을 이만큼 기다림 [s]
+    'return_to_dock': True,         # 관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)
+    'return_timeout': 60.0,         # 언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]
+    'return_arrive': 0.15,          # 언독 지점에서 이 거리 안이면 도착 [m]
+    'dock_timeout': 90.0,           # Create 3 dock 액션을 이만큼 기다림 [s]
     'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
-    'localize_timeout': 10.0,       # map 위치가 출발 지점 근처로 잡히길 이만큼 기다림 [s]
-    'localize_tolerance': 0.3,      # initialpose 뒤 map 위치가 출발 지점에서 이 안이면 잡힌 것 [m]
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
+    'face_offset_deg': -15.0,       # 시작 때 바라볼 방향 보정 [deg] (+ = 왼쪽, - = 오른쪽). -15: 키오스크 중심보다 15° 덜 왼쪽으로 돎
     'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치
     'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
     'register_confirm_time': 1.0,   # 관람객이 이만큼 끊김 없이 보여야 등록 완료 (순간 오인식 방지) [s]
@@ -205,7 +209,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
         sub(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
-        sub(DockStatus, 'dock_status', lambda m: setattr(self, 'docked', m.is_docked), qos_profile_sensor_data)
+        sub(DockStatus, 'dock_status', self.on_dock_status, qos_profile_sensor_data)
         sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
         sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
@@ -219,14 +223,18 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
         self.docked = None                          # dock_status (아직 못 받으면 None)
+        self.docked_at = None                       # dock_status를 마지막으로 받은 시각 (undock 실패 로그용)
         self.active, self.end_reason = False, ''    # 관람(준비 포함) 중인지, 끝난 이유 (액션 result)
         self.ready_at = None                        # REGISTERED가 된 시각 (ready_timeout 기준)
         self.explaining, self.visited = 0, []      # 이번 관람: 설명 중 작품 번호(0 = 없음), 설명한 작품
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
-        self.face_until = self.loc_at = self.pose_sent = None
+        self.face_until = self.loc_at = self.pose_sent = self.face_goal = self.face_log_at = self.loc_log_at = None
         group = ReentrantCallbackGroup()
         self.undock_client = ActionClient(self, Undock, 'undock', callback_group=group)
+        self.dock_client = ActionClient(self, Dock, 'dock', callback_group=group)
+        self.home = None                            # 언독이 끝난 곳 (x, y, yaw) odom = 돌아올 곳. 도크는 그 뒤쪽
+        self.final_state, self.ret_at, self.dock_future, self.dock_result = 'READY', None, None, None
         ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
@@ -356,6 +364,13 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             vel *= self.p['max_person_speed'] / speed
         return pos, vel
 
+    def on_dock_status(self, msg):
+        """[구독] dock_status (DockStatus) — 도크에 붙어 있는지. 값이 바뀌면 로그 (undock 실패 원인 찾기).
+        바뀜: docked, docked_at (받은 시각)"""
+        if self.docked is not None and msg.is_docked != self.docked:
+            self.get_logger().info(f'dock_status 바뀜: is_docked {self.docked} → {msg.is_docked} (상태 {self.state})')
+        self.docked, self.docked_at = msg.is_docked, self.now()
+
     def on_scan(self, msg):
         """[구독] scan (LaserScan) — 라이다가 올 때마다.
         거리 → (x, y) 점, inf·nan·로봇 몸(0.2 m 안)·범위 밖은 버림 → 그 시각 TF로 odom 좌표.
@@ -394,7 +409,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.dbg['reason'] = self.state.lower()
             return
         # [2] 지금 상태가 LOCALIZE인가? → 예: localize() / 아니오: 아래로
-        # 초기 위치 잡는 중: 아직 map 위치를 믿을 수 없어서 움직이지 않고 AMCL만 기다린다
+        # 초기 위치 알려 주기: initialpose 한 번 보내고 바로 START_FACE (기다리지 않음)
         if self.state == 'LOCALIZE':
             return self.localize(now)
         
@@ -406,6 +421,10 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             return self.drive(0.0, 0.0)
         here = np.array(pose[:2])
 
+        # [3-1] 관람이 끝나 돌아가는 중인가? (RETURN·DOCK_FACE·DOCK) → 예: go_home() (start_tour.py) / 아니오: 아래로
+        # 언독 지점(odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
+        if self.state in RETURNING:
+            return self.go_home(now, pose)
         # [4] 지금 상태가 START_FACE인가? → 예: face_start() (키오스크 쪽으로 돌기) / 아니오: 아래로
         # 출발 직후: 관람객이 키오스크 쪽에서 오므로 그쪽을 먼저 바라본다 (카메라에 잡히게)
         if self.state == 'START_FACE':
