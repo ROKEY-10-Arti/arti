@@ -1,4 +1,4 @@
-"""/is_available (std_msgs/msg/Bool) 구독과 브라우저용 1Hz 상태 스트림."""
+"""로봇 배터리·도킹·이동 상태 구독과 브라우저용 1Hz 상태 스트림."""
 
 import atexit
 import json
@@ -86,12 +86,11 @@ class RobotAvailability:
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data
-            from std_msgs.msg import Bool
 
             context = Context()
             rclpy.init(context=context, args=["--ros-args", "--disable-external-lib-logs"])
             node = rclpy.create_node(
-                "arti_kiosk_availability", context=context,
+                "arti_kiosk_availability", namespace="/arti", context=context,
                 enable_rosout=False, start_parameter_services=False,
             )
             self.fleet.subscribe(node, qos_profile_sensor_data)
@@ -99,7 +98,7 @@ class RobotAvailability:
             executor.add_node(node)
             with self._lock:
                 self._ros_ready = False
-            logger.info("로봇 가용 상태 구독 시작: %s (std_msgs/msg/Bool)", self.topic)
+            logger.info("로봇 상태 구독 시작: battery_state, dock_status, odom")
             while not self._stop.is_set() and context.ok():
                 executor.spin_once(timeout_sec=0.2)
         except Exception:

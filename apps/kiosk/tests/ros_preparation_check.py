@@ -91,6 +91,7 @@ def main():
                 return url, job
 
             assert description.wait_for_service(timeout_sec=10)
+            assert manager.transport.node.get_namespace() == '/arti'
             for artwork_id, exists in ((1, True), (999, False)):
                 request = Description.Request(artwork_id=artwork_id)
                 for attempt in range(3):

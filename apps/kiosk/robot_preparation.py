@@ -78,7 +78,7 @@ class RosPreparationTransport:
             self.action_client_type = ActionClient
             context = Context()
             rclpy.init(context=context, args=['--ros-args', '--disable-external-lib-logs'])
-            node = rclpy.create_node('arti_kiosk_preparation', context=context,
+            node = rclpy.create_node('arti_kiosk_preparation', namespace='/arti', context=context,
                                     enable_rosout=False, start_parameter_services=False)
             self.node = node
             def describe(request, response):
@@ -111,6 +111,8 @@ class RosPreparationTransport:
             raise PreparationError('ROS 연결을 준비하지 못했어요. 인터페이스 빌드와 서버 실행 상태를 확인해 주세요.')
 
     def action(self, job, kind, feedback):
+        from action_msgs.msg import GoalStatus
+
         self._ensure()
         action_type = self.types[kind]
         name = job.robot_namespace + '/arti/' + kind
@@ -126,14 +128,25 @@ class RosPreparationTransport:
         goal = action_type.Goal()
         if kind == 'prepare_tour':
             goal.start = True
-        elif job.session['mode'] == 'course':
-            goal.artwork_ids = [int(value.rsplit('-', 1)[-1]) for value in job.session['artworkIds']]
+        else:
+            goal.artwork_ids = (
+                [int(value.removeprefix('art-')) for value in job.session['artworkIds']]
+                if job.session['mode'] == 'course' else []
+            )
         with job.lock:
             if job.cancel.is_set():
                 raise PreparationError('호출을 취소했어요.')
             job.motion_pending = True
         holder = {}
         terminal = threading.Event()
+        cancel_lock = threading.Lock()
+
+        def request_cancel(handle):
+            with cancel_lock:
+                if not handle or not handle.accepted or holder.get('cancel_sent'):
+                    return
+                handle.cancel_goal_async()
+                holder['cancel_sent'] = True
 
         def result_done(future):
             try:
@@ -157,8 +170,7 @@ class RosPreparationTransport:
                 else:
                     handle.get_result_async().add_done_callback(result_done)
                     if job.cancel.is_set():
-                        holder['cancel_sent'] = True
-                        handle.cancel_goal_async()
+                        request_cancel(handle)
             except Exception as error:
                 # A transport error cannot prove the robot stopped. Keep cancellation unconfirmed.
                 holder['error'] = error
@@ -174,14 +186,11 @@ class RosPreparationTransport:
         deadline = time.monotonic() + self.action_timeout if kind == 'prepare_tour' else None
         while not terminal.wait(0.05):
             handle = holder.get('handle')
-            if job.cancel.is_set() and handle and handle.accepted and not holder.get('cancel_sent'):
-                holder['cancel_sent'] = True
-                handle.cancel_goal_async()
+            if job.cancel.is_set():
+                request_cancel(handle)
             if deadline is not None and time.monotonic() >= deadline:
                 job.cancel.set()  # A late goal response also receives cancellation.
-                if handle and handle.accepted and not holder.get('cancel_sent'):
-                    holder['cancel_sent'] = True
-                    handle.cancel_goal_async()
+                request_cancel(handle)
                 raise PreparationError('로봇 작업 시간이 초과됐어요. 취소 후 정지 확인이 필요해요.')
         if 'error' in holder:
             raise PreparationError('로봇 액션 연결이 끊겼어요. 정지 상태를 확인해 주세요.')
@@ -189,9 +198,9 @@ class RosPreparationTransport:
         if not handle or not handle.accepted:
             raise PreparationError('로봇이 작업 요청을 거절했어요.')
         result = holder['result']
-        if result.status == 5 and job.cancel.is_set():
+        if result.status == GoalStatus.STATUS_CANCELED and job.cancel.is_set():
             raise PreparationError('로봇 작업을 취소했어요.')
-        if result.status != 4 or not result.result.success:  # GoalStatus.STATUS_SUCCEEDED
+        if result.status != GoalStatus.STATUS_SUCCEEDED or not result.result.success:
             raise PreparationError(result.result.message or '로봇 작업이 완료되지 않았어요.')
         return result.result
 
@@ -307,7 +316,7 @@ class PreparationManager:
                 if job.cancel.is_set():
                     return
                 job.tour_state, job.artwork_id = message.state, message.artwork_id
-            if message.state == 'ARTWORK_COMPLETED':
+            if message.state == 'ARTWORK_COMPLETED' and message.artwork_id > 0:
                 self.record_artwork(job, message.artwork_id)
 
         try:
