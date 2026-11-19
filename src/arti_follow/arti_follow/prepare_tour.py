@@ -17,9 +17,6 @@ from std_msgs.msg import String
 from arti_follow.motion import wrap
 
 
-DOCK_STATUS_WAIT = 3.0     # 호출 때 dock_status를 이만큼 기다림 (노드를 막 켰을 때) [s]
-
-
 class PrepareMixin:
     """VisitorFollower가 상속해서 쓰는 호출·등록 단계 함수."""
 
@@ -28,7 +25,7 @@ class PrepareMixin:
         바뀜: kf.x, seen, holding, 단계 타이머, explaining, visited, seen_since, active, end_reason
               state → UNDOCK (undock 파라미터 false면 LOCALIZE)"""
         self.kf.x, self.seen, self.holding = None, -1e9, False
-        self.face_until = self.loc_at = self.pose_sent = None
+        self.face_until = self.loc_at = self.pose_sent = self.loc_log_at = self.face_log_at = None
         self.active, self.end_reason, self.ready_at = True, '', None
         self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
@@ -43,7 +40,8 @@ class PrepareMixin:
         start = false면 아무것도 안 하고 끝냄 (not_requested).
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
         받음: goal (start, is_cancel_requested)
-        돌려줌: PrepareTour.Result(success = 등록 완료, message = registered 또는 실패 이유)"""
+        돌려줌: PrepareTour.Result(success = 등록 완료, message = registered 또는 실패 이유)
+        성공·실패 모두 result 값과 goal.succeed/abort/canceled 여부를 로그로 남긴다"""
         if goal is not None and not goal.request.start:
             self.get_logger().warn('호출 거절 (start = false)')
             goal.abort()
@@ -67,12 +65,20 @@ class PrepareMixin:
             time.sleep(0.2)
         if self.active and self.state == 'REGISTERED':
             self.send_prepare_feedback(goal)        # 마지막 feedback REGISTERED
-            self.get_logger().info('관람 준비 끝 (등록 완료) → start_tour 기다림')
+            self.get_logger().info('prepare_tour 성공 → result success=true, message=registered '
+                                   '(goal=succeed, start_tour 대기)')
             if goal is not None:
                 goal.succeed()
             return PrepareTour.Result(success=True, message='registered')
-        reason = self.end_reason
-        self.get_logger().info(f'관람 준비 실패: {reason}')
+        reason = self.end_reason or 'unknown'
+        if goal is None:
+            outcome = 'auto_start (goal 없음)'
+        elif reason == 'canceled':
+            outcome = 'goal.canceled()'
+        else:
+            outcome = 'goal.abort()'
+        self.get_logger().error(f'prepare_tour 실패 → result success=false, message={reason!r}, '
+                                f'{outcome} / state={self.state}')
         if goal is not None:
             goal.canceled() if reason == 'canceled' else goal.abort()
         return PrepareTour.Result(success=False, message=reason)
@@ -101,12 +107,13 @@ class PrepareMixin:
         관람은 항상 도크에서 시작한다 → 도크 밖이면 거절 (undock 뒤 initialpose = 도크 앞이 맞으려면 도크에서 출발해야 함).
         받음: goal (취소 확인용), (docked: dock_status)
         돌려줌: '' (성공) / 'not_docked' (도크 밖, dock_status 못 받음) / 'no_undock_server' / 'undock_failed' / 'canceled'"""
-        end = time.monotonic() + DOCK_STATUS_WAIT
-        while self.docked is None and time.monotonic() < end:   # 노드를 막 켜서 dock_status를 아직 못 받았을 때
-            time.sleep(0.1)
+        # Action goal이 들어오면 현재 알고 있는 dock_status만 확인하고 바로 undock을 요청한다.
+        # dock_status를 기다리면 호출 직후 최대 3초 동안 undock이 시작되지 않는다.
         if self.docked is not True:
-            self.get_logger().error('도크에 붙어 있지 않음 (dock_status '
-                                    f'{"없음" if self.docked is None else "is_docked=false"}) → 호출 거절. '
+            if self.docked is None:
+                self.get_logger().error('dock_status를 아직 받지 못함 → undock 요청을 보내지 않음')
+                return 'dock_status_unavailable'
+            self.get_logger().error('도크에 붙어 있지 않음 (dock_status is_docked=false) → 호출 거절. '
                                     '관람은 도크에서 시작한다')
             return 'not_docked'
         if not self.undock_client.wait_for_server(timeout_sec=5.0):
@@ -141,7 +148,8 @@ class PrepareMixin:
         """[LOCALIZE] AMCL에 initialpose(출발 지점)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다린다.
         로봇을 움직이지 않는다 (지도에 '여기 있다' 핀만 꽂음). 로봇이 이미 출발 지점(도크 앞)에 있다는 전제.
         받음: now, (start, TF map→base_link)
-        내보냄: initialpose 한 번 → 잡히면 state START_FACE, 위치를 아예 못 잡으면 end_tour(no_localization)"""
+        내보냄: initialpose 한 번 → 잡히면 state START_FACE, 위치를 아예 못 잡으면 end_tour(no_localization).
+        1 s마다 map 위치·목표·거리·남은 시간 로그 (diag=false여도 출력 → 좌표 틀림 확인용)"""
         p = self.p
         if self.start is None or not p['set_initial_pose']:
             return self.set_state('START_FACE')     # 초기 위치를 안 보냄 → 지금 AMCL 위치 그대로
@@ -149,9 +157,14 @@ class PrepareMixin:
             self.loc_at = now
         x, y, yaw = self.start
         if self.pose_sent is None:
-            if self.pose_pub.get_subscription_count() == 0:     # AMCL이 아직 initialpose를 구독하지 않음
+            subscribers = self.pose_pub.get_subscription_count()
+            if subscribers == 0:                                # AMCL이 아직 initialpose를 구독하지 않음
                 self.dbg['reason'] = 'localize_wait_amcl'
+                if self.loc_log_at is None or now - self.loc_log_at >= 1.0:
+                    self.loc_log_at = now
+                    self.get_logger().warn('LOCALIZE: initialpose 수신 구독자 없음 (AMCL 대기 중)')
                 if now - self.loc_at > p['localize_timeout']:
+                    self.get_logger().error('LOCALIZE 실패: 제한 시간 안에 initialpose 구독자를 찾지 못함')
                     self.end_tour('READY', 'no_localization')
                 return
             msg = PoseWithCovarianceStamped()
@@ -165,17 +178,31 @@ class PrepareMixin:
             msg.pose.covariance = cov
             self.pose_pub.publish(msg)
             self.pose_sent = now
-            self.get_logger().info(f'초기 위치 보냄 (map {x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)')
+            self.get_logger().info(f'LOCALIZE: initialpose 발행 (구독자 {subscribers}, '
+                                   f'map {x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)')
         self.dbg['reason'] = 'localize'
         pose = self.lookup(p['map_frame'], p['base_frame'])
-        near = pose is not None and math.hypot(pose[0] - x, pose[1] - y) < p['localize_tolerance']
+        dist = math.hypot(pose[0] - x, pose[1] - y) if pose is not None else None
+        remain = max(0.0, p['localize_timeout'] - (now - self.loc_at))
+        if self.loc_log_at is None or now - self.loc_log_at >= 1.0:   # 1 s마다 진행 상황 (diag=false여도 로그)
+            self.loc_log_at = now
+            if dist is None:
+                self.get_logger().warn(f'LOCALIZE: {p["map_frame"]}→{p["base_frame"]} TF 없음 '
+                                       f'(목표 {x:.2f}, {y:.2f} / 남은 {remain:.1f} s)')
+            else:
+                self.get_logger().info(f'LOCALIZE: map 위치 ({pose[0]:.2f}, {pose[1]:.2f}) / '
+                                       f'목표 ({x:.2f}, {y:.2f}) / 거리 {dist:.2f} m '
+                                       f'(허용 {p["localize_tolerance"]:.2f}) / 남은 {remain:.1f} s')
+        near = dist is not None and dist < p['localize_tolerance']
         if near and now - self.pose_sent > 1.0:     # AMCL이 새 위치로 map→odom을 낼 시간
-            self.get_logger().info('초기 위치 잡힘 → 그 자리에서 바라볼 곳(face_zone) 쪽으로 회전')
+            self.get_logger().info(f'LOCALIZE 성공: map→base TF가 초기 위치에 수렴 '
+                                   f'(거리 {dist:.2f} m, 허용 {p["localize_tolerance"]:.2f} m) '
+                                   '→ face_zone 방향 회전')
             return self.set_state('START_FACE')
         if now - self.loc_at > p['localize_timeout']:
             if pose is None:
                 return self.end_tour('READY', 'no_localization')
-            self.get_logger().warn(f'map 위치가 출발 지점에서 {math.hypot(pose[0] - x, pose[1] - y):.2f} m '
+            self.get_logger().warn(f'map 위치가 출발 지점에서 {dist:.2f} m '
                                    '떨어져 있음 (AMCL 확인) → 그래도 바라볼 곳 쪽으로 회전')
             self.set_state('START_FACE')
 
@@ -186,11 +213,17 @@ class PrepareMixin:
         내보냄: drive(ramp(0, w)), 다 돌면 state WAIT_VISITOR"""
         p = self.p
         if self.face_point is None and self.start is None:   # 바라볼 곳을 모름 → 돌지 않음
+            self.get_logger().error('START_FACE 불가: face_zone과 출발 위치가 모두 없음 → 회전 생략')
             return self.set_state('WAIT_VISITOR')
         if self.face_until is None:
             self.face_until = now + p['face_timeout']
         pose = self.lookup(p['map_frame'], p['base_frame'])
         if pose is None or now > self.face_until:
+            if pose is None and (self.face_log_at is None or now - self.face_log_at >= 1.0):
+                self.face_log_at = now
+                self.get_logger().warn(f'START_FACE 대기: {p["map_frame"]}→{p["base_frame"]} TF 없음 '
+                                       f'(cmd_vel enabled={self.enabled}, '
+                                       f'구독자={self.cmd_pub.get_subscription_count()})')
             if now > self.face_until:
                 self.get_logger().warn(f'시작 회전 {p["face_timeout"]} s 안에 못 끝냄'
                                        + (' (map TF 없음: localization 확인)' if pose is None else '')
@@ -210,6 +243,13 @@ class PrepareMixin:
             self.set_state('WAIT_VISITOR')
             return self.drive(*self.ramp(0.0, 0.0))
         w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
+        if self.face_log_at is None or now - self.face_log_at >= 1.0:
+            self.face_log_at = now
+            subscribers = self.cmd_pub.get_subscription_count()
+            level = self.get_logger().warn if not self.enabled or subscribers == 0 else self.get_logger().info
+            level(f'START_FACE 회전 명령: yaw={math.degrees(yaw):.1f}°, '
+                  f'목표={math.degrees(want):.1f}°, 오차={math.degrees(err):.1f}°, '
+                  f'angular.z={w:.3f} rad/s, enabled={self.enabled}, cmd_vel 구독자={subscribers}')
         return self.drive(*self.ramp(0.0, w))
 
     def wait_visitor(self, now, pose, here):
