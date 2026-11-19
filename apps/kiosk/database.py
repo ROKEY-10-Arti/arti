@@ -123,6 +123,15 @@ def initialize_database(db, root):
                 db.executemany(f'UPDATE Art SET {field}=? WHERE artwork_id=?',
                                [(art[field], art['artwork_id']) for art in catalog['artworks']])
                 db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (field_version,))
+        description_update = catalog.get('artwork_description_update')
+        if description_update and not db.execute(
+            'SELECT 1 FROM catalog_migrations WHERE version=?', (description_update['version'],)
+        ).fetchone():
+            previous_descriptions = description_update['previous']
+            db.executemany('UPDATE Art SET description=? WHERE artwork_id=? AND description=?',
+                           [(art['description'], art['artwork_id'], previous_descriptions[art['artwork_id']])
+                            for art in catalog['artworks'] if art['artwork_id'] in previous_descriptions])
+            db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (description_update['version'],))
         for course in catalog['courses']:
             db.execute('INSERT OR IGNORE INTO courses (id, data) VALUES (?, ?)',
                        (course['id'], json.dumps(course, ensure_ascii=False)))
