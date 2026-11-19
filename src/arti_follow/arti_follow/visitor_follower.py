@@ -19,6 +19,8 @@
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
       artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id
       artwork_zone/explained (Int32)     끝까지 설명한 작품 번호 → feedback ARTWORK_COMPLETED 한 번
+      artwork_zone/entered (String)      관람객이 들어간 안내 구역 zone_id → end_zone(exit)이면 end_guide_wait 동안 서서
+                                         종료 안내를 듣게 한 뒤 관람 끝(completed) → 도크 복귀
                                   작품 ID는 int (artworks.yaml artwork_id = PC3 작품 DB 번호)
 출력  cmd_vel (TwistStamped), follow/state (String)
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
@@ -60,6 +62,8 @@
 주행: 장애물로 격자를 만들어 칸마다 목표까지 '돌아가는 거리'를 구하고(BFS),
       (v, w) 후보를 sim_time 동안 굴려 보며 안 부딪히고 끝점의 그 거리가 가장 작은 것을 고른다(DWA).
 """
+import collections
+import json
 import math
 import os
 import signal
@@ -92,71 +96,17 @@ from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
 
 LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받는 상태 (그 밖에는 버림)
 
-PARAMS = {
-    'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
-    'auto_start': False,            # true면 액션 없이 켜자마자 prepare + start (테스트용)
-    'ready_timeout': 130.0,         # 등록 완료(REGISTERED) 뒤 start_tour를 이만큼 기다림. 넘으면 관람 끝 (not_started) [s]
-                                    #   키오스크는 120 s 뒤 처음 화면으로 → 로봇이 더 길어야 [관람 시작]이 끝난 관람에 오지 않음
-    'undock': True,                 # 관람 시작 때 도크에 붙어 있으면 undock
-    'undock_timeout': 60.0,         # undock 액션을 이만큼 기다림 [s]
-    'return_to_dock': True,         # 관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)
-    'return_timeout': 60.0,         # 언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]
-    'return_arrive': 0.15,          # 언독 지점에서 이 거리 안이면 도착 [m]
-    'dock_timeout': 90.0,           # Create 3 dock 액션을 이만큼 기다림 [s]
-    'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
-    'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
-    'auto_register': True,          # WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)
-    'register_period': 1.0,         # 등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)
-    'register_settle': 0.5,         # 첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]
-    'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
-    'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
-    'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
-    'face_offset_deg': -15.0,       # 시작 때 바라볼 방향 보정 [deg] (+ = 왼쪽, - = 오른쪽). -15: 키오스크 중심보다 15° 덜 왼쪽으로 돎
-    'start_point': 'dock',          # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치 (도크 위, 언독 직전에 보냄)
-    'face_from_point': 'undock',    # init_pose.yaml 언독이 끝난 자리·방향 = 시작 회전(키오스크 쪽) 각도 계산 기준
-    'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
-    'register_confirm_time': 1.0,   # 관람객이 이만큼 끊김 없이 보여야 등록 완료 (순간 오인식 방지) [s]
-    'register_gap': 0.5,            # 등록 확인 중 좌표 간격이 이보다 길면 끊긴 것 → 다시 기다림 [s]
-    'face_timeout': 15.0,           # 이 시간 안에 못 돌면 포기하고 WAIT_VISITOR [s] (map TF가 없을 때 등)
-    'target_distance': 0.8,         # 유지 거리 [m]
-    'distance_tolerance': 0.05,     # 이 안이면 전진 안 함 [m]
-    'restart_margin': 0.15,         # 멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)
-    'lead_time': 0.3,               # 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐)
-                                    #   0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)
-    'kf_accel_std': 2.0,            # 칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2] (1.0 → 2.0: 걷기 시작·멈춤에 빨리 반응)
-    'kf_meas_std': 0.2,             # 칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m] (0.15 → 0.2: 이상값으로 버리는 좌표 4.7 % → 3.2 %)
-    'kf_gate': 9.21,                # 칼만: 예측과 이만큼(마할라노비스 거리^2, 2차원 99 %) 넘게 다르면 이상값으로 버림
-    'kf_max_rejects': 5,            # 연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 필터를 새로 시작
-    'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
-    'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
-    'lost_timeout': 1.5,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)
-    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 (플로우차트 10초) → 2π/10 = 0.63 rad/s [s]
-    'search_spin_extra': 3.0,       # 한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]
-    'search_move_time': 5.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s] (0 → 5: 사람이 그 자리에 서 있으면 영원히 못 도착)
-    'search_arrive': 0.35,          # 최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)
-    'wait_time': 10.0,              # 회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]
-    'search_spin': 0.3,             # 회전 탐색 최소 속도 [rad/s] (보통은 2π/search_time)
-    'turn_first_angle': 1.0,        # SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°)
-                                    #   DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤
-    'max_linear': 0.3, 'max_angular': 0.8,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
-                                    #   max_angular 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24)
-    'linear_accel': 0.8, 'angular_accel': 1.5,      # [m/s^2], [rad/s^2] (0.5 → 0.8: 빨리 0.3 m/s까지, 3.0 → 1.5: 회전이 덜 들쑥날쑥)
-    'linear_decel': 0.8,            # 멈출 때 감속 [m/s^2] (0.4 → 0.8: 0.3 m/s에서 약 6 cm만 더 감, 너무 가까이 가는 것 줄임)
-    'min_spin_cmd': 0.1,            # 서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s]
-                                    #   Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림
-    'control_period': 0.1, 'sim_time': 1.5,         # 제어 주기, 후보를 굴려 볼 시간 [s]
-    'v_samples': 7, 'w_samples': 15,
-    'robot_radius': 0.2, 'safety_margin': 0.05,     # [m]
-    'grid_resolution': 0.1,         # 길 찾기 격자 칸 [m]
-    'w_heading': 0.3, 'w_clearance': 1.0, 'clearance_zone': 0.4,   # 비용: 방향, 장애물 근접(이 거리 안)
-    'w_turn': 0.02,                 # 비용: 회전 (같은 조건이면 직진)
-    'scan_min_range': 0.2,          # 이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]
-    'scan_timeout': 0.5,            # scan이 이보다 오래 안 오면 정지 [s]
-    'start_enabled': True,          # false면 계산만 하고 cmd_vel을 보내지 않음 (follow_test.launch.py drive:=false)
-    'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
-    'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
-    'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
-}
+def load_params(path=''):
+    """파라미터 기본값을 config/visitor_follower.json에서 읽는다 (코드에 값을 두지 않음).
+    묶음(tour, follow, avoid …)은 보기용이라 풀고, '_'로 시작하는 키(_설명)는 버린다.
+    받음: path  JSON 경로 ('' = install/share/arti_follow/config/visitor_follower.json)
+    돌려줌: {이름: 기본값} (같은 이름의 ROS 파라미터 -p 이름:=값 이 있으면 그 값이 우선)"""
+    path = path or os.path.join(get_package_share_directory('arti_follow'), 'config', 'visitor_follower.json')
+    with open(path, encoding='utf-8') as f:
+        cfg = json.load(f)
+    return {k: v for group, d in cfg.items() if not group.startswith('_') and isinstance(d, dict)
+            for k, v in d.items() if not k.startswith('_')}
+
 
 
 class Diag:
@@ -192,7 +142,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         액션  서버 arti/prepare_tour·arti/start_tour, 클라이언트 undock
         타이머 control_period(0.1 s)마다 control()"""
         super().__init__('visitor_follower')
-        self.p = {q.name: q.value for q in self.declare_parameters('', list(PARAMS.items()))}
+        params_json = self.declare_parameter('params_json', '').value   # '' = 패키지의 config/visitor_follower.json
+        self.p = {q.name: q.value for q in self.declare_parameters('', list(load_params(params_json).items()))}
         self.tf = Buffer()
         self.seen = -1e9                            # 관람객 좌표를 마지막으로 받은 시각
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
@@ -200,6 +151,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
+        self.cmd_hist = collections.deque(maxlen=60)  # 최근 cmd_vel (시각, v, w) 약 6 s → odom 지연 보정 (predict_yaw)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
         self.diag = Diag() if self.p['diag'] else None
         self.arrive, self.last_tick, self.last_cmd = {}, None, None
@@ -219,6 +171,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         sub(DockStatus, 'dock_status', self.on_dock_status, qos_profile_sensor_data)
         sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
         sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
+        sub(String, 'artwork_zone/entered', self.on_zone_entered, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
@@ -245,6 +198,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.dock_client = ActionClient(self, Dock, 'dock', callback_group=group)
         self.home = None                            # 언독이 끝난 곳 (x, y, yaw) odom = 돌아올 곳. 도크는 그 뒤쪽
         self.final_state, self.ret_at, self.dock_future, self.dock_result = 'READY', None, None, None
+        self.tour_at = self.end_at = None           # start_tour 시작 시각, 출구 종료 예정 시각
         ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
@@ -378,6 +332,15 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             vel *= self.p['max_person_speed'] / speed
         return pos, vel
 
+    def tf_age(self, target, source):
+        """TF(target←source) 최신 값이 지금보다 몇 초 전 것인지 (Wi-Fi로 늦게 온 odom 확인용).
+        돌려줌: 나이 [s], 변환이 없으면 inf"""
+        try:
+            stamp = self.tf.lookup_transform(target, source, Time()).header.stamp
+        except Exception:
+            return float('inf')
+        return self.now() - (stamp.sec + stamp.nanosec * 1e-9)
+
     def on_dock_status(self, msg):
         """[구독] dock_status (DockStatus) — 도크에 붙어 있는지. 값이 바뀌면 로그 (undock 실패 원인 찾기).
         바뀜: docked, docked_at (받은 시각)"""
@@ -439,6 +402,16 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 언독 지점(odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
         if self.state in RETURNING:
             return self.go_home(now, pose)
+        # [3-2] 관람객이 출구에 들어갔나? (end_at) → 예: end_guide_wait 동안 서서 관람객 쪽을 봄 → 관람 끝(completed) → RETURN
+        if self.end_at is not None and self.state in TRACKING:
+            if now >= self.end_at:
+                self.end_at = None
+                return self.end_tour('READY', 'completed')
+            self.dbg['reason'] = 'end_guide'
+            if self.kf.x is not None:
+                last, vel = self.person()
+                return self.face(pose, np.array(pose[:2]), last)
+            return self.drive(*self.ramp(0.0, 0.0))
         # [4] 지금 상태가 START_FACE인가? → 예: face_start() (키오스크 쪽으로 돌기) / 아니오: 아래로
         # 출발 직후: 관람객이 키오스크 쪽에서 오므로 그쪽을 먼저 바라본다 (카메라에 잡히게)
         if self.state == 'START_FACE':

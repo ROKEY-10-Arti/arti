@@ -29,6 +29,7 @@ class PrepareMixin:
         self.face_until = self.loc_at = self.pose_sent = self.loc_log_at = self.face_log_at = self.face_goal = None
         self.active, self.end_reason, self.ready_at = True, '', None
         self.home = None                            # 이번 관람에서 언독하면 그 자리를 기록
+        self.tour_at = self.end_at = None
         self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
@@ -306,7 +307,19 @@ class PrepareMixin:
         pose = self.lookup(p['odom_frame'], p['base_frame'])
         if pose is None:                            # step [3]에서 걸러지지만 혹시 모를 때
             return self.drive(*self.ramp(0.0, 0.0))
-        yaw = pose[2]
+        # odom이 늦게 오면 (Wi-Fi 지연) 지금 각도를 모르는 채 돌게 되어 지나쳐 돈다
+        # (2026-11-19 bag: odom 0.8~1.5 s 지연 + 0.8 rad/s → 48° 대신 약 100° 회전)
+        # → odom 값에 그 뒤 보낸 회전 명령만큼 더해 지금 각도를 추정 (predict_yaw). 너무 오래된 값이면 멈추고 기다림
+        age = self.tf_age(p['odom_frame'], p['base_frame'])
+        if age > p['face_tf_max_age']:
+            if self.face_log_at is None or now - self.face_log_at >= 1.0:
+                self.face_log_at = now
+                self.get_logger().warn(f'START_FACE: odom이 {age:.1f} s 늦게 옴 → 멈추고 기다림 (지나쳐 돌지 않게)')
+            self.dbg['reason'] = 'start_face_tf_old'
+            if self.face_until is not None:
+                self.face_until += self.p['control_period']   # 기다린 시간은 face_timeout에서 빼 줌
+            return self.drive(0.0, 0.0)
+        yaw = self.predict_yaw(pose[2], age, now)   # odom 지연만큼 보낸 명령으로 보정한 지금 각도
         if self.face_until is None:                 # 처음 한 번: 돌 각도 계산 → odom 목표 yaw
             self.face_until = now + p['face_timeout']
             sx, sy, syaw = self.face_from
@@ -330,7 +343,8 @@ class PrepareMixin:
                                    '→ WAIT_VISITOR')
             self.set_state('WAIT_VISITOR')
             return self.drive(*self.ramp(0.0, 0.0))
-        w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
+        w_max = min(p['max_angular'], p['face_max_speed'])   # 천천히 돌아야 odom이 조금 늦어도 덜 지나침
+        w = float(np.clip(1.5 * err, -w_max, w_max))
         if self.face_log_at is None or now - self.face_log_at >= 1.0:
             self.face_log_at = now
             subscribers = self.cmd_pub.get_subscription_count()

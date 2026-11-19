@@ -2,7 +2,7 @@
 
   run_tour       액션 실행: REGISTERED 확인 → FOLLOW → 관람 끝까지 feedback → result
   상태별 동작 (step이 부름)  FOLLOW follow · SEARCH/WAIT/LOST search
-  end_tour       관람 끝 (취소·실패·LOST·not_started 공통): 정지, 관람객 데이터 삭제, arti/tour_end
+  end_tour       관람 끝 (출구 completed·취소·실패·LOST·not_started 공통): 정지, 관람객 데이터 삭제, arti/tour_end
   on_explaining·on_explained   artwork_zone 작품 설명 → feedback EXPLAINING / ARTWORK_COMPLETED
 """
 import math
@@ -29,9 +29,10 @@ class TourMixin:
         (로봇 ready_timeout 130 s가 키오스크 120 s보다 길어서 로봇이 먼저 끝나는 일 없음). artwork_ids는 보지 않음 (자유관람).
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
         받음: goal (is_cancel_requested)
-        돌려줌: StartTour.Result(success = 취소로 끝남, message = 끝난 이유)"""
+        돌려줌: StartTour.Result(success = 취소·출구 완료로 끝남, message = 끝난 이유: completed / canceled / lost ...)"""
         with self.lock:
             self.get_logger().info('관람 시작 → 추종')
+            self.tour_at, self.end_at = self.now(), None
             self.set_state('FOLLOW')                # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
         while self.active:
             if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
@@ -40,13 +41,18 @@ class TourMixin:
             self.send_feedback(goal)
             time.sleep(0.2)
         reason = self.end_reason
-        result = StartTour.Result(success=reason == 'canceled', message=reason)
+        result = StartTour.Result(success=reason in ('canceled', 'completed'), message=reason)
         with self.lock:
             visited, self.visited = self.visited, []   # 관람 기록은 로그로 남기고 지운다 (관람객 데이터 남기지 않음)
         self.get_logger().info(f'관람 결과: success={result.success}, message={reason}, '
                                f'설명 완료 {visited}')
         if goal is not None:
-            goal.canceled() if reason == 'canceled' else goal.abort()
+            if reason == 'canceled':
+                goal.canceled()
+            elif reason == 'completed':
+                goal.succeed()                      # 출구까지 관람 끝 (robot4 코스 완료와 같은 message)
+            else:
+                goal.abort()
         return result
 
     def send_feedback(self, goal):
@@ -153,7 +159,7 @@ class TourMixin:
               reason  끝난 이유 → 액션 result.message ('canceled', 'lost', 'undock_failed' ...)
         바뀜: active = False → run_prepare·run_tour 루프가 끝나 result를 보냄
         내보냄: cmd_vel 0, arti/tour_end, follow/state"""
-        self.end_reason = reason
+        self.end_reason, self.end_at = reason, None
         self.drive(0.0, 0.0)
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
         self.tour_end_pub.publish(Empty())
@@ -227,6 +233,26 @@ class TourMixin:
         self.home, self.dock_future, self.dock_result = None, None, None
         self.active = False
         self.set_state(self.final_state)
+
+    def on_zone_entered(self, msg):
+        """[구독] artwork_zone/entered (String) — 관람객이 들어간 안내 구역 zone_id.
+        관람 중(FOLLOW·SEARCH·WAIT)이고 end_zone(exit)이며 start_tour 뒤 end_min_time이 지났으면
+        end_guide_wait 뒤에 관람 끝 (step [3-2]). 종료 안내 음성은 artwork_zone이 guide_message로 이미 보냄.
+        받음: msg.data  'exit' / 'kiosk' ...
+        바뀜: end_at (관람 끝 예정 시각)"""
+        p = self.p
+        if not p['end_zone'] or msg.data != p['end_zone'] or self.end_at is not None:
+            return
+        with self.lock:
+            if not self.active or self.state not in TRACKING or self.tour_at is None:
+                return
+            now = self.now()
+            if now - self.tour_at < p['end_min_time']:
+                self.get_logger().info(f'출구({msg.data}) 진입했지만 관람 시작 {now - self.tour_at:.0f} s 뒤라 무시 '
+                                       f'(end_min_time {p["end_min_time"]:.0f} s)')
+                return
+            self.end_at = now + p['end_guide_wait']
+            self.get_logger().info(f'관람객 출구({msg.data}) 진입 → {p["end_guide_wait"]:.0f} s 종료 안내 뒤 관람 끝 → 도크 복귀')
 
     def on_explaining(self, msg):
         """[구독] artwork_zone/explaining (Int32) — 설명 중인 작품 번호. 관람 중일 때만 저장.

@@ -65,7 +65,8 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
       → (v, w) 후보를 1.5 s 굴려 보고, 안 부딪히면서(로봇 반지름 0.2 + 여유 0.05) 끝점의 그 거리가 가장 작은 것 (DWA)
 ```
 
-- 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
+- 파라미터 기본값은 `src/arti_follow/config/visitor_follower.json`에 묶음(tour, follow, search, avoid …)별로 설명과 함께 있다.
+  파일을 고치면 `pb` 뒤 다시 실행, 한 번만 바꿀 때는 `-p 이름:=값` (JSON보다 우선), 다른 JSON은 `-p params_json:=<경로>`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
   → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
   `arti/prepare_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭(등록), 그다음 `arti/start_tour`. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 prepare → start), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
