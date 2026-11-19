@@ -26,7 +26,7 @@ ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT1_NS
 위와 같고 `$ARTI_ROBOT1_NS`만 `$ARTI_ROBOT2_NS`(`/robot4`)로 바꾼다.
 
 ```bash
-ros2 launch arti_bringup localization.launch.py namespace:=$ARTI_ROBOT2_NS   # init_pose.yaml에 robot4가 없으면 시작 위치 없음 → RViz로 지정
+ros2 launch arti_bringup localization.launch.py namespace:=$ARTI_ROBOT2_NS   # init_pose.yaml robot4 dock에 yaw_deg가 없으면 시작 위치 없음 → RViz로 지정
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=$ARTI_ROBOT2_NS
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT2_NS
 ```

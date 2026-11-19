@@ -13,6 +13,9 @@
     namespace:=/robot1       기본 $ARTI_ROBOT_NS
     map:=<yaml>              기본 $ARTI_MAP (저장소 maps/gallery.yaml)
     start_point:=dock        init_pose.yaml에서 쓸 위치 이름 (기본 dock = 도크 위에서 띄울 때. 언독 뒤면 undock)
+    super_client:=false      이 launch가 띄우는 노드(AMCL, map_server)의 ROS_SUPER_CLIENT (기본 false)
+                             false = 자기가 쓰는 토픽의 discovery 정보만 받음 → discovery 트래픽 감소.
+                             터미널의 ros2 CLI(topic list 등)는 영향 없음 (그 터미널 값 True 그대로).
 """
 import math
 import os
@@ -20,20 +23,23 @@ import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction,
+                            SetEnvironmentVariable)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 import yaml
 
 
 def start_pose(ns, point):
-    """init_pose.yaml의 robots.<ns>.<point> → (x, y, yaw[rad]). 없으면 None."""
+    """init_pose.yaml의 robots.<ns>.<point> → (x, y, yaw[rad]).
+    그 위치가 없거나 yaw_deg가 없으면 None (방향을 모르는 값을 AMCL에 넣지 않음 → RViz 2D Pose Estimate).
+    예: robot4 dock은 yaw_deg를 아직 안 재서 시작 위치를 넣지 않는다 (2026-11-19 전과 같은 동작)."""
     path = os.path.join(get_package_share_directory('arti_common'), 'config', 'init_pose.yaml')
     with open(path, encoding='utf-8') as f:
         p = ((yaml.safe_load(f) or {}).get('robots') or {}).get(ns, {}).get(point)
-    if not p:
+    if not p or 'yaw_deg' not in p:
         return None
-    return float(p['x']), float(p['y']), math.radians(float(p.get('yaw_deg', 0.0)))
+    return float(p['x']), float(p['y']), math.radians(float(p['yaw_deg']))
 
 
 def make(context):
@@ -50,7 +56,7 @@ def make(context):
     pose = start_pose(ns, arg('start_point'))
     if pose is None:
         amcl['set_initial_pose'] = False
-        msg = f'[localization] init_pose.yaml에 {ns}.{arg("start_point")} 없음 → 시작 위치 없이 (RViz 2D Pose Estimate)'
+        msg = f'[localization] init_pose.yaml에 {ns}.{arg("start_point")}이 없거나 yaw_deg가 없음 → 시작 위치 없이 (RViz 2D Pose Estimate)'
     else:
         amcl['set_initial_pose'] = True
         amcl['initial_pose'] = {'x': pose[0], 'y': pose[1], 'z': 0.0, 'yaw': pose[2]}
@@ -61,7 +67,9 @@ def make(context):
     yaml.safe_dump(params, out, allow_unicode=True)
     out.close()
     tb4 = os.path.join(get_package_share_directory('turtlebot4_navigation'), 'launch', 'localization.launch.py')
-    return [LogInfo(msg=msg), IncludeLaunchDescription(
+    super_client = 'True' if arg('super_client').lower() in ('true', '1') else 'False'
+    return [SetEnvironmentVariable('ROS_SUPER_CLIENT', super_client),  # include보다 먼저 → AMCL·map_server에 적용
+            LogInfo(msg=f'{msg} / ROS_SUPER_CLIENT={super_client}'), IncludeLaunchDescription(
         PythonLaunchDescriptionSource(tb4),
         launch_arguments={'namespace': ns, 'map': arg('map'), 'params': out.name}.items())]
 
@@ -74,5 +82,7 @@ def generate_launch_description():
                               description='지도 yaml (기본: $ARTI_MAP)'),
         DeclareLaunchArgument('start_point', default_value='dock',
                               description='시작 위치로 쓸 init_pose.yaml의 위치 이름'),
+        DeclareLaunchArgument('super_client', default_value='false',
+                              description='이 launch가 띄우는 노드의 ROS_SUPER_CLIENT (true/false)'),
         OpaqueFunction(function=make),
     ])
