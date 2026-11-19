@@ -1,5 +1,10 @@
 async function refreshFleet() {
+  if (document.hidden) {
+    setTimeout(refreshFleet, 3000);
+    return;
+  }
   const body = document.getElementById("fleet-body");
+  let delay = 3000;
   try {
     const response = await fetch("/api/fleet", {cache: "no-store", signal: AbortSignal.timeout(5000)});
     if (!response.ok) throw Error();
@@ -12,7 +17,7 @@ async function refreshFleet() {
       }
     }
     const available = robots.filter(robot => robot.available).length;
-    const counts = {total: robots.length, moving: robots.filter(robot => robot.moving).length,
+    const counts = {total: robots.length,
       available, unavailable: robots.length - available};
     for (const [key, count] of Object.entries(counts)) {
       document.getElementById("fleet-" + key).textContent = count;
@@ -28,10 +33,11 @@ async function refreshFleet() {
     });
     body.replaceChildren(...rows);
   } catch {
+    delay = 6000;
     document.querySelectorAll(".stats b[id^=fleet-]").forEach(card => { card.textContent = "—"; });
     body.replaceChildren();
     body.insertRow().insertCell().textContent = "상태 조회 실패";
   }
-  setTimeout(refreshFleet, 1000);
+  setTimeout(refreshFleet, delay);
 }
 refreshFleet();

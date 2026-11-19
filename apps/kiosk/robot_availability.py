@@ -1,4 +1,4 @@
-"""로봇 배터리·도킹·이동 상태 구독과 브라우저용 1Hz 상태 스트림."""
+"""로봇 배터리·도킹 상태 구독과 브라우저용 1Hz 상태 스트림."""
 
 import atexit
 import json
@@ -98,7 +98,7 @@ class RobotAvailability:
             executor.add_node(node)
             with self._lock:
                 self._ros_ready = False
-            logger.info("로봇 상태 구독 시작: battery_state, dock_status, odom")
+            logger.info("로봇 상태 구독 시작: battery_state, dock_status")
             while not self._stop.is_set() and context.ok():
                 executor.spin_once(timeout_sec=0.2)
         except Exception:

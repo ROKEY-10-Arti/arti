@@ -4,7 +4,7 @@ export const courses = [];
 
 let catalogSignature = '';
 export async function loadCatalog({signal} = {}) {
-  const response = await fetch('/api/catalog', {cache: 'no-store', signal});
+  const response = await fetch('/api/catalog', {cache: 'no-cache', signal});
   if (!response.ok) throw new Error('작품 정보를 불러오지 못했습니다.');
   const data = await response.json();
   const signature = JSON.stringify(data);

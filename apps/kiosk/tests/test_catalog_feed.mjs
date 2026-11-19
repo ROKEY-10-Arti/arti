@@ -21,7 +21,7 @@ function environment() {
   let row = {artwork_index: 1, artwork_id: '001', title: 'artwork1', title_en: 'artwork1', artist_name: 'artist1', artist_name_en: 'artist1', location: 'location1', theme: 'theme1', description: 'description1'};
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/catalog'); assert.equal(options.cache, 'no-store');
+    assert.equal(url, '/api/catalog'); assert.equal(options.cache, 'no-cache');
     return {ok: true, json: async () => ({artworks: [row], courses: []})};
   };
   try {
@@ -44,7 +44,7 @@ function environment() {
   assert.equal(calls, 0);
   await env.run(3000); assert.deepEqual(updates, [true]);
   await env.run(3000); assert.equal(errors, 1);
-  await env.run(3000); assert.deepEqual(updates, [true, false]);
+  await env.run(6000); assert.deepEqual(updates, [true, false]);
   env.document.hidden = true; env.listeners.get('visibilitychange')();
   assert.equal(env.timers.size, 0);
   env.document.hidden = false; env.listeners.get('visibilitychange')(); await tick();
@@ -72,7 +72,7 @@ function environment() {
   });
   await env.run(3000); await env.run(5000);
   assert.equal(errors, 1);
-  assert.deepEqual([...env.timers.values()].map(timer => timer.delay), [3000]);
+  assert.deepEqual([...env.timers.values()].map(timer => timer.delay), [6000]);
   stop();
 }
 console.log('DB 자동 갱신 검증: 표 내용 반영, 선택 유지, 3초 재조회, 오류 복구, 요청 중복 방지와 정리');

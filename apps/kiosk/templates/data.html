@@ -16,10 +16,10 @@
     <h1>로봇 및 작품 관리</h1>
     <p>작품 DB(Art), 실시간 로봇 상태, 관람 로그 DB(Log)를 확인하고 작품 정보를 수정합니다.</p>
     <section><h2>실시간 로봇 상태</h2><table><thead><tr><th>로봇</th><th>배터리</th><th>도크</th><th>이용 가능</th></tr></thead><tbody id="fleet-body"></tbody></table></section><script defer src="/static/js/fleet.js?v=2"></script>
-    <div class="stats"><div><b>{{ catalog.artworks | length }}</b>개 작품</div><div><b id="fleet-total">—</b>대 전체</div><div><b id="fleet-moving">—</b>대 주행 중</div><div><b id="fleet-available">—</b>대 이용 가능</div><div><b id="fleet-unavailable">—</b>대 이용 불가</div></div>
+    <div class="stats"><div><b>{{ catalog.artworks | length }}</b>개 작품</div><div><b id="fleet-total">—</b>대 전체</div><div><b id="fleet-available">—</b>대 이용 가능</div><div><b id="fleet-unavailable">—</b>대 이용 불가</div></div>
     <details class="database-section" open>
       <summary id="artworks-heading">작품 DB · Art <small>표에서 수정 후 행별 저장</small></summary>
-      <p>저장한 작품 정보는 DB에 보관되고 키오스크 표에 약 3초 이내에 반영됩니다. 작품 ID는 고정입니다.</p>
+      <p>저장한 작품 정보는 DB에 보관됩니다. 키오스크 작품 화면은 연결이 정상일 때 약 3초마다 변경 사항을 확인합니다. 작품 ID는 고정입니다.</p>
       <div class="table-wrap"><table class="art-editor">
         <thead><tr><th scope="col">artwork_id</th><th scope="col">artwork_title</th><th scope="col">artist</th><th scope="col">location</th><th scope="col">theme</th><th scope="col">description</th><th scope="col">x (m)</th><th scope="col">y (m)</th><th scope="col">저장</th></tr></thead>
         <tbody>{% for art in catalog.artworks %}{% set form_id = 'art-row-' ~ art.artwork_index %}<tr data-art-index="{{ art.artwork_index }}">
@@ -70,7 +70,7 @@
     </details>
     <details class="database-section" open>
       <summary id="logs-heading">로그 DB · Log <small id="log-total">{{ total }}건</small></summary>
-      <p>로봇·중앙 서버가 HTTP로 보낸 로그를 저장합니다. 보낸 시간은 한국 시간(KST)으로 표시하고 1초마다 갱신합니다.</p>
+      <p>키오스크의 ROS 통신 로그와 HTTP로 수신한 로봇 로그를 저장합니다. 보낸 시간은 한국 시간(KST)으로 표시하고 로그 영역을 열어 둔 동안 약 5초마다 갱신합니다.</p>
       <form id="log-filters" method="get" action="/data" class="log-filters">
         <label class="search-field">검색어<input name="q" value="{{ logs.filters.q }}" maxlength="200" placeholder="로그 ID · 보낸 내용"></label>
         <label>로봇 ID<input name="robot_id" value="{{ logs.filters.robot_id }}" maxlength="64" placeholder="전체 로봇 / 예: tb1"></label>

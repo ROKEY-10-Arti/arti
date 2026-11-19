@@ -50,8 +50,9 @@ class Preparation:
 
 class RosPreparationTransport:
     """All ROS futures run on one executor. Workers only wait; they never spin its node."""
-    def __init__(self, description, discovery_timeout=8, action_timeout=270):
+    def __init__(self, description, record_event, discovery_timeout=8, action_timeout=270):
         self.description = description
+        self.record_event = record_event
         self.discovery_timeout = discovery_timeout
         self.action_timeout = action_timeout
         self.started = threading.Event()
@@ -85,6 +86,10 @@ class RosPreparationTransport:
                 description = self.description(request.artwork_id)
                 response.success = description is not None
                 response.description = description or ''
+                self.record_event(
+                    'kiosk', f'/arti/description request artwork_id={request.artwork_id}; '
+                    f'response success={response.success} description_chars={len(response.description)}',
+                )
                 return response
 
             self.service = node.create_service(Description, '/arti/description', describe)
@@ -116,6 +121,9 @@ class RosPreparationTransport:
         self._ensure()
         action_type = self.types[kind]
         name = job.robot_namespace + '/arti/' + kind
+        def log(message):
+            self.record_event(job.robot_id, f'{name} {message}')
+
         with self.clients_lock:
             client = self.clients.get(name)
             if client is None:
@@ -124,6 +132,7 @@ class RosPreparationTransport:
         deadline = time.monotonic() + self.discovery_timeout
         while not client.wait_for_server(timeout_sec=0.2):
             if job.cancel.is_set() or time.monotonic() >= deadline:
+                log('goal not sent: cancelled or server unavailable')
                 raise PreparationError('로봇 액션 서버에 연결하지 못했어요.')
         goal = action_type.Goal()
         if kind == 'prepare_tour':
@@ -140,6 +149,16 @@ class RosPreparationTransport:
         holder = {}
         terminal = threading.Event()
         cancel_lock = threading.Lock()
+        last_feedback = None
+
+        def on_feedback(frame):
+            nonlocal last_feedback
+            message = frame.feedback
+            current = (message.state, getattr(message, 'artwork_id', None))
+            if current != last_feedback and not job.cancel.is_set():
+                last_feedback = current
+                log(f'feedback state={current[0]} artwork_id={current[1]}')
+            feedback(message)
 
         def request_cancel(handle):
             with cancel_lock:
@@ -147,10 +166,12 @@ class RosPreparationTransport:
                     return
                 handle.cancel_goal_async()
                 holder['cancel_sent'] = True
+                log('cancel requested')
 
         def result_done(future):
             try:
-                holder['result'] = future.result()
+                result = holder['result'] = future.result()
+                log(f'result status={result.status} success={result.result.success} message={result.result.message}')
             except Exception as error:
                 holder['error'] = error
             else:
@@ -163,6 +184,7 @@ class RosPreparationTransport:
             try:
                 handle = future.result()
                 holder['handle'] = handle
+                log(f'goal accepted={handle.accepted}')
                 if not handle.accepted:
                     with job.lock:
                         job.motion_pending = False
@@ -177,7 +199,9 @@ class RosPreparationTransport:
                 terminal.set()
 
         try:
-            future = client.send_goal_async(goal, feedback_callback=lambda msg: feedback(msg.feedback))
+            payload = 'start=true' if kind == 'prepare_tour' else f'artwork_ids={list(goal.artwork_ids)}'
+            log(f'sending goal {payload}')
+            future = client.send_goal_async(goal, feedback_callback=on_feedback)
         except Exception:
             with job.lock:
                 job.motion_pending = False  # No goal was submitted.
@@ -191,6 +215,7 @@ class RosPreparationTransport:
             if deadline is not None and time.monotonic() >= deadline:
                 job.cancel.set()  # A late goal response also receives cancellation.
                 request_cancel(handle)
+                log('result timeout')
                 raise PreparationError('로봇 작업 시간이 초과됐어요. 취소 후 정지 확인이 필요해요.')
         if 'error' in holder:
             raise PreparationError('로봇 액션 연결이 끊겼어요. 정지 상태를 확인해 주세요.')
@@ -369,8 +394,8 @@ class PreparationManager:
         self.transport.stop()
 
 
-def register_robot_preparation(app, get_session, serialize_session, persist, finish, record_artwork, description):
-    transport = app.config.get('PREPARATION_TRANSPORT') or RosPreparationTransport(description)
+def register_robot_preparation(app, get_session, serialize_session, persist, finish, record_artwork, description, record_event):
+    transport = app.config.get('PREPARATION_TRANSPORT') or RosPreparationTransport(description, record_event)
     manager = PreparationManager(transport, persist, finish, record_artwork)
     app.extensions['robot_preparation'] = manager
     if not app.testing or app.config.get('PREPARATION_TRANSPORT'):

@@ -93,7 +93,7 @@ async function loadLogs(requestedOffset = 0) {
 }
 function scheduleLogs() {
   clearTimeout(logTimer);
-  if (!stopped) logTimer = setTimeout(() => {if (!document.hidden && filters.closest('details').open) void loadLogs(offset); else scheduleLogs();}, 1000);
+  if (!stopped) logTimer = setTimeout(() => {if (!document.hidden && filters.closest('details').open) void loadLogs(offset); else scheduleLogs();}, 5000);
 }
 filters.addEventListener('submit', event => {event.preventDefault(); applyLogFilters(); void loadLogs(0);});
 document.querySelector('#reset-log-filters').addEventListener('click', () => {

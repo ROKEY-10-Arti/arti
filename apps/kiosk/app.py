@@ -132,7 +132,7 @@ def create_app(test_config=None):
 
     @app.after_request
     def response_headers(response):
-        if request.path.startswith("/api/") or request.path == "/data":
+        if (request.path.startswith("/api/") and request.endpoint != "catalog_endpoint") or request.path == "/data":
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
@@ -192,8 +192,16 @@ def create_app(test_config=None):
                     db.execute("UPDATE TourSession SET visited_ids=? WHERE record_id=?",
                                (json.dumps([*visited, artwork]), job.session["id"]))
 
+    def record_ros_event(robot_id, message):
+        try:
+            with sqlite3.connect(app.config["DATABASE"], timeout=0.1) as db:
+                db.execute("INSERT INTO Log (robot_id,sent_at,message) VALUES (?,?,?)",
+                           (robot_id, now_ms(), message[:10000]))
+        except sqlite3.Error:
+            app.logger.exception("ROS 로그 저장 실패: %s %s", robot_id, message)
+
     register_robot_preparation(app, find_session, session_data, persist_assignment,
-                               finish_tour, record_artwork, lookup_description)
+                               finish_tour, record_artwork, lookup_description, record_ros_event)
     register_signal_simulator(app, get_db, session_data)
 
     @app.get("/")
@@ -214,7 +222,10 @@ def create_app(test_config=None):
 
     @app.get("/api/catalog")
     def catalog_endpoint():
-        return jsonify(catalog_data())
+        response = jsonify(catalog_data())
+        response.cache_control.no_cache = True
+        response.add_etag()
+        return response.make_conditional(request)
 
     @app.get("/api/sessions")
     def list_sessions():

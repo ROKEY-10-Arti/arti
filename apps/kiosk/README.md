@@ -32,7 +32,7 @@ apps/kiosk/
 | 코스 선택·작품 카탈로그·지도 | [course-selection.js](static/js/course-selection.js), [catalog-feed.js](static/js/catalog-feed.js), [gallery-map.js](static/js/gallery-map.js) |
 | 관람 세션 API와 목록 조회 | [app.py](app.py), [session_query.py](session_query.py) |
 | ROS 액션 클라이언트, 설명 서비스, 준비 상태 스트림 | [robot_preparation.py](robot_preparation.py) |
-| 배터리·도킹·이동 상태 수집과 가용 상태 계산 | [fleet.py](fleet.py), [robot_availability.py](robot_availability.py), [config/fleet.json](config/fleet.json) |
+| 배터리·도킹 상태 수집과 가용 상태 계산 | [fleet.py](fleet.py), [robot_availability.py](robot_availability.py), [config/fleet.json](config/fleet.json) |
 | 운영 데이터 초기화와 스키마 이전 | [database.py](database.py), [schema.sql](schema.sql), [data/catalog.json](data/catalog.json) |
 | 관리자 인증·데이터 조회 및 수정 | [admin_auth.py](admin_auth.py), [managed_data.py](managed_data.py), [templates/data.html](templates/data.html) |
 | 로봇 로그 수신 및 조회 | [robot_logs.py](robot_logs.py), [log_query.py](log_query.py) |
@@ -71,7 +71,7 @@ bash scripts/run-dev.sh
 | `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 준비 액션이 성공한 뒤 관람 시작 버튼을 활성화합니다. |
 | `/<robot>/arti/start_tour` (`StartTour`) | 키오스크 → 로봇 | 자유관람 `/robot1`에는 `artwork_ids: []`, 코스관람 `/robot4`에는 정수 작품 ID 목록을 보냅니다. |
 | `/arti/description` (`Description`) | 로봇 → 키오스크 | 정수 작품 ID로 SQLite의 `Art` 테이블에서 설명을 조회합니다. |
-| `/<robot>/battery_state`, `/<robot>/dock_status`, `/<robot>/odom` | 로봇 → 키오스크 | 두 로봇의 배터리, 도킹, 이동 상태를 구독합니다. |
+| `/<robot>/battery_state`, `/<robot>/dock_status` | 로봇 → 키오스크 | 두 로봇의 배터리와 도킹 상태를 구독합니다. |
 
 키오스크는 `ARTWORK_COMPLETED` 피드백의 작품 ID를 방문 기록에 저장합니다. 관람 종료는 액션 결과로 확인하고, 진행 중인 작업 취소는 ROS 2 Action Cancel을 사용합니다. 세션 ID와 관람객 ID는 키오스크 내부에서 관리하며, 작품 위치와 구역은 로봇 PC의 로컬 YAML에서 관리합니다.
 
@@ -90,10 +90,10 @@ UI만 확인하려면 `python3 scripts/run-simulator.py`를 실행하세요.
 | --- | --- |
 | 작품 설명 및 메타데이터 | SQLite `Art`, 관리자 화면 `/data` |
 | 관람 시작·종료 시각, 상태, 방문 작품 | SQLite `TourSession`, 세션 API `/api/sessions` |
-| HTTP로 수신한 로봇 로그 | SQLite `Log`, 관리자 화면 `/data`, 로그 API `/api/logs` |
-| 실시간 배터리·도킹·이동 | 관리자 화면 `/data`의 실시간 로봇 상태 |
+| 키오스크 ROS 통신 로그와 HTTP로 수신한 로봇 로그 | SQLite `Log`, 관리자 화면 `/data`, 로그 API `/api/logs` |
+| 실시간 배터리·도킹 | 관리자 화면 `/data`의 실시간 로봇 상태 |
 
-운영 DB는 `instance/arti.sqlite3`, 시뮬레이터 DB는 `instance/simulator/arti.sqlite3`입니다. ROS Goal 전송·수락·피드백과 설명 서비스 요청·응답의 개별 이력은 현재 `Log`에 자동 저장되지 않습니다.
+운영 DB는 `instance/arti.sqlite3`, 시뮬레이터 DB는 `instance/simulator/arti.sqlite3`입니다. 키오스크는 액션 Goal 전송·수락·피드백 변경·취소 요청·결과를 `Log`에 저장합니다. 작품 설명 서비스는 요청 ID, 응답 성공 여부와 설명 길이를 한 건으로 저장합니다.
 
 ```bash
 sqlite3 -readonly -header -column instance/arti.sqlite3
