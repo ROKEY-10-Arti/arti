@@ -43,7 +43,6 @@ ros2 action send_goal /robot1/dock irobot_create_msgs/action/Dock "{}"
 ros2 run arti_follow visitor_follower --ros-args -r __ns:=/robot1
 # 처음엔 느리게: 뒤에 -p max_linear:=0.15 -p max_angular:=0.8
 # 로봇 안 움직이게 로그만: 뒤에 -r cmd_vel:=cmd_vel_dryrun
-# 바닥 물체 회피 끄기: 뒤에 -p use_depth:=false
 
 # 인식 모듈 없이 시험: map 위 한 점에 관람객이 서 있다고 보냄 → 로봇이 그 점 0.8 m 앞까지 가서 멈춤
 #   x, y는 rviz "Publish Point"로 찍거나 ros2 topic echo /robot1/clicked_point 로 확인한 map 좌표
@@ -51,7 +50,24 @@ ros2 topic pub -r 5 /robot1/target_person/point_map geometry_msgs/msg/PointStamp
 
 # 확인
 ros2 topic echo /robot1/follow/state
-ros2 topic pub --once /robot1/follow/enable std_msgs/msg/Bool "{data: false}"   # 주행 멈춤 (true로 재개)
+
+
+# ===== 3-2. 키오스크 대신 액션·서비스 보내기 (PC3 → PC1, 로봇이 움직임) =====
+# 통합 실행: ros2 launch arti_follow tour.launch.py   (localization이 떠 있어야 함)
+# 순서: ① prepare_tour 성공(registered) → ② 130 s 안에 start_tour. 끝내기 = send_goal 터미널에서 Ctrl+C (취소)
+
+# 0) 도크 위인지 먼저 확인 (is_docked: true 여야 함, 아니면 undock_failed / not_docked)
+ros2 topic echo /robot1/dock_status --once
+
+# ① 호출·등록 (undock → 위치 잡기 → 키오스크 쪽 회전 → 관람객 등록)
+ros2 action send_goal --feedback /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}"
+
+# ② 자유관람 시작 (artwork_ids는 빈 리스트)
+ros2 action send_goal --feedback /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}"
+
+# 작품 설명 조회 서비스 (PC3 서버 /arti/description, 네임스페이스 없음, 작품 번호 int)
+ros2 service list | grep arti/description
+ros2 service call /arti/description arti_interfaces/srv/Description "{artwork_id: 1}"
 
 # ===== 4. 토픽이 안 보일 때 =====
 
