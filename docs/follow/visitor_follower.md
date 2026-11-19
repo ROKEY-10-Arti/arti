@@ -30,18 +30,18 @@
 ## 2. 키오스크가 보내는 액션 두 개 (팀 명세 `docs/common/ros2_interfaces.md`)
 
 ```
+키오스크 쪽 규칙 (그래서 로봇은 busy·not_prepared 검사를 하지 않는다)
+  - [호출]은 /robot1/dock_status가 is_docked=true일 때만 켠다 (관람 중이면 로봇이 도크 밖)
+  - [관람 시작]은 prepare_tour 성공 뒤 한 번만, 120 s 안에만 켠다 (넘으면 처음 화면으로)
+
 ① prepare_tour {start: true}   호출·등록
-  ├ 이미 준비·관람 중 → 바로 끝냄: success=false, message=busy
   ├ start = false     → 바로 끝냄: success=false, message=not_requested
   └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
                          등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
                          실패: not_docked (도크 밖) / undock_failed / no_undock_server / no_localization / canceled
 
-② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만)
-  ├ artwork_ids에 작품이 있음 → success=false, message=unsupported_mode (코스관람 = robot4 몫)
-  ├ 이미 관람 중              → success=false, message=busy
-  ├ 등록이 안 끝남            → success=false, message=not_prepared
-  └ 그 밖                     → 바로 추종 시작. 관람 끝까지 feedback, 끝나면 result
+② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만 옴)
+  └ 바로 추종 시작. 관람 끝까지 feedback, 끝나면 result (artwork_ids는 보지 않음)
 ```
 
 ## 3. 관람 흐름 (상태)
@@ -63,7 +63,7 @@ WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버�
   │             확인 중에는 따라가지 않고 바라보기만. 끊기면 처음부터 다시
   ▼ on_registered(): registered=true, guide_message "recognized" ("인식되었습니다")
 REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 기다림 (돌지도 따라가지도 않음) ┘ prepare_tour
-  │             120 s(ready_timeout) 안에 start_tour가 안 오면 → 관람 끝 (not_started)
+  │             130 s(ready_timeout, 키오스크 120 s보다 길게) 안에 start_tour가 안 오면 → 관람 끝 (not_started)
   │ start_tour                                         ┐
   ▼                                                    │ start_tour
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
@@ -104,7 +104,7 @@ executor.spin()  ← 여기서부터 계속 호출됨 (관람 전에도)
    LOCALIZE     → localize()                 아니오 → 좌표 버림
    START_FACE   → face_start()               예     → kf.x 갱신, seen 시각 기록
    WAIT_VISITOR → wait_visitor()  (등록되면 REGISTERED)
-   REGISTERED   → registered_wait() (정지, 120 s 지나면 끝)
+   REGISTERED   → registered_wait() (정지, 130 s 지나면 끝)
    FOLLOW·SEARCH·WAIT → 추종/탐색/대기
 ```
 
@@ -156,8 +156,8 @@ run_tour                                                                  └ 0.
 | 위 상태에서 작품 설명 중 (`artwork_zone/explaining`) | EXPLAINING | 설명 중인 작품 번호 |
 | 작품을 끝까지 설명함 (`artwork_zone/explained`) | ARTWORK_COMPLETED (작품마다 한 번) | 그 작품 |
 
-- result: `success`(취소로 끝나면 true), `message`(끝난 이유: canceled / lost / busy / not_prepared / unsupported_mode)
-- 등록 뒤 start_tour가 120 s 안에 안 오면 관람 끝(`not_started`, arti/tour_end). 이때는 진행 중인 액션이 없어 result가 없다.
+- result: `success`(취소로 끝나면 true), `message`(끝난 이유: canceled / lost)
+- 등록 뒤 start_tour가 130 s 안에 안 오면 관람 끝(`not_started`, arti/tour_end). 이때는 진행 중인 액션이 없어 result가 없다.
 
 ## 6. 주고받는 토픽·액션 (`/robot1` 아래)
 
@@ -190,7 +190,7 @@ ros2 launch arti_follow tour.launch.py
 ros2 action send_goal --feedback /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}"
 ```
 
-관람 시작 (등록 뒤 120 s 안에). Ctrl+C = 취소
+관람 시작 (등록 뒤 130 s 안에). Ctrl+C = 취소
 ```bash
 ros2 action send_goal --feedback /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}"
 ```
@@ -213,7 +213,7 @@ ros2 topic echo /robot1/follow/state
 | `undock` | true | 시작 때 undock |
 | `use_depth` | true | 바닥 물체 회피 (빈 바닥에서 점이 잡히면 `floor_min_height` 올리기) |
 | `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
-| `ready_timeout` | 120 | 등록 뒤 start_tour를 기다리는 시간 [s] |
+| `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
 
 ## 한계
 

@@ -28,8 +28,8 @@
 | 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 바닥 물체 (base_link 높이 5~30 cm, 1.2 m 안) |
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
-| 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / busy·undock_failed·no_localization·canceled …) |
-| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`, prepare_tour 성공 뒤에만. 아니면 `not_prepared`·`busy`·`unsupported_mode`). 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
+| 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / not_docked·undock_failed·no_localization·canceled …). 관람 중 호출은 키오스크가 막음(dock_status) |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`). 키오스크가 prepare_tour 성공 뒤 한 번만 보내므로 검사하지 않음. 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
 | 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | `artwork_zone`이 알려 주는 설명 중 작품(latched) → feedback EXPLAINING / 끝까지 설명한 작품 → feedback ARTWORK_COMPLETED 한 번 |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
@@ -45,7 +45,7 @@
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
 | WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): "인식되었습니다" 안내 → REGISTERED. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
-| REGISTERED | 등록 완료 | prepare_tour 성공. 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠). `ready_timeout`(120 s) 안에 `start_tour`가 안 오면 관람 끝(`not_started`) |
+| REGISTERED | 등록 완료 | prepare_tour 성공. 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠). `ready_timeout`(130 s, 키오스크 120 s보다 길게) 안에 `start_tour`가 안 오면 관람 끝(`not_started`) |
 | FOLLOW | start_tour 받음 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |

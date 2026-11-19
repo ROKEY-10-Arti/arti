@@ -20,36 +20,17 @@ TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')     # 관람 중 = 관람객을 따라�
 class TourMixin:
     """VisitorFollower가 상속해서 쓰는 관람 단계 함수."""
 
-    def goal_problem(self, goal):
-        """start_tour를 시작할 수 없으면 이유 (검사만). lock 안에서 부른다.
-        받음: goal (goal.request.artwork_ids), (active, state)
-        돌려줌: '' (문제 없음) / 'unsupported_mode' (artwork_ids가 있음 = 코스관람, robot4 몫)
-                / 'busy' (이미 관람 중) / 'not_prepared' (prepare_tour로 등록이 안 끝남)"""
-        if goal is not None and len(goal.request.artwork_ids) > 0:
-            return 'unsupported_mode'
-        if self.state in TRACKING:
-            return 'busy'
-        if not self.active or self.state != 'REGISTERED':
-            return 'not_prepared'
-        return ''
-
     def run_tour(self, goal):
         """[액션 실행, 관람 내내] start_tour goal 하나: prepare_tour로 등록된 관람객을 끝까지 따라간다 (goal None = auto_start).
-        검사(goal_problem: REGISTERED여야 함) → FOLLOW → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
+        FOLLOW → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
+        검사는 하지 않는다: 키오스크가 [관람 시작]을 prepare_tour 성공 뒤 한 번만, 120 s 안에만 켠다
+        (로봇 ready_timeout 130 s가 키오스크 120 s보다 길어서 로봇이 먼저 끝나는 일 없음). artwork_ids는 보지 않음 (자유관람).
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
-        받음: goal (artwork_ids, is_cancel_requested)
+        받음: goal (is_cancel_requested)
         돌려줌: StartTour.Result(success = 취소로 끝남, message = 끝난 이유)"""
         with self.lock:
-            problem = self.goal_problem(goal)
-            if not problem:
-                self.get_logger().info('관람 시작 → 추종')
-                self.set_state('FOLLOW')            # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
-        if problem:
-            ids = list(goal.request.artwork_ids) if goal is not None else []
-            self.get_logger().warn(f'관람 시작 거절 ({problem}, artwork_ids {ids}) — 자유관람만, prepare_tour 등록 뒤에만')
-            if goal is not None:
-                goal.abort()
-            return StartTour.Result(success=False, message=problem)
+            self.get_logger().info('관람 시작 → 추종')
+            self.set_state('FOLLOW')                # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
         while self.active:
             if goal is not None and goal.is_cancel_requested:
                 with self.lock:

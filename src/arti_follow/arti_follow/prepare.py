@@ -23,16 +23,6 @@ DOCK_STATUS_WAIT = 3.0     # 호출 때 dock_status를 이만큼 기다림 (노�
 class PrepareMixin:
     """VisitorFollower가 상속해서 쓰는 호출·등록 단계 함수."""
 
-    def prepare_problem(self, goal):
-        """prepare_tour를 시작할 수 없으면 이유 (검사만). lock 안에서 부른다.
-        받음: goal (goal.request.start), (active)
-        돌려줌: '' (문제 없음) / 'busy' (이미 준비·관람 중) / 'not_requested' (start = false)"""
-        if self.active:
-            return 'busy'
-        if goal is not None and not goal.request.start:
-            return 'not_requested'
-        return ''
-
     def begin_tour(self):
         """관람 시작 준비: 지난 관람객 데이터(위치, 등록, 본 작품)를 지우고 active = True, 첫 상태로.
         바뀜: kf.x, seen, holding, 단계 타이머, explaining, visited, seen_since, active, end_reason
@@ -48,19 +38,18 @@ class PrepareMixin:
 
     def run_prepare(self, goal):
         """[액션 실행] prepare_tour goal 하나: 호출 → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록까지 (goal None = auto_start).
-        검사(prepare_problem) → begin_tour → undock → 0.2 s마다 feedback (취소 확인) → REGISTERED가 되면 성공.
+        begin_tour → undock → 0.2 s마다 feedback (취소 확인) → REGISTERED가 되면 성공.
+        관람 중 호출은 검사하지 않는다: 관람 중이면 로봇이 도크 밖 → 키오스크가 [호출]을 끈다 (dock_status).
+        start = false면 아무것도 안 하고 끝냄 (not_requested).
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
         받음: goal (start, is_cancel_requested)
         돌려줌: PrepareTour.Result(success = 등록 완료, message = registered 또는 실패 이유)"""
+        if goal is not None and not goal.request.start:
+            self.get_logger().warn('호출 거절 (start = false)')
+            goal.abort()
+            return PrepareTour.Result(success=False, message='not_requested')
         with self.lock:
-            problem = self.prepare_problem(goal)
-            if not problem:
-                self.begin_tour()
-        if problem:
-            self.get_logger().warn(f'호출 거절 ({problem}) — 한 번에 한 관람')
-            if goal is not None:
-                goal.abort()
-            return PrepareTour.Result(success=False, message=problem)
+            self.begin_tour()
         if self.state == 'UNDOCK':
             self.send_prepare_feedback(goal)
             why = self.undock(goal)

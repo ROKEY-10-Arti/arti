@@ -92,7 +92,8 @@ LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받�
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
     'auto_start': False,            # true면 액션 없이 켜자마자 prepare + start (테스트용)
-    'ready_timeout': 120.0,         # 등록 완료(REGISTERED) 뒤 start_tour를 이만큼 기다림. 넘으면 관람 끝 (not_started) [s]
+    'ready_timeout': 130.0,         # 등록 완료(REGISTERED) 뒤 start_tour를 이만큼 기다림. 넘으면 관람 끝 (not_started) [s]
+                                    #   키오스크는 120 s 뒤 처음 화면으로 → 로봇이 더 길어야 [관람 시작]이 끝난 관람에 오지 않음
     'undock': True,                 # 관람 시작 때 도크에 붙어 있으면 undock
     'undock_timeout': 60.0,         # undock 액션을 이만큼 기다림 [s]
     'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
