@@ -1,8 +1,10 @@
 """추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + ros2 bag 녹화.
 
     ros2 launch arti_follow follow_test.launch.py
-    → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
+    → <ns>/arti/prepare_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림 (등록),
+      그다음 <ns>/arti/start_tour 액션을 보내면 따라간다.
       인식 창에서 따라갈 사람을 마우스로 클릭하면 "인식되었습니다" 안내 후 따라간다
+      ros2 action send_goal /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}" --feedback
       ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}" --feedback
 
 옵션
@@ -131,7 +133,7 @@ def generate_launch_description():
         DeclareLaunchArgument('tracker', default_value='all', choices=list(TRACKER_MODES),
                               description='all: 카메라+인식 노드, camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
-                              description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
+                              description='true면 액션 없이 켜자마자 prepare → start (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
                               description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),

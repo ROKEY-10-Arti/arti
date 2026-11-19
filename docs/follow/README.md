@@ -29,8 +29,9 @@
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
-| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (goal `artwork_ids: []`만. 작품이 들어 있거나 관람 중이면 바로 `success=false`, `message` unsupported_mode·busy). 취소하면 관람 끝. feedback `state`(MOVING·FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`(art_02 → 2, 없으면 0). result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
-| 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | String | `artwork_zone`이 알려 주는 설명 중 작품(latched) → feedback EXPLAINING / 끝까지 설명한 작품 → feedback ARTWORK_COMPLETED 한 번 |
+| 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / busy·undock_failed·no_localization·canceled …) |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`, prepare_tour 성공 뒤에만. 아니면 `not_prepared`·`busy`·`unsupported_mode`). 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
+| 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | `artwork_zone`이 알려 주는 설명 중 작품(latched) → feedback EXPLAINING / 끝까지 설명한 작품 → feedback ARTWORK_COMPLETED 한 번 |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
 | 출력 | `guide_message` | String | 관람객 인식 때 `recognized` → arti_audio가 "인식되었습니다…" |
@@ -40,12 +41,13 @@
 
 | 상태 | 언제 | 동작 (플로우차트) |
 |---|---|---|
-| READY | 처음 | `arti/start_tour` 액션 기다림. `cmd_vel`을 보내지 않음 |
+| READY | 처음 | `arti/prepare_tour` 액션 기다림. `cmd_vel`을 보내지 않음 |
 | UNDOCK | 액션 받음 | 도크에 붙어 있으면 undock (도크 밖이면 건너뜀) |
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
-| WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): "인식되었습니다" 안내 → FOLLOW (키오스크 등록 보고는 `prepare_tour`로 옮길 예정). 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
-| FOLLOW | 좌표가 들어옴 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
+| WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): "인식되었습니다" 안내 → REGISTERED. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
+| REGISTERED | 등록 완료 | prepare_tour 성공. 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠). `ready_timeout`(120 s) 안에 `start_tour`가 안 오면 관람 끝(`not_started`) |
+| FOLLOW | start_tour 받음 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |
 | LOST | 대기도 지남 | 정지, 액션 끝(`reason: lost`) — 재등록은 인식 모듈·상태 노드, 다시 시작은 액션을 새로 |
@@ -53,6 +55,7 @@
 SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW. 액션을 취소하면 언제든 정지 → READY.
 
 ```bash
+ros2 action send_goal /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}" --feedback   # 호출·등록 (success: true = 등록 완료)
 ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}" --feedback   # 관람 시작 (Ctrl+C = 취소)
 ```
 
@@ -66,7 +69,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 - 파라미터는 노드 맨 위 `PARAMS`에 설명과 함께 있다. 바꿀 때는 `-p 이름:=값`
 - **테스트 실행 (한 번에)**: `ros2 launch arti_follow follow_test.launch.py`
   → 웹캠 인식(person_tracker, 카메라 + `multi_tracker_node`, 카메라는 `phone_camera.yaml`의 노트북 웹캠 0) + `visitor_follower`(실제 주행). 화면은 인식 창 하나(사람 박스 + 거리 m).
-  `arti/start_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 시작), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
+  `arti/prepare_tour` 액션을 보낸 뒤 인식 창에서 따라갈 사람을 클릭(등록), 그다음 `arti/start_tour`. AMCL은 미리 떠 있어야 한다. 옵션: `auto_start:=true`(액션 없이 바로 prepare → start), `drive:=false`, `test:=false`(bag 안 함), `bag_dir:=`, `tracker:=camera|none`
 - 테스트 저장(`test:=true`, 기본): **ros2 bag 하나만** `~/arti_bags/follow/<날짜_시각>/`에 mcap으로 녹화. 로그·CSV 파일은 따로 만들지 않는다.
   토픽은 launch의 `BAG_TOPICS`(scan, tf, odom, amcl_pose, target_person/*, cmd_vel, follow/*, guide_message 등) + `/rosout`(노드 로그 메시지).
   **카메라 영상·depth는 넣지 않는다**(개인정보, 팀 합의 전).
@@ -116,7 +119,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 
 | 이름 | 종류 | 방향 | 상대 | 상태 |
 |---|---|---|---|---|
-| `/robot1/arti/prepare_tour` | action (`PrepareTour`) | 받음 | PC3 키오스크 | 구현 예정 (호출·undock·만남 장소·관람객 등록. 지금은 `start_tour` 안에 있음) |
+| `/robot1/arti/prepare_tour` | action (`PrepareTour`) | 받음 | PC3 키오스크 | `visitor_follower` (호출·undock·만남 장소·관람객 등록) |
 | `/robot1/arti/start_tour` | action (`StartTour`) | 받음 | PC3 키오스크 | `visitor_follower` |
 | `/arti/description` | srv (`Description`) | 부름 | PC3 (작품 DB) | arti_audio `guide_audio_node` |
 | `/robot1/battery_state`, `dock_status`, `odom` | topic | PC3가 구독 | PC3 | 로봇 기본 토픽 |

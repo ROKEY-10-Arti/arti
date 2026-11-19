@@ -16,12 +16,13 @@
 #   키오스크 x -0.84~-1.38, y 0.29~-0.301
 
 # 작품: 관람객이 구역 안에서 멈추면 (artwork_zone 노드의 dwell_time·dwell_radius)
-#       explain_artwork 액션으로 설명 재생. artwork_id 끝 숫자(art_01 → 1)가 PC3 작품 DB 번호(/arti/description).
+#       explain_artwork 액션으로 설명 재생. artwork_id = 작품 번호(int) — ROS 통신의 작품 ID는 int32로 통일
+#       (StartTour, Description, ExplainArtwork, artwork_zone/explaining·explained). PC3 작품 DB 번호와 같다.
 artworks:
-  - {artwork_id: art_01, name: 그림1, x: -2.72, y: 1.23, facing_deg: 0,   radius: 0.7}   # 왼쪽 벽
-  - {artwork_id: art_02, name: 그림2, x: -2.72, y: 3.25, facing_deg: 0,   radius: 0.7}   # 왼쪽 벽
-  - {artwork_id: art_03, name: 그림3, x: -1.27, y: 5.25, facing_deg: -90, radius: 0.7}   # 위쪽 벽
-  - {artwork_id: art_04, name: 그림4, x: 0.12,  y: 3.73, facing_deg: 180, radius: 0.7}   # 오른쪽 벽
+  - {artwork_id: 1, name: 그림1, x: -2.72, y: 1.23, facing_deg: 0,   radius: 0.7}   # 왼쪽 벽
+  - {artwork_id: 2, name: 그림2, x: -2.72, y: 3.25, facing_deg: 0,   radius: 0.7}   # 왼쪽 벽
+  - {artwork_id: 3, name: 그림3, x: -1.27, y: 5.25, facing_deg: -90, radius: 0.7}   # 위쪽 벽
+  - {artwork_id: 4, name: 그림4, x: 0.12,  y: 3.73, facing_deg: 180, radius: 0.7}   # 오른쪽 벽
 
 # 안내 구역: 관람객이 들어가면 (멈추지 않아도) guide_message로 안내 음성.
 #            guide는 arti_audio guide_lines.yaml의 guides 키.

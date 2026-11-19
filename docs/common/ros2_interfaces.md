@@ -67,6 +67,7 @@ Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한
 ### 3.3 Description.srv
 작품 ID는 ROS 통신에서 `int32`로 통일, PC3에서 필요 시 DB 문자열 ID로 변환.
 
+
 ## 4. 작품 위치 및 구역 정보
 
 | 데이터 | 위치 | 용도 |
@@ -88,8 +89,9 @@ Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한
 | `/robot{1,4}/odom` | nav_msgs/Odometry | 이동 상태 |
 
 ## 6. 통합 구현 체크리스트
-- [ ] PC1·PC2: PrepareTour Action Server 구현 (언독·이동·관람객 등록까지)
-- [ ] StartTour에서 준비 단계 중복 실행 제거
+- [x] PC1: PrepareTour Action Server 구현 (언독·이동·관람객 등록까지, visitor_follower, 2026-11-18)
+- [ ] PC2: PrepareTour Action Server 구현
+- [x] PC1: StartTour에서 준비 단계 중복 실행 제거 (prepare_tour 성공 뒤에만 받음)
 - [ ] PC3: 각 로봇 Action Client 연결
 - [ ] PC3: `/arti/description` Service Server 구현
 - [x] PC1: Description Service Client 구현 (arti_audio `guide_audio_node`, 2026-11-18)

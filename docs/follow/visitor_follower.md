@@ -10,27 +10,35 @@
 노드 시작
   ├ init_pose.yaml   → 출발 지점 (x, y, yaw)        (robots.<네임스페이스>.undock)
   ├ artworks.yaml    → 바라볼 곳 (kiosk 구역 중심), 작품 수 (feedback total)
-  ├ 구독·발행 준비, arti/start_tour 액션 서버 열기
+  ├ 구독·발행 준비, arti/prepare_tour·arti/start_tour 액션 서버 열기
   └ 상태 READY  → cmd_vel을 보내지 않고 액션을 기다림
 ```
 
-`auto_start:=true`면 액션 없이 1초 뒤 바로 관람을 시작한다 (테스트용).
+`auto_start:=true`면 액션 없이 1초 뒤 prepare → start를 차례로 한다 (테스트용).
 
-## 2. 키오스크가 `start_tour`를 보내면
+## 2. 키오스크가 보내는 액션 두 개 (팀 명세 `docs/common/ros2_interfaces.md`)
 
 ```
-goal {artwork_ids: []}
-  ├ 이미 관람 중              → 바로 끝냄: success=false, message=busy (진행 중 관람은 그대로)
-  ├ artwork_ids에 작품이 있음 → 바로 끝냄: success=false, message=unsupported_mode (코스관람 = robot4 몫)
-  └ 빈 배열                   → 자유관람 시작
+① prepare_tour {start: true}   호출·등록
+  ├ 이미 준비·관람 중 → 바로 끝냄: success=false, message=busy
+  ├ start = false     → 바로 끝냄: success=false, message=not_requested
+  └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
+                         등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
+                         실패: undock_failed / no_undock_server / no_localization / canceled
+
+② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만)
+  ├ artwork_ids에 작품이 있음 → success=false, message=unsupported_mode (코스관람 = robot4 몫)
+  ├ 이미 관람 중              → success=false, message=busy
+  ├ 등록이 안 끝남            → success=false, message=not_prepared
+  └ 그 밖                     → 바로 추종 시작. 관람 끝까지 feedback, 끝나면 result
 ```
 
 ## 3. 관람 흐름 (상태)
 
 ```
 READY
-  │ start_tour
-  ▼
+  │ prepare_tour                                       ┐
+  ▼                                                    │
 UNDOCK        도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임). 도크 밖이면 건너뜀
   │             실패 → 관람 끝 (undock_failed / no_undock_server)
   ▼
@@ -42,7 +50,11 @@ START_FACE    제자리 회전으로 키오스크 쪽을 봄 (15 s 안에 못 �
 WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버림
   │             좌표가 1 s 동안 끊김 없이(간격 0.5 s 이하) 들어오면 → 등록 완료
   │             확인 중에는 따라가지 않고 바라보기만. 끊기면 처음부터 다시
-  ▼ on_registered(): registered=true(내부), guide_message "recognized" ("인식되었습니다")
+  ▼ on_registered(): registered=true, guide_message "recognized" ("인식되었습니다")
+REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 기다림 (돌지도 따라가지도 않음) ┘ prepare_tour
+  │             120 s(ready_timeout) 안에 start_tour가 안 오면 → 관람 끝 (not_started)
+  │ start_tour                                         ┐
+  ▼                                                    │ start_tour
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
   │ 좌표가 3 s(lost_timeout) 안 옴
   ▼
@@ -58,8 +70,8 @@ SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 
 ### 3-1. step·on_person은 누가 시작시키나
 
-`run_tour`가 부르지 않는다. 노드가 켜질 때 `__init__`에서 등록되어 **처음부터 계속 돈다.**
-`run_tour`는 `self.state`만 바꾸고, 둘은 그 상태를 보고 할 일을 정한다.
+액션(`run_prepare`, `run_tour`)이 부르지 않는다. 노드가 켜질 때 `__init__`에서 등록되어 **처음부터 계속 돈다.**
+액션은 `self.state`만 바꾸고, 둘은 그 상태를 보고 할 일을 정한다.
 
 ```
 __init__ (노드 켤 때 등록)
@@ -69,27 +81,29 @@ __init__ (노드 켤 때 등록)
         ▼
 executor.spin()  ← 여기서부터 계속 호출됨 (관람 전에도)
 
-            ┌───────────── self.state (게시판) ─────────────┐
-            │                                                │
- run_tour ──┤ begin_tour()        → UNDOCK                   │  상태를 "쓰는" 쪽
- (매니저)    │ undock 끝           → LOCALIZE                 │
-            └────────────────────────────────────────────────┘
+               ┌────────────── self.state (게시판) ──────────────┐
+ run_prepare ──┤ begin_tour()        → UNDOCK                    │  상태를 "쓰는" 쪽
+ (prepare_tour)│ undock 끝           → LOCALIZE                  │
+ run_tour ─────┤ start_tour 받음     → FOLLOW (REGISTERED일 때만) │
+ (start_tour)  └─────────────────────────────────────────────────┘
                      │ 읽음                       │ 읽음
                      ▼                            ▼
  step() (0.1 s마다)                     on_person() (좌표 올 때마다)
-   READY·UNDOCK → [1] 바로 return          state ∈ {WAIT_VISITOR, FOLLOW, SEARCH, WAIT}?
+   READY·UNDOCK → [1] 바로 return          state ∈ {WAIT_VISITOR, REGISTERED, FOLLOW, SEARCH, WAIT}?
    LOCALIZE     → localize()                 아니오 → 좌표 버림
    START_FACE   → face_start()               예     → kf.x 갱신, seen 시각 기록
-   WAIT_VISITOR → wait_visitor()
+   WAIT_VISITOR → wait_visitor()  (등록되면 REGISTERED)
+   REGISTERED   → registered_wait() (정지, 120 s 지나면 끝)
    FOLLOW·SEARCH·WAIT → 추종/탐색/대기
 ```
 
 ```
-시간 →     노드 켬 ── goal 도착 ── undock 끝 ── 키오스크 봄 ── 등록 ──▶
-state       READY     UNDOCK       LOCALIZE     WAIT_VISITOR    FOLLOW
-step        할 일 없음  할 일 없음    위치 잡기     등록 확인        따라가기
-on_person   버림       버림         버림          저장             저장
-run_tour              begin_tour → undock → ── 0.2 s마다 feedback ──▶
+시간 →      노드 켬 ─ prepare 도착 ─ undock 끝 ─ 키오스크 봄 ─ 등록 ─── start 도착 ──▶
+state        READY    UNDOCK        LOCALIZE    WAIT_VISITOR  REGISTERED   FOLLOW
+step         할 일 없음 할 일 없음     위치 잡기    등록 확인      서서 기다림    따라가기
+on_person    버림      버림          버림         저장           저장          저장
+run_prepare            begin_tour → undock → 0.2 s마다 feedback → success ┘
+run_tour                                                                  └ 0.2 s마다 feedback ──▶
 ```
 
 관람이 끝나면(취소·LOST·실패) 정지하고 `arti/tour_end`를 한 번 보낸다.
@@ -109,24 +123,36 @@ run_tour              begin_tour → undock → ── 0.2 s마다 feedback ─�
 
 `follow/enable`이 false면 계산은 하지만 `cmd_vel`을 보내지 않는다 (다른 노드에 주행을 넘길 때).
 
-## 5. 키오스크가 받는 것 (`start_tour` feedback, 0.2 s마다)
+## 5. 키오스크가 받는 것 (feedback 0.2 s마다)
 
-팀 명세(`docs/common/ros2_interfaces.md`)의 StartTour: feedback = `state` + `artwork_id`, result = `success` + `message`.
+`prepare_tour` (PrepareTour)
+
+| 내부 상태 | feedback `state` |
+|---|---|
+| UNDOCK | UNDOCKING |
+| LOCALIZE·START_FACE | MOVING |
+| WAIT_VISITOR (아무도 안 보임) | ARRIVED |
+| WAIT_VISITOR (1 s 확인 중) | REGISTERING |
+| REGISTERED | REGISTERED → result `success=true`, `message=registered` |
+
+**등록 성공 보고 = prepare_tour result `success=true`.**
+
+`start_tour` (StartTour): feedback = `state` + `artwork_id`, result = `success` + `message`
 
 | 내부 상태 | feedback `state` | `artwork_id` |
 |---|---|---|
-| READY·UNDOCK·LOCALIZE·START_FACE·WAIT_VISITOR | MOVING | 0 |
 | FOLLOW·SEARCH·WAIT·LOST | FOLLOW | 0 |
-| 위 상태에서 작품 설명 중 (`artwork_zone/explaining`) | EXPLAINING | 설명 중인 작품 (art_02 → 2) |
+| 위 상태에서 작품 설명 중 (`artwork_zone/explaining`) | EXPLAINING | 설명 중인 작품 번호 |
 | 작품을 끝까지 설명함 (`artwork_zone/explained`) | ARTWORK_COMPLETED (작품마다 한 번) | 그 작품 |
 
-- result: `success`(취소로 끝나면 true), `message`(끝난 이유: canceled / lost / undock_failed / no_undock_server / no_localization / busy / unsupported_mode)
-- 관람객 등록 보고는 `prepare_tour`(PrepareTour, feedback REGISTERED)로 옮길 예정. 지금은 등록 전후 구분 없이 WAIT_VISITOR = MOVING.
+- result: `success`(취소로 끝나면 true), `message`(끝난 이유: canceled / lost / busy / not_prepared / unsupported_mode)
+- 등록 뒤 start_tour가 120 s 안에 안 오면 관람 끝(`not_started`, arti/tour_end). 이때는 진행 중인 액션이 없어 result가 없다.
 
 ## 6. 주고받는 토픽·액션 (`/robot1` 아래)
 
 | 방향 | 이름 | 타입 | 상대 |
 |---|---|---|---|
+| 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | PC3 키오스크·관제 |
 | 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | PC3 키오스크·관제 |
 | 입력 | `target_person/point_map` | PointStamped (map) | person_tracker |
 | 입력 | `scan` | LaserScan | 로봇 LiDAR |
@@ -134,7 +160,7 @@ run_tour              begin_tour → undock → ── 0.2 s마다 feedback ─�
 | 입력 | `tf`, `tf_static` | | 로봇, AMCL |
 | 입력 | `dock_status` | DockStatus | 로봇 |
 | 입력 | `follow/enable` | Bool | (필요할 때) |
-| 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | String | artwork_zone |
+| 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | artwork_zone |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | 로봇 |
 | 출력 | `cmd_vel` | TwistStamped | 로봇 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL |
@@ -149,7 +175,12 @@ run_tour              begin_tour → undock → ── 0.2 s마다 feedback ─�
 ros2 launch arti_follow tour.launch.py
 ```
 
-관람 시작 (**로봇이 undock하고 회전하니 주변이 안전할 때**). Ctrl+C = 취소
+호출·등록 (**로봇이 undock하고 회전하니 주변이 안전할 때**). `success: true`가 나오면 등록 완료
+```bash
+ros2 action send_goal --feedback /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}"
+```
+
+관람 시작 (등록 뒤 120 s 안에). Ctrl+C = 취소
 ```bash
 ros2 action send_goal --feedback /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}"
 ```
@@ -171,7 +202,8 @@ ros2 topic echo /robot1/follow/state
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `undock` | true | 시작 때 undock |
 | `use_depth` | true | 바닥 물체 회피 (빈 바닥에서 점이 잡히면 `floor_min_height` 올리기) |
-| `auto_start` | false | 액션 없이 바로 시작 (테스트) |
+| `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
+| `ready_timeout` | 120 | 등록 뒤 start_tour를 기다리는 시간 [s] |
 
 ## 한계
 

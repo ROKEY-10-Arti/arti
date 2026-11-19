@@ -7,11 +7,15 @@
       tf, tf_static               좌표 변환
       follow/enable (Bool)        false면 cmd_vel을 보내지 않음 (작품 설명 중, 도킹 등)
       dock_status (irobot_create_msgs/DockStatus)   도크에 붙어 있는지 (붙어 있을 때만 undock)
-      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만). 취소하면 관람 끝
-                                  feedback: state(MOVING/FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
+      arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
+                                  feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
+                                  result: success(등록 완료), message(실패 이유)
+      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
+                                  취소하면 관람 끝. feedback: state(FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
-      artwork_zone/explaining (String)   설명 중인 artwork_id ('' = 없음) → feedback EXPLAINING + artwork_id
-      artwork_zone/explained (String)    끝까지 설명한 artwork_id → feedback ARTWORK_COMPLETED 한 번
+      artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id
+      artwork_zone/explained (Int32)     끝까지 설명한 작품 번호 → feedback ARTWORK_COMPLETED 한 번
+                                  작품 ID는 int (artworks.yaml artwork_id = PC3 작품 DB 번호)
 출력  cmd_vel (TwistStamped), follow/state (String)
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
@@ -21,15 +25,19 @@
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
-상태 (플로우차트 순서). 시작은 READY — arti/start_tour 액션이 와야 움직인다 (auto_start면 켜자마자)
+상태 (플로우차트 순서). 시작은 READY — arti/prepare_tour 액션이 와야 움직인다 (auto_start면 켜자마자 prepare+start)
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
+  ── 여기부터 REGISTERED까지 = prepare_tour ──
   UNDOCK      도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 도크 밖이면 건너뜀
   LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다림
   START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
               face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
-              (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → FOLLOW.
+              (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → REGISTERED.
               확인하는 동안은 따라가지 않고 그 자리에서 바라본다. 끊기면 처음부터 다시 기다림
+  REGISTERED  등록 완료 → prepare_tour 성공. start_tour를 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠).
+              ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
+  ── 여기부터 = start_tour ──
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
   SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
@@ -45,14 +53,13 @@
 """
 import math
 import os
-import re
 import signal
 import threading
 import time
 
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
-from arti_interfaces.action import StartTour
+from arti_interfaces.action import PrepareTour, StartTour
 import cv2
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from irobot_create_msgs.action import Undock
@@ -67,14 +74,15 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 import yaml
 
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
-    'auto_start': False,            # true면 액션 없이 켜자마자 관람 시작 (테스트용)
+    'auto_start': False,            # true면 액션 없이 켜자마자 prepare + start (테스트용)
+    'ready_timeout': 120.0,         # 등록 완료(REGISTERED) 뒤 start_tour를 이만큼 기다림. 넘으면 관람 끝 (not_started) [s]
     'undock': True,                 # 관람 시작 때 도크에 붙어 있으면 undock
     'undock_timeout': 60.0,         # undock 액션을 이만큼 기다림 [s]
     'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
@@ -127,14 +135,6 @@ PARAMS = {
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
     'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
 }
-
-
-def artwork_number(artwork_id):
-    """artwork_id 문자열 → 액션에서 쓰는 int 작품 ID.
-    받음: artwork_id  "art_02" (artworks.yaml 키)
-    돌려줌: 끝 숫자 2 (숫자가 없으면 0)"""
-    m = re.search(r'(\d+)$', artwork_id)
-    return int(m.group(1)) if m else 0
 
 
 class Diag:
@@ -244,7 +244,7 @@ class VisitorFollower(Node):
         구독  tf, tf_static, target_person/point_map, scan, oakd camera_info·compressedDepth,
               follow/enable, dock_status, artwork_zone/explaining·explained
         발행  cmd_vel, follow/state, initialpose, guide_message, arti/tour_end
-        액션  서버 arti/start_tour, 클라이언트 undock
+        액션  서버 arti/prepare_tour·arti/start_tour, 클라이언트 undock
         타이머 control_period(0.1 s)마다 control()"""
         super().__init__('visitor_follower')
         self.p = {q.name: q.value for q in self.declare_parameters('', list(PARAMS.items()))}
@@ -278,8 +278,8 @@ class VisitorFollower(Node):
             sub(CompressedImage, 'oakd/stereo/image_raw/compressedDepth', self.on_depth, qos_profile_sensor_data)
         sub(Bool, 'follow/enable', self.on_enable, 10)
         sub(DockStatus, 'dock_status', lambda m: setattr(self, 'docked', m.is_docked), qos_profile_sensor_data)
-        sub(String, 'artwork_zone/explaining', self.on_explaining, latched)
-        sub(String, 'artwork_zone/explained', self.on_explained, 10)
+        sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
+        sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
@@ -289,26 +289,31 @@ class VisitorFollower(Node):
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
         self.artwork_total = self.count_artworks()  # 작품 수 (새 StartTour feedback에는 total이 없어 지금은 로그·확인용)
 
-        # 관람 (start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
+        # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
         self.docked = None                          # dock_status (아직 못 받으면 None)
-        self.active, self.end_reason = False, ''    # 관람 중인지, 끝난 이유 (액션 result)
-        self.registered, self.explaining, self.visited = False, '', []   # 이번 관람: 인식됨, 설명 중 작품, 설명한 작품
+        self.active, self.end_reason = False, ''    # 관람(준비 포함) 중인지, 끝난 이유 (액션 result)
+        self.touring = False                        # start_tour가 진행 중인지 (두 번째 start_tour는 busy)
+        self.ready_at = None                        # REGISTERED가 된 시각 (ready_timeout 기준)
+        self.registered, self.explaining, self.visited = False, 0, []    # 이번 관람: 인식됨, 설명 중 작품 번호(0 = 없음), 설명한 작품
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
         self.face_until = self.loc_at = self.pose_sent = None
         group = ReentrantCallbackGroup()
         self.undock_client = ActionClient(self, Undock, 'undock', callback_group=group)
+        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
+                     goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.set_state('READY')
         if self.p['auto_start']:
             def once():
                 timer.cancel()
-                self.run_tour(None)
+                if self.run_prepare(None).success:
+                    self.run_tour(None)
             timer = self.create_timer(1.0, once, callback_group=group)
         else:
-            self.get_logger().info(f'관람 시작 액션 기다림: {self.get_namespace().rstrip("/")}/arti/start_tour')
+            self.get_logger().info(f'호출 액션 기다림: {self.get_namespace().rstrip("/")}/arti/prepare_tour')
 
         self.create_timer(self.p['control_period'], self.control)
         if self.diag is not None:
@@ -356,7 +361,7 @@ class VisitorFollower(Node):
             with open(path, encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
             rows = [r for r in (data.get('guide_zones') or []) + (data.get('artworks') or [])
-                    if zid in (r.get('zone_id'), r.get('artwork_id'))]
+                    if zid in (r.get('zone_id'), str(r.get('artwork_id')))]   # 작품은 번호 문자열로 ('2')
             r = rows[0]
             if 'x' in r:
                 point = (float(r['x']), float(r['y']))
@@ -407,11 +412,11 @@ class VisitorFollower(Node):
 
     def on_person(self, msg):
         """[구독] target_person/point_map (PointStamped, map) — 관람객 좌표가 올 때마다.
-        받아도 되는 상태(WAIT_VISITOR, FOLLOW, SEARCH, WAIT)일 때만: map → odom 변환 → 칼만 필터.
+        받아도 되는 상태(WAIT_VISITOR, REGISTERED, FOLLOW, SEARCH, WAIT)일 때만: map → odom 변환 → 칼만 필터.
         받음: msg.header.frame_id, msg.header.stamp (그 시각 TF로 변환), msg.point.x, y
         바뀜: kf.x (위치·속도), seen (마지막으로 본 시각), seen_since (등록 확인: 계속 보이기 시작한 시각)
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
-        if self.state not in ('WAIT_VISITOR', 'FOLLOW', 'SEARCH', 'WAIT'):
+        if self.state not in ('WAIT_VISITOR', 'REGISTERED', 'FOLLOW', 'SEARCH', 'WAIT'):
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
@@ -493,14 +498,14 @@ class VisitorFollower(Node):
         self.enabled = msg.data
 
     def on_explaining(self, msg):
-        """[구독] artwork_zone/explaining (String) — 설명 중인 작품. 관람 중일 때만 저장.
-        받음: msg.data  "art_02" 또는 "" (설명 끝)
+        """[구독] artwork_zone/explaining (Int32) — 설명 중인 작품 번호. 관람 중일 때만 저장.
+        받음: msg.data  2 또는 0 (설명 끝)
         바뀜: explaining → send_feedback의 EXPLAINING"""
-        self.explaining = msg.data if self.active else ''
+        self.explaining = msg.data if self.active else 0
 
     def on_explained(self, msg):
-        """[구독] artwork_zone/explained (String) — 끝까지 설명한 작품. 관람 중이고 처음일 때만 추가.
-        받음: msg.data  "art_02"
+        """[구독] artwork_zone/explained (Int32) — 끝까지 설명한 작품 번호. 관람 중이고 처음일 때만 추가.
+        받음: msg.data  2
         바뀜: visited → send_feedback이 ARTWORK_COMPLETED로 한 번씩 보고"""
         if self.active and msg.data not in self.visited:
             self.visited.append(msg.data)
@@ -550,6 +555,10 @@ class VisitorFollower(Node):
         # 등록 확인 중: 1 s 동안 계속 보여야 등록 (순간 오인식으로 엉뚱한 사람을 따라가지 않게). 확인 중에는 안 따라감
         if self.state == 'WAIT_VISITOR':
             return self.wait_visitor(now, pose, here)
+        # [5-1] 지금 상태가 REGISTERED인가? → 예: registered_wait() (start_tour 기다리며 정지) / 아니오: 아래로
+        # 등록은 끝났지만 키오스크가 아직 관람 시작(start_tour)을 안 보냄: 사람 때문에 움직이지 않고 서서 기다린다
+        if self.state == 'REGISTERED':
+            return self.registered_wait(now)
         # [6] 관람객 위치 수신 중인가? (kf.x가 있고 now - seen < 3 s) → 예: FOLLOW / 아니오: 아래로(놓침)
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
@@ -639,7 +648,7 @@ class VisitorFollower(Node):
         """[WAIT_VISITOR] 관람객이 register_confirm_time(1 s) 동안 끊김 없이(register_gap 0.5 s 안) 보이면 등록 → FOLLOW.
         확인하는 동안은 따라가지 않고 바라보기만 한다 (등록 안 된 사람을 따라가지 않게). 끊기면 처음부터 다시.
         받음: now, pose (x, y, yaw), here (x, y), (kf.x, seen, seen_since)
-        내보냄: 끊김 → 정지 / 확인 중 → face() / 1 s 채움 → on_registered(), state FOLLOW"""
+        내보냄: 끊김 → 정지 / 확인 중 → face() / 1 s 채움 → on_registered(), state REGISTERED (prepare_tour 성공)"""
         p = self.p
         if self.kf.x is None or now - self.seen > p['register_gap']:
             if self.kf.x is not None:
@@ -652,15 +661,29 @@ class VisitorFollower(Node):
             last, vel = self.person()
             return self.face(pose, here, last + vel * (now - self.kf.t))
         self.on_registered(now - self.seen_since)
-        self.set_state('FOLLOW')                    # 다음 주기부터 추종
+        self.ready_at = now
+        self.set_state('REGISTERED')                # prepare_tour 성공 → start_tour 기다림
+        return self.drive(*self.ramp(0.0, 0.0))
+
+    def registered_wait(self, now):
+        """[REGISTERED] 등록 완료 뒤 start_tour(키오스크 '관람 시작')를 그 자리에 서서 기다린다.
+        관람 시작 전에는 사람 때문에 움직이지 않는다 (돌지도 않음). 좌표(kf.x)는 계속 받아 둔다
+        → start_tour가 오면 바로 따라가고, 그사이 사라졌으면 FOLLOW → SEARCH로 마지막 위치를 찾아간다.
+        ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started).
+        받음: now, (ready_at)
+        내보냄: 시간 초과 → end_tour(not_started) / 그 밖 → 정지"""
+        if now - self.ready_at > self.p['ready_timeout']:
+            self.get_logger().warn(f'등록 뒤 {self.p["ready_timeout"]:.0f} s 동안 start_tour 없음 → 관람 끝')
+            return self.end_tour('READY', 'not_started')
+        self.dbg['reason'] = 'registered'
         return self.drive(*self.ramp(0.0, 0.0))
 
     def on_registered(self, confirmed):
         """등록 완료 순간에 할 일 (한곳에). 나중에 인식 모듈이 등록 신호를 주면 부르는 조건만 바꾼다.
         받음: confirmed  끊김 없이 보인 시간 [s] (로그용)
-        바뀜: registered = True (키오스크 보고는 prepare_tour로 옮길 예정)
+        바뀜: registered = True → run_prepare가 feedback REGISTERED + result success로 키오스크에 보고
         내보냄: guide_message recognized_guide("recognized") → 음성 '인식되었습니다'"""
-        self.registered = True                      # 등록 완료 표시 (prepare_tour 구현 때 키오스크 보고에 씀)
+        self.registered = True                      # 등록 완료 표시 (prepare_tour 성공)
         self.get_logger().info(f'관람객 등록 완료 ({confirmed:.1f} s 끊김 없이 보임)')
         if self.p['recognized_guide']:
             self.guide_pub.publish(String(data=self.p['recognized_guide']))   # "인식되었습니다"
@@ -740,74 +763,142 @@ class VisitorFollower(Node):
                                    '떨어져 있음 (AMCL 확인) → 그래도 바라볼 곳 쪽으로 회전')
             self.set_state('START_FACE')
 
-    # ---------- 관람 시작 (start_tour 액션) ----------
+    # ---------- 호출·등록 (prepare_tour 액션), 관람 시작 (start_tour 액션) ----------
 
     def on_goal(self, _goal):
-        """[액션] start_tour goal이 오면 일단 다 받는다.
-        여기서 거절하면 키오스크가 이유를 모르므로, 검사는 run_tour에서 하고 이유(message)와 함께 끝낸다.
+        """[액션] prepare_tour·start_tour goal이 오면 일단 다 받는다.
+        여기서 거절하면 키오스크가 이유를 모르므로, 검사는 run_prepare·run_tour에서 하고 이유(message)와 함께 끝낸다.
         돌려줌: GoalResponse.ACCEPT"""
         return GoalResponse.ACCEPT                  # 받을 수 없는 goal은 run_tour에서 이유(message)와 함께 끝냄
 
-    def goal_problem(self, goal):
-        """이 goal로 관람을 시작할 수 없으면 이유를 돌려준다 (검사만 하고 아무것도 안 바꿈). lock 안에서 부른다.
-        받음: goal (goal.request.artwork_ids), (active)
-        돌려줌: '' (문제 없음) / 'busy' (이미 관람 중) / 'unsupported_mode' (artwork_ids가 있음 = 코스관람, robot4 몫)"""
+    def prepare_problem(self, goal):
+        """prepare_tour를 시작할 수 없으면 이유 (검사만). lock 안에서 부른다.
+        받음: goal (goal.request.start), (active)
+        돌려줌: '' (문제 없음) / 'busy' (이미 준비·관람 중) / 'not_requested' (start = false)"""
         if self.active:
             return 'busy'
+        if goal is not None and not goal.request.start:
+            return 'not_requested'
+        return ''
+
+    def goal_problem(self, goal):
+        """start_tour를 시작할 수 없으면 이유 (검사만). lock 안에서 부른다.
+        받음: goal (goal.request.artwork_ids), (active, touring, state)
+        돌려줌: '' (문제 없음) / 'unsupported_mode' (artwork_ids가 있음 = 코스관람, robot4 몫)
+                / 'busy' (이미 관람 중) / 'not_prepared' (prepare_tour로 등록이 안 끝남)"""
         if goal is not None and len(goal.request.artwork_ids) > 0:
             return 'unsupported_mode'
+        if self.touring:
+            return 'busy'
+        if not self.active or self.state != 'REGISTERED':
+            return 'not_prepared'
         return ''
 
     def begin_tour(self):
         """관람 시작 준비: 지난 관람객 데이터(위치, 등록, 본 작품)를 지우고 active = True, 첫 상태로.
-        바뀜: kf.x, seen, holding, 단계 타이머, registered, explaining, visited, seen_since, active, end_reason
+        바뀜: kf.x, seen, holding, 단계 타이머, registered, explaining, visited, seen_since, active, touring, end_reason
               state → UNDOCK (undock 파라미터 false면 LOCALIZE)"""
         self.kf.x, self.seen, self.holding = None, -1e9, False
         self.face_until = self.loc_at = self.pose_sent = None
-        self.active, self.end_reason = True, ''
-        self.registered, self.explaining, self.visited = False, '', []
+        self.active, self.touring, self.end_reason, self.ready_at = True, False, '', None
+        self.registered, self.explaining, self.visited = False, 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
-        self.get_logger().info('관람 시작 (FREE)')
+        self.get_logger().info('호출 → 관람 준비 시작 (undock → 위치 → 키오스크 → 등록)')
         self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')
 
     def end_tour(self, state, reason):
         """관람 끝: 정지 → 관람객 데이터 삭제 → arti/tour_end 발행(다른 노드도 삭제) → state.
         받음: state   다음 상태 'READY' (취소·실패) 또는 'LOST' (분실)
               reason  끝난 이유 → 액션 result.message ('canceled', 'lost', 'undock_failed' ...)
-        바뀜: active = False → run_tour 루프가 끝나 result를 보냄
+        바뀜: active = touring = False → run_prepare·run_tour 루프가 끝나 result를 보냄
         내보냄: cmd_vel 0, arti/tour_end, follow/state"""
-        self.active, self.end_reason = False, reason
+        self.active, self.touring, self.end_reason = False, False, reason
         self.drive(0.0, 0.0)
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
         self.tour_end_pub.publish(Empty())
         self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
         self.set_state(state)
 
-    def run_tour(self, goal):
-        """[액션 실행, 관람 내내] start_tour goal 하나를 처음부터 끝까지 맡는다 (goal None = auto_start).
-        검사(goal_problem) → begin_tour → undock → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
+    def run_prepare(self, goal):
+        """[액션 실행] prepare_tour goal 하나: 호출 → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록까지 (goal None = auto_start).
+        검사(prepare_problem) → begin_tour → undock → 0.2 s마다 feedback (취소 확인) → REGISTERED가 되면 성공.
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
-        받음: goal (mode, artwork_ids, is_cancel_requested)
-        돌려줌: StartTour.Result(success = 취소로 끝남, message = 끝난 이유)"""
+        받음: goal (start, is_cancel_requested)
+        돌려줌: PrepareTour.Result(success = 등록 완료, message = registered 또는 실패 이유)"""
         with self.lock:
-            problem = self.goal_problem(goal)
+            problem = self.prepare_problem(goal)
             if not problem:
                 self.begin_tour()
         if problem:
-            ids = list(goal.request.artwork_ids) if goal is not None else []
-            self.get_logger().warn(f'관람 시작 거절 ({problem}, artwork_ids {ids}) — 이 로봇은 자유관람만, 한 번에 한 관람')
+            self.get_logger().warn(f'호출 거절 ({problem}) — 한 번에 한 관람')
             if goal is not None:
                 goal.abort()
-            return StartTour.Result(success=False, message=problem)
+            return PrepareTour.Result(success=False, message=problem)
         if self.state == 'UNDOCK':
-            self.send_feedback(goal)
+            self.send_prepare_feedback(goal)
             why = self.undock(goal)
             with self.lock:
                 if why:
                     self.end_tour('READY', why)
                 elif self.active:
                     self.set_state('LOCALIZE')
+        while self.active and self.state != 'REGISTERED':
+            if goal is not None and goal.is_cancel_requested:
+                with self.lock:
+                    self.end_tour('READY', 'canceled')
+                break
+            self.send_prepare_feedback(goal)
+            time.sleep(0.2)
+        if self.active and self.state == 'REGISTERED':
+            self.send_prepare_feedback(goal)        # 마지막 feedback REGISTERED
+            self.get_logger().info('관람 준비 끝 (등록 완료) → start_tour 기다림')
+            if goal is not None:
+                goal.succeed()
+            return PrepareTour.Result(success=True, message='registered')
+        reason = self.end_reason
+        self.get_logger().info(f'관람 준비 실패: {reason}')
+        if goal is not None:
+            goal.canceled() if reason == 'canceled' else goal.abort()
+        return PrepareTour.Result(success=False, message=reason)
+
+    def send_prepare_feedback(self, goal):
+        """내부 상태 → prepare_tour feedback (PrepareTour.action).
+        UNDOCK → UNDOCKING, LOCALIZE·START_FACE → MOVING, WAIT_VISITOR → ARRIVED (아무도 안 보임) /
+        REGISTERING (1 s 확인 중), REGISTERED → REGISTERED.
+        받음: goal, (state, seen_since, seen)
+        내보냄: feedback (state)"""
+        if goal is None:
+            return
+        if self.state == 'UNDOCK':
+            state = 'UNDOCKING'
+        elif self.state == 'WAIT_VISITOR':
+            seeing = self.seen_since is not None and self.now() - self.seen <= self.p['register_gap']
+            state = 'REGISTERING' if seeing else 'ARRIVED'
+        elif self.state == 'REGISTERED':
+            state = 'REGISTERED'
+        else:                                       # READY·LOCALIZE·START_FACE
+            state = 'MOVING'
+        goal.publish_feedback(PrepareTour.Feedback(state=state))
+
+    def run_tour(self, goal):
+        """[액션 실행, 관람 내내] start_tour goal 하나: prepare_tour로 등록된 관람객을 끝까지 따라간다 (goal None = auto_start).
+        검사(goal_problem: REGISTERED여야 함) → FOLLOW → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
+        움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
+        받음: goal (artwork_ids, is_cancel_requested)
+        돌려줌: StartTour.Result(success = 취소로 끝남, message = 끝난 이유)"""
+        with self.lock:
+            problem = self.goal_problem(goal)
+            if not problem:
+                self.touring = True
+                self.get_logger().info('관람 시작 → 추종')
+                self.set_state('FOLLOW')            # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
+        if problem:
+            ids = list(goal.request.artwork_ids) if goal is not None else []
+            self.get_logger().warn(f'관람 시작 거절 ({problem}, artwork_ids {ids}) — 자유관람만, prepare_tour 등록 뒤에만')
+            if goal is not None:
+                goal.abort()
+            return StartTour.Result(success=False, message=problem)
         while self.active:
             if goal is not None and goal.is_cancel_requested:
                 with self.lock:
@@ -820,7 +911,7 @@ class VisitorFollower(Node):
         with self.lock:
             visited, self.visited = self.visited, []   # 관람 기록은 로그로 남기고 지운다 (관람객 데이터 남기지 않음)
         self.get_logger().info(f'관람 결과: success={result.success}, message={reason}, '
-                               f'설명 완료 {[artwork_number(a) for a in visited]}')
+                               f'설명 완료 {visited}')
         if goal is not None:
             goal.canceled() if reason == 'canceled' else goal.abort()
         return result
@@ -828,8 +919,7 @@ class VisitorFollower(Node):
     def send_feedback(self, goal):
         """내부 상태 → 키오스크용 feedback (StartTour.action, docs/common/ros2_interfaces.md).
         새로 끝까지 설명한 작품이 있으면 → ARTWORK_COMPLETED + 그 작품 번호 (작품마다 한 번)
-        설명 중 → EXPLAINING, FOLLOW·SEARCH·WAIT·LOST → FOLLOW, 그 밖(READY·UNDOCK·LOCALIZE·START_FACE·WAIT_VISITOR) → MOVING.
-        (관람객 등록 보고는 prepare_tour 몫으로 바뀔 예정 — 지금은 WAIT_VISITOR도 MOVING)
+        설명 중 → EXPLAINING, FOLLOW·SEARCH·WAIT·LOST → FOLLOW, 그 밖 → MOVING (관람 중에는 거의 없음).
         받음: goal, (state, explaining, visited, reported)
         내보냄: feedback (state, artwork_id)"""
         if goal is None:
@@ -837,17 +927,17 @@ class VisitorFollower(Node):
         if self.reported < len(self.visited):
             done = self.visited[self.reported]
             self.reported += 1
-            goal.publish_feedback(StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=artwork_number(done)))
+            goal.publish_feedback(StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=done))
             return
-        explaining = self.explaining if self.state in ('FOLLOW', 'SEARCH', 'WAIT') else ''
+        explaining = self.explaining if self.state in ('FOLLOW', 'SEARCH', 'WAIT') else 0
         if explaining:
             state = 'EXPLAINING'
         elif self.state in ('FOLLOW', 'SEARCH', 'WAIT', 'LOST'):
             state = 'FOLLOW'
-        else:                                       # READY·UNDOCK·LOCALIZE·START_FACE·WAIT_VISITOR
+        else:
             state = 'MOVING'
         goal.publish_feedback(StartTour.Feedback(
-            state=state, artwork_id=artwork_number(explaining) if explaining else 0))
+            state=state, artwork_id=explaining))
 
     def wait_future(self, future, timeout, goal):
         """future(서비스·액션 응답)가 끝날 때까지 기다린다 (다른 스레드가 채움).
@@ -1162,7 +1252,7 @@ class VisitorFollower(Node):
 
     def set_state(self, state):
         """상태를 바꾼다. 바뀔 때만 로그를 남기고 follow/state를 발행 (같은 상태로 또 불러도 아무것도 안 함).
-        받음: state  'READY' / 'UNDOCK' / 'LOCALIZE' / 'START_FACE' / 'WAIT_VISITOR' / 'FOLLOW' / 'SEARCH' / 'WAIT' / 'LOST'
+        받음: state  'READY' / 'UNDOCK' / 'LOCALIZE' / 'START_FACE' / 'WAIT_VISITOR' / 'REGISTERED' / 'FOLLOW' / 'SEARCH' / 'WAIT' / 'LOST'
         내보냄: follow/state (latched) → artwork_zone 등"""
         if state != self.state:
             self.get_logger().info(f'상태 {self.state} → {state}')
@@ -1183,7 +1273,7 @@ def main():
     except KeyboardInterrupt:
         signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
     finally:
-        node.active = False                         # 관람 액션 대기 루프 끝냄
+        node.active = False                         # 준비·관람 액션 대기 루프 끝냄
         executor.shutdown(timeout_sec=1.0)
         node.drive(0.0, 0.0)
         node.destroy_node()
