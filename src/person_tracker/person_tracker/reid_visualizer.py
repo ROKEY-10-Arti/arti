@@ -15,8 +15,8 @@ ReID 디버그 시각화 렌더러 (reid_visualizer.py)
    - 상위 3명(타겟 우선, 이후 유사도 내림차순)에 대해 `[TGT]`/`[COEX]`/`[CAND]` 태그와
      종합(`Tot`), 상의(`U`), 허벅지(`M`), 정강이(`L`), 전체(`F`) 유사도를 가로 막대로 출력합니다.
 5. 304차원 HSV 벡터 히트맵 (`_render_hsv_vector_patch`):
-   - 등록 시점 `Anchor`(Upper/Mid/Full), 시간 적응 EMA `Recent Full`, 비교 대상(`Compare`/`Target`)의
-     304D 벡터를 18x16 Hue-Saturation 컬러 히트맵 + 16-bin Value 막대 이미지로 복원해 나란히 비교합니다.
+   - 등록 시점 `Anchor`, 시간 적응 EMA `Recent`, 비교 대상(`Other` / `Target`) 각각을
+     가로 1행 4부위(`Upper` / `Mid` / `Lower` / `Full`) 18x16 Hue-Saturation 컬러 히트맵 + 16-bin Value 막대로 대조합니다.
 6. 하단 가이드 패널:
    - 상태 정의, 태그 조건 및 트랙바 튜닝 파라미터 설명을 고정 범례로 표시합니다.
 """
@@ -74,7 +74,15 @@ class ReIDDebugVisualizer:
         """
         canvas = np.full((patch_h, patch_w + 26, 3), 26, dtype=np.uint8)
         if vec304 is None or len(vec304) < 304:
-            cv2.putText(canvas, 'N/A', (42, patch_h // 2 + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 120, 120), 1)
+            cv2.putText(
+                canvas,
+                'N/A',
+                (max(8, patch_w // 2 - 8), patch_h // 2 + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (120, 120, 120),
+                1,
+            )
             return canvas
 
         hs = vec304[:288].reshape(18, 16)
@@ -126,7 +134,7 @@ class ReIDDebugVisualizer:
         1. 상단 헤더: Adaptive State, Target ID, 4대 임계 파라미터 및 `Search Status` 사유
         2. 120f 시계열 그래프: `reid_match_thresh` / `coexist_min_sim` 기준선과 ID별 유사도 곡선
         3. 중단 부위 막대: 상위 3인(`TGT`/`COEX`/`CAND`)의 `Tot / U / M / L / F` 점수 막대
-        4. 하단 304D 히트맵: `Anchor`(Upper/Mid/Full) vs `Compare/Target` 분포 대조
+        4. 하단 304D 히트맵: `Anchor` / `Recent (EMA)` / `Other(or Target)` 행별 4부위(`Upper`/`Mid`/`Lower`/`Full`) 대조
         5. 최하단 범례(Guide)
         """
         self.frame_idx += 1
@@ -255,88 +263,95 @@ class ReIDDebugVisualizer:
                 bx += bw + 10
             row_y += 34
 
-        # 4. 하단: 304D HSV 벡터(18x16 H-S + 16 V) 히트맵 비교 (y=366..610)
+        # 4. 하단: 304D HSV 벡터(18x16 H-S + 16 V) 1행 4부위(Upper / Mid / Lower / Full) 비교 (y=344..602)
+        anchor_bank: Optional[PartFeatureBank] = tracker.anchor_bank
+        recent_bank: Optional[PartFeatureBank] = tracker.recent_bank
+        compare_person: Optional[UnifiedTrackedPerson] = None
+        has_other = False
+        if sorted_dets:
+            non_targets = [p for p in sorted_dets if not p.is_target and p.feature_bank is not None]
+            if non_targets:
+                compare_person = non_targets[0]
+                has_other = True
+            else:
+                compare_person = sorted_dets[0]
+
         cv2.putText(
             panel,
-            '304D HSV Vector Heatmap (Left: 18x16 Hue-Sat | Right: 16-bin Value)',
-            (12, 376),
+            '304D HSV Heatmap (18x16 H-S + 16 V)',
+            (12, 354),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.44,
             (210, 220, 255),
             1,
             cv2.LINE_AA,
         )
-
-        anchor_bank: Optional[PartFeatureBank] = tracker.anchor_bank
-        recent_bank: Optional[PartFeatureBank] = tracker.recent_bank
-        compare_person: Optional[UnifiedTrackedPerson] = None
-        if sorted_dets:
-            non_targets = [p for p in sorted_dets if not p.is_target and p.feature_bank is not None]
-            compare_person = non_targets[0] if non_targets else sorted_dets[0]
-
-        def _place_patch(title: str, vec: Optional[np.ndarray], x0: int, y0: int):
-            cv2.putText(panel, title, (x0, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (220, 220, 220), 1)
-            patch = self._render_hsv_vector_patch(vec, patch_w=126, patch_h=82)
-            ph, pw = patch.shape[:2]
-            panel[y0:y0 + ph, x0:x0 + pw] = patch
-
-        _place_patch(
-            'Anchor Upper',
-            anchor_bank.upper if anchor_bank is not None else None,
-            18,
-            406,
-        )
-        _place_patch(
-            'Anchor Mid',
-            anchor_bank.mid if anchor_bank is not None else None,
-            186,
-            406,
-        )
-
-        # 하단 왼쪽 2열: 등록 원본(Anchor Full)과 EMA 적응 특징(Recent Full)을 나란히 배치해 변화 확인 가능
-        _place_patch(
-            'Anchor Full',
-            anchor_bank.full if anchor_bank is not None else None,
-            18,
-            520,
-        )
-        _place_patch(
-            'Recent Full (EMA)',
-            recent_bank.full if recent_bank is not None else None,
-            186,
-            520,
-        )
-
         if compare_person is not None and compare_person.feature_bank is not None:
-            cb = compare_person.feature_bank
-            c_tag = 'Target' if compare_person.is_target else 'Compare'
-            lbl_prefix = f'{c_tag} ID:{compare_person.track_id}'
-            _place_patch(f'{lbl_prefix} Upper', cb.upper, 368, 406)
-            _place_patch(f'{lbl_prefix} Mid', cb.mid, 536, 406)
-            _place_patch(f'{lbl_prefix} Full', cb.full, 368, 520)
-
+            sim_col = (80, 255, 120) if compare_person.is_target else (0, 200, 255)
             cv2.putText(
                 panel,
                 f'Total Sim: {compare_person.similarity:.3f}',
-                (536, 554),
+                (390, 354),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.50,
-                (80, 255, 120) if compare_person.is_target else (0, 200, 255),
+                0.46,
+                sim_col,
                 1,
                 cv2.LINE_AA,
             )
-            if anchor_bank is not None and recent_bank is not None:
-                ar_sim = tracker.current_extractor.hist_sim(anchor_bank.full, recent_bank.full)
-                cv2.putText(
-                    panel,
-                    f'A-R Sim: {ar_sim:.3f}',
-                    (536, 580),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.44,
-                    (190, 220, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+        if anchor_bank is not None and recent_bank is not None:
+            ar_sim = tracker.current_extractor.hist_sim(anchor_bank.full, recent_bank.full)
+            cv2.putText(
+                panel,
+                f'A-R Sim: {ar_sim:.3f}',
+                (556, 354),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.44,
+                (190, 220, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        col_xs = (120, 268, 416, 564)
+        col_titles = ('Upper', 'Mid', 'Lower', 'Full')
+        for cx, c_title in zip(col_xs, col_titles):
+            cv2.putText(panel, c_title, (cx, 373), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (215, 225, 235), 1, cv2.LINE_AA)
+
+        def _render_bank_row(
+            row_label: str,
+            sub_label: str,
+            label_color: Tuple[int, int, int],
+            bank: Optional[PartFeatureBank],
+            y0: int,
+        ):
+            cv2.putText(panel, row_label, (12, y0 + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.41, label_color, 1, cv2.LINE_AA)
+            if sub_label:
+                cv2.putText(panel, sub_label, (12, y0 + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (175, 185, 195), 1, cv2.LINE_AA)
+            vecs = (
+                (bank.upper, bank.mid, bank.lower, bank.full)
+                if bank is not None
+                else (None, None, None, None)
+            )
+            for cx, vec in zip(col_xs, vecs):
+                patch = self._render_hsv_vector_patch(vec, patch_w=108, patch_h=64)
+                ph, pw = patch.shape[:2]
+                panel[y0:y0 + ph, cx:cx + pw] = patch
+
+        _render_bank_row('Anchor', '(Registered)', (120, 235, 255), anchor_bank, 380)
+        _render_bank_row('Recent', '(EMA)', (140, 255, 180), recent_bank, 456)
+
+        if compare_person is not None and compare_person.feature_bank is not None:
+            if has_other:
+                cmp_tag = 'COEX' if compare_person.track_id in tracker.coexisting_non_target_ids else 'CAND'
+                cmp_title = f'Other ID:{compare_person.track_id}'
+                cmp_sub = f'[{cmp_tag}] {compare_person.similarity:.2f}'
+                cmp_col = self._color_for_id(compare_person.track_id, False)
+            else:
+                cmp_title = f'Target ID:{compare_person.track_id}'
+                cmp_sub = '(Current)'
+                cmp_col = (80, 255, 100)
+            _render_bank_row(cmp_title, cmp_sub, cmp_col, compare_person.feature_bank, 532)
+        else:
+            _render_bank_row('Other', '(None)', (130, 130, 130), None, 532)
 
         # 5. 하단 지표 안내 (Legend / Guide)
         cv2.rectangle(panel, (10, 614), (self.width - 10, self.height - 8), (28, 28, 28), -1)

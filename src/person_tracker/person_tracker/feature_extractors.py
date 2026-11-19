@@ -40,6 +40,7 @@ class PartFeatureBank:
     mid: Optional[np.ndarray]
     lower: Optional[np.ndarray]
     visible_parts: Tuple[bool, bool, bool] = (True, True, True)
+    is_fallback: bool = False
 
     def copy(self) -> 'PartFeatureBank':
         return PartFeatureBank(
@@ -48,6 +49,7 @@ class PartFeatureBank:
             mid=self.mid.copy() if self.mid is not None else None,
             lower=self.lower.copy() if self.lower is not None else None,
             visible_parts=self.visible_parts,
+            is_fallback=self.is_fallback,
         )
 
 
@@ -111,6 +113,55 @@ class BaseFeatureExtractor:
             return mask_roi
         return cleaned
 
+    def _prepare_part_masks(
+        self,
+        frame: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        mask_poly: Optional[np.ndarray] = None,
+        keypoints: Optional[np.ndarray] = None,
+        exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
+    ) -> Optional[
+        Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]
+    ]:
+        """ROI 좌표 `(x1, y1, x2, y2)`, `roi_hsv`, 3부위 마스크 `(upper, mid, lower)`, `is_fallback`을 반환합니다."""
+        raise NotImplementedError
+
+    def extract_part_masks(
+        self,
+        frame: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+        mask_poly: Optional[np.ndarray] = None,
+        keypoints: Optional[np.ndarray] = None,
+        exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
+    ) -> Optional[Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray]]:
+        """시각화/디버깅용으로 특징 추출에 실제로 사용되는 `(roi_box, upper_mask, mid_mask, lower_mask)`를 반환합니다."""
+        prepared = self._prepare_part_masks(
+            frame,
+            bbox,
+            mask_poly=mask_poly,
+            keypoints=keypoints,
+            exclude_boxes=exclude_boxes,
+        )
+        if prepared is None:
+            return None
+        roi_box, _, upper_mask, mid_mask, lower_mask, _ = prepared
+        return roi_box, upper_mask, mid_mask, lower_mask
+
+    @staticmethod
+    def _split_mask_by_ratios(
+        mask: np.ndarray, upper_ratio: float, mid_ratio: float
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """단일 마스크를 높이 비율(`upper_ratio`, `mid_ratio`) 기준으로 3개 부위 마스크로 분할합니다."""
+        h = mask.shape[0]
+        y_u, y_m = int(h * upper_ratio), int(h * mid_ratio)
+        upper_m = np.zeros_like(mask)
+        mid_m = np.zeros_like(mask)
+        lower_m = np.zeros_like(mask)
+        upper_m[:y_u, :] = mask[:y_u, :]
+        mid_m[y_u:y_m, :] = mask[y_u:y_m, :]
+        lower_m[y_m:, :] = mask[y_m:, :]
+        return upper_m, mid_m, lower_m
+
     def extract(
         self,
         frame: np.ndarray,
@@ -119,8 +170,34 @@ class BaseFeatureExtractor:
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> Optional[PartFeatureBank]:
-        """태스크별(BBox/Segment/Pose) 사람 ROI에서 304D HSV PartFeatureBank를 추출하는 추상 인터페이스."""
-        raise NotImplementedError
+        """태스크별(BBox/Segment/Pose) 사람 ROI에서 304D HSV PartFeatureBank를 추출하는 공통 인터페이스."""
+        prepared = self._prepare_part_masks(
+            frame,
+            bbox,
+            mask_poly=mask_poly,
+            keypoints=keypoints,
+            exclude_boxes=exclude_boxes,
+        )
+        if prepared is None:
+            return None
+        _, roi_hsv, upper_mask, mid_mask, lower_mask, is_fallback = prepared
+        combined_mask = cv2.bitwise_or(upper_mask, cv2.bitwise_or(mid_mask, lower_mask))
+        full_hist = self.calc_hsv_hist(roi_hsv, combined_mask)
+        if full_hist is None:
+            return None
+
+        upper_h = self.calc_hsv_hist(roi_hsv, upper_mask)
+        mid_h = self.calc_hsv_hist(roi_hsv, mid_mask)
+        lower_h = self.calc_hsv_hist(roi_hsv, lower_mask)
+
+        return PartFeatureBank(
+            full=full_hist,
+            upper=upper_h,
+            mid=mid_h,
+            lower=lower_h,
+            visible_parts=(upper_h is not None, mid_h is not None, lower_h is not None),
+            is_fallback=is_fallback,
+        )
 
     def compare_banks_detail(
         self, ref: Optional[PartFeatureBank], cur: Optional[PartFeatureBank]
@@ -233,6 +310,23 @@ class BaseFeatureExtractor:
         return score
 
     @staticmethod
+    def backfill_part(
+        bank: Optional[PartFeatureBank],
+        part_name: str,
+        hist: Optional[np.ndarray],
+    ) -> bool:
+        """비어 있던(`None`) 부위 특징을 1회 보충하고 `visible_parts`를 갱신합니다."""
+        if bank is None or hist is None or getattr(bank, part_name) is not None:
+            return False
+        setattr(bank, part_name, hist.copy())
+        bank.visible_parts = (
+            bank.upper is not None,
+            bank.mid is not None,
+            bank.lower is not None,
+        )
+        return True
+
+    @staticmethod
     def update_recent_bank(
         recent_bank: Optional[PartFeatureBank],
         cur_bank: Optional[PartFeatureBank],
@@ -253,17 +347,19 @@ class BaseFeatureExtractor:
 class BBoxFeatureExtractor(BaseFeatureExtractor):
     """[Detect 태스크용] 바운딩 박스 내부 중앙 크롭 + 3등분 특징 추출기"""
 
-    def extract(
+    def _prepare_part_masks(
         self,
         frame: np.ndarray,
         bbox: Tuple[int, int, int, int],
         mask_poly: Optional[np.ndarray] = None,
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
-    ) -> Optional[PartFeatureBank]:
+    ) -> Optional[
+        Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    ]:
         """
         BBox 중앙 크롭(가로 20%~80%, 세로 12%~92%)에서 배경 노이즈를 줄이고
-        세로 비율(0.38 / 0.72) 기준 3등분 HSV 히스토그램을 추출합니다.
+        세로 비율(0.38 / 0.72) 기준 3등분 마스크를 생성합니다.
         """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = bbox
@@ -282,40 +378,29 @@ class BBoxFeatureExtractor(BaseFeatureExtractor):
         # 무채색(S=0~20) 옷도 포함되도록 S 하한을 0으로 두고, 극단적 암부 노이즈(V<15)만 제외
         mask = cv2.inRange(roi_hsv, np.array([0, 0, 15]), np.array([180, 255, 255]))
         mask = self._apply_exclude_boxes(mask, (cx1, cy1, cx2, cy2), exclude_boxes)
-
-        full_hist = self.calc_hsv_hist(roi_hsv, mask)
-        if full_hist is None:
+        if cv2.countNonZero(mask) < 12:
             return None
 
-        rh = roi_hsv.shape[0]
-        y_u, y_m = int(rh * 0.38), int(rh * 0.72)
-        upper_h = self.calc_hsv_hist(roi_hsv[:y_u, :], mask[:y_u, :])
-        mid_h = self.calc_hsv_hist(roi_hsv[y_u:y_m, :], mask[y_u:y_m, :])
-        lower_h = self.calc_hsv_hist(roi_hsv[y_m:, :], mask[y_m:, :])
-
-        return PartFeatureBank(
-            full=full_hist,
-            upper=upper_h,
-            mid=mid_h,
-            lower=lower_h,
-            visible_parts=(upper_h is not None, mid_h is not None, lower_h is not None),
-        )
+        upper_m, mid_m, lower_m = self._split_mask_by_ratios(mask, 0.38, 0.72)
+        return (cx1, cy1, cx2, cy2), roi_hsv, upper_m, mid_m, lower_m, False
 
 
 class SegMaskFeatureExtractor(BaseFeatureExtractor):
     """[Segment 태스크용] 폴리곤 실루엣 마스킹(배경 0%) + 3부위 특징 추출기"""
 
-    def extract(
+    def _prepare_part_masks(
         self,
         frame: np.ndarray,
         bbox: Tuple[int, int, int, int],
         mask_poly: Optional[np.ndarray] = None,
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
-    ) -> Optional[PartFeatureBank]:
+    ) -> Optional[
+        Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    ]:
         """
         Segment 폴리곤 마스크를 3x3 커널로 1회 침식해 경계 배경을 덜어낸 뒤
-        높이 비율(0.35 / 0.70) 기준 상·중·하 부위별 HSV 히스토그램을 추출합니다.
+        높이 비율(0.35 / 0.70) 기준 상·중·하 부위별 마스크를 생성합니다.
         """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = (
@@ -346,23 +431,11 @@ class SegMaskFeatureExtractor(BaseFeatureExtractor):
         if cv2.countNonZero(final_mask) < 20:
             final_mask = seg_mask
         final_mask = self._apply_exclude_boxes(final_mask, (x1, y1, x2, y2), exclude_boxes)
-
-        full_hist = self.calc_hsv_hist(roi_hsv, final_mask)
-        if full_hist is None:
+        if cv2.countNonZero(final_mask) < 12:
             return None
 
-        y_u, y_m = int(bh * 0.35), int(bh * 0.70)
-        upper_h = self.calc_hsv_hist(roi_hsv[:y_u, :], final_mask[:y_u, :])
-        mid_h = self.calc_hsv_hist(roi_hsv[y_u:y_m, :], final_mask[y_u:y_m, :])
-        lower_h = self.calc_hsv_hist(roi_hsv[y_m:, :], final_mask[y_m:, :])
-
-        return PartFeatureBank(
-            full=full_hist,
-            upper=upper_h,
-            mid=mid_h,
-            lower=lower_h,
-            visible_parts=(upper_h is not None, mid_h is not None, lower_h is not None),
-        )
+        upper_m, mid_m, lower_m = self._split_mask_by_ratios(final_mask, 0.35, 0.70)
+        return (x1, y1, x2, y2), roi_hsv, upper_m, mid_m, lower_m, False
 
 
 class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
@@ -376,16 +449,18 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
     KP_CONF_THRESH = 0.35
     ALLOW_CROSS_PART = False
 
-    def extract(
+    def _prepare_part_masks(
         self,
         frame: np.ndarray,
         bbox: Tuple[int, int, int, int],
         mask_poly: Optional[np.ndarray] = None,
         keypoints: Optional[np.ndarray] = None,
         exclude_boxes: Optional[List[Tuple[int, int, int, int]]] = None,
-    ) -> Optional[PartFeatureBank]:
+    ) -> Optional[
+        Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    ]:
         """
-        YOLO-Pose 17관절 좌표를 로컬 ROI 좌표로 변환한 뒤 3개 해부학 부위별 마스크를 생성해 특징 뱅크를 추출합니다.
+        YOLO-Pose 17관절 좌표를 로컬 ROI 좌표로 변환한 뒤 3개 해부학 부위별 마스크를 생성합니다.
 
         [마스킹 원리]
         - `upper_mask`: 어깨(5,6)-골반(11,12) 3점 이상 가시 시 사각형 다각형 채우기, 한쪽만 보이면 두꺼운 골격선.
@@ -395,7 +470,10 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
           관절이 너무 적으면 `BBoxFeatureExtractor` 중앙 크롭 방식으로 폴백합니다.
         """
         if keypoints is None or len(keypoints) < 17:
-            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
+            fb = BBoxFeatureExtractor()._prepare_part_masks(
+                frame, bbox, exclude_boxes=exclude_boxes
+            )
+            return (*fb[:5], True) if fb is not None else None
 
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = (
@@ -433,6 +511,17 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
             p_sh = pt(5) if is_vis(5) else pt(6)
             p_hip = pt(11) if is_vis(11) else pt(12)
             cv2.line(upper_mask, p_sh, p_hip, 255, thickness=limb_thickness * 2)
+        elif is_vis(5) and is_vis(6):
+            # 근접 촬영 등으로 골반(11,12)이 화면 아래로 잘렸을 때 어깨선 아래 상의 영역만 추출 (얼굴 제외)
+            p5, p6 = pt(5), pt(6)
+            sh_w = abs(p5[0] - p6[0])
+            if sh_w >= 12:
+                y_bot = min(bh - 1, int(max(p5[1], p6[1]) + max(16.0, sh_w * 1.15)))
+                if y_bot > max(p5[1], p6[1]) + 2:
+                    chest_quad = np.array(
+                        [p5, p6, (p6[0], y_bot), (p5[0], y_bot)], dtype=np.int32
+                    )
+                    cv2.fillPoly(upper_mask, [chest_quad], 255)
 
         # 2. 중하반신(Mid/Thighs) 마스크: 골반(11->13, 12->14)에서 무릎까지 선분 스트립
         mid_mask = np.zeros((bh, bw), dtype=np.uint8)
@@ -458,24 +547,13 @@ class PoseKeypointFeatureExtractor(BaseFeatureExtractor):
             cv2.bitwise_and(lower_mask, valid_color), (x1, y1, x2, y2), exclude_boxes
         )
 
-        upper_h = self.calc_hsv_hist(roi_hsv, upper_mask)
-        mid_h = self.calc_hsv_hist(roi_hsv, mid_mask)
-        lower_h = self.calc_hsv_hist(roi_hsv, lower_mask)
-
         # 전체(Full) 마스크는 관절로 확인된 모든 부위의 합집합
         combined_mask = cv2.bitwise_or(upper_mask, cv2.bitwise_or(mid_mask, lower_mask))
         if cv2.countNonZero(combined_mask) < 20:
-            # 관절이 너무 안 보일 때는 중앙 영역 폴백
-            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
+            # 관절이 너무 안 보일 때는 중앙 영역 폴백 (`is_fallback=True` 표시로 이후 Pose 승격 허용)
+            fb = BBoxFeatureExtractor()._prepare_part_masks(
+                frame, bbox, exclude_boxes=exclude_boxes
+            )
+            return (*fb[:5], True) if fb is not None else None
 
-        full_h = self.calc_hsv_hist(roi_hsv, combined_mask)
-        if full_h is None:
-            return BBoxFeatureExtractor().extract(frame, bbox, exclude_boxes=exclude_boxes)
-
-        return PartFeatureBank(
-            full=full_h,
-            upper=upper_h,
-            mid=mid_h,
-            lower=lower_h,
-            visible_parts=(upper_h is not None, mid_h is not None, lower_h is not None),
-        )
+        return (x1, y1, x2, y2), roi_hsv, upper_mask, mid_mask, lower_mask, False

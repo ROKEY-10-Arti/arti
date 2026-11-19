@@ -190,6 +190,9 @@ class MultiModelTrackerCore:
         self.ema_min_sim = float(ema_min_sim)
         self.ema_alpha = float(ema_alpha)
         self.ema_require_single = bool(ema_require_single)
+        self.backfill_confirm_frames: int = 2
+        self._fallback_upgrade_streak: int = 0
+        self._backfill_streaks: Dict[str, int] = {'upper': 0, 'mid': 0, 'lower': 0}
 
         self.current_model_name = self._build_model_filename(self.family_idx, self.task_idx)
         self.model = self._get_or_load_model(self.current_model_name)
@@ -374,6 +377,84 @@ class MultiModelTrackerCore:
             return person.similarity
         return 0.65 * person.similarity + 0.35 * sp_score
 
+    def _reset_bank_completion_streaks(self):
+        self._fallback_upgrade_streak = 0
+        for part in ('upper', 'mid', 'lower'):
+            self._backfill_streaks[part] = 0
+
+    def _update_target_banks_safely(
+        self,
+        extractor: BaseFeatureExtractor,
+        current_target: UnifiedTrackedPerson,
+        t_bank: Optional[PartFeatureBank],
+        detections: List[UnifiedTrackedPerson],
+    ) -> str:
+        """
+        안전 추적 구간에서 `recent_bank` EMA 갱신, BBox 폴백 승격(`UPGRADE`),
+        초기 미관측(`None`) 부위 보충(`BACKFILL`)을 수행하고 `ema_status` 문자열을 반환합니다.
+        """
+        single_ok = (not self.ema_require_single) or (len(detections) == 1)
+        if not single_ok:
+            self._reset_bank_completion_streaks()
+            return f'HOLD({len(detections)}P)'
+
+        # 1. 등록 시 Pose 관절 미검출로 BBox 폴백 잠금된 경우 -> 정상 Pose 관절 2프레임 연속 검출 시 1회 승격
+        if (
+            self.anchor_bank is not None
+            and self.anchor_bank.is_fallback
+            and t_bank is not None
+            and not t_bank.is_fallback
+        ):
+            self._fallback_upgrade_streak += 1
+            if self._fallback_upgrade_streak >= self.backfill_confirm_frames:
+                self.anchor_bank = t_bank.copy()
+                self.recent_bank = t_bank.copy()
+                self._reset_bank_completion_streaks()
+                current_target.similarity, current_target.part_sims = (
+                    extractor.compute_dual_similarity_detail(
+                        self.anchor_bank, self.recent_bank, t_bank
+                    )
+                )
+                return 'UPGRADE'
+            return f'HOLD(UPG {self._fallback_upgrade_streak}/{self.backfill_confirm_frames})'
+
+        self._fallback_upgrade_streak = 0
+        if current_target.similarity < self.ema_min_sim:
+            for part in ('upper', 'mid', 'lower'):
+                self._backfill_streaks[part] = 0
+            return 'HOLD(sim)'
+
+        extractor.update_recent_bank(self.recent_bank, t_bank, alpha=self.ema_alpha)
+
+        # 2. 등록 시 가려짐/화면 잘림으로 None이었던 부위가 안전 구간에서 연속 관측되면 1회 보충
+        backfilled = False
+        if t_bank is not None and not t_bank.is_fallback:
+            for part in ('upper', 'mid', 'lower'):
+                need_recent = self.recent_bank is not None and getattr(self.recent_bank, part) is None
+                need_anchor = self.anchor_bank is not None and getattr(self.anchor_bank, part) is None
+                cand_hist = getattr(t_bank, part)
+                if (need_recent or need_anchor) and cand_hist is not None:
+                    self._backfill_streaks[part] += 1
+                    if self._backfill_streaks[part] >= self.backfill_confirm_frames:
+                        if extractor.backfill_part(self.recent_bank, part, cand_hist):
+                            backfilled = True
+                        if extractor.backfill_part(self.anchor_bank, part, cand_hist):
+                            backfilled = True
+                        self._backfill_streaks[part] = 0
+                else:
+                    self._backfill_streaks[part] = 0
+            if backfilled:
+                current_target.similarity, current_target.part_sims = (
+                    extractor.compute_dual_similarity_detail(
+                        self.anchor_bank, self.recent_bank, t_bank
+                    )
+                )
+        else:
+            for part in ('upper', 'mid', 'lower'):
+                self._backfill_streaks[part] = 0
+
+        return 'BACKFILL' if backfilled else 'ACTIVE'
+
     def _lock_target_bank(self, frame: np.ndarray, person: UnifiedTrackedPerson):
         bank = self.current_extractor.extract(
             frame, person.bbox, person.mask_poly, person.keypoints
@@ -397,6 +478,7 @@ class MultiModelTrackerCore:
         self.last_target_world_xy = None
         self.last_target_world_frame = ''
         self.last_target_seen_time = 0.0
+        self._reset_bank_completion_streaks()
 
     def _activate_target(self, person: UnifiedTrackedPerson) -> int:
         """새 타겟 ID와 Anchor 특징 뱅크를 잠그고 SAFE/COEX/SEARCH 카운터를 초기 상태로 리셋합니다."""
@@ -411,6 +493,7 @@ class MultiModelTrackerCore:
         self.last_target_world_xy = None
         self.last_target_world_frame = ''
         self.last_target_seen_time = 0.0
+        self._reset_bank_completion_streaks()
         if self.last_frame is not None:
             self._lock_target_bank(self.last_frame, person)
         return self.target_id
@@ -626,15 +709,13 @@ class MultiModelTrackerCore:
                             best_candidate.is_target = True
                             current_target = best_candidate
 
-                    if current_target is not None and current_target.similarity >= self.ema_min_sim:
-                        extractor.update_recent_bank(
-                            self.recent_bank,
+                    if current_target is not None:
+                        ema_status = self._update_target_banks_safely(
+                            extractor,
+                            current_target,
                             person_banks.get(current_target.track_id),
-                            alpha=self.ema_alpha,
+                            detections,
                         )
-                        ema_status = 'ACTIVE'
-                    else:
-                        ema_status = 'HOLD(sim)'
 
                 # 3. 모드 5 (Adaptive 스위칭)
                 elif self.mode == self.MODE_ADAPTIVE and self.anchor_bank is not None:
@@ -687,19 +768,10 @@ class MultiModelTrackerCore:
                             self.safe_mismatch_count = 0
                             self.recover_candidate_id = None
                             self.recover_confirm_count = 0
-                            # 기본은 타겟 혼자(ema_require_single)이고 유사도>=ema_min_sim일 때만 recent_bank EMA 갱신
-                            if (
-                                (not self.ema_require_single or len(detections) == 1)
-                                and current_target.similarity >= self.ema_min_sim
-                            ):
-                                extractor.update_recent_bank(
-                                    self.recent_bank, t_bank, alpha=self.ema_alpha
-                                )
-                                ema_status = 'ACTIVE'
-                            elif self.ema_require_single and len(detections) != 1:
-                                ema_status = f'HOLD({len(detections)}P)'
-                            else:
-                                ema_status = 'HOLD(sim)'
+                            # 안전 추적 구간에서 EMA 갱신 + 빈 부위(None) 보충 + BBox 폴백 승격 처리
+                            ema_status = self._update_target_banks_safely(
+                                extractor, current_target, t_bank, detections
+                            )
 
                     if current_target is None:
                         adaptive_state = 'SEARCH'

@@ -44,6 +44,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Empty, String
 
+from person_tracker.feature_extractors import PoseKeypointFeatureExtractor
 from person_tracker.gesture_core import (
     GESTURE_FIST,
     GESTURE_OPEN_PALM,
@@ -71,6 +72,30 @@ class GestureTestNode(Node):
     """
 
     BAR_HEIGHT = 38
+    MASK_OVERLAY_ALPHA = 0.34
+
+    # Pose 스켈레톤 연결선 및 히스토그램 3부위 마스크 색상 (BGR)
+    POSE_EDGES = [
+        # 상반신 (Torso / Arms: 하늘·파랑 계열)
+        (5, 6, (255, 200, 50)),
+        (5, 11, (255, 200, 50)),
+        (6, 12, (255, 200, 50)),
+        (11, 12, (255, 200, 50)),
+        (5, 7, (255, 170, 50)),
+        (7, 9, (255, 170, 50)),
+        (6, 8, (255, 170, 50)),
+        (8, 10, (255, 170, 50)),
+        # 중하반신 (허벅지/바지: 주황색)
+        (11, 13, (0, 165, 255)),
+        (12, 14, (0, 165, 255)),
+        # 최하단 (정강이/신발: 마젠타색)
+        (13, 15, (255, 50, 255)),
+        (14, 16, (255, 50, 255)),
+    ]
+    PART_MASK_COLORS = {
+        'active': ((255, 200, 50), (0, 165, 255), (255, 50, 255)),
+        'muted': ((170, 140, 70), (70, 120, 170), (160, 70, 160)),
+    }
 
     def __init__(self):
         super().__init__('gesture_test_node')
@@ -98,6 +123,7 @@ class GestureTestNode(Node):
         self.declare_parameter('publish_cam_tf', False)
         self.declare_parameter('show_gui', True)
         self.declare_parameter('show_reid_viz', True)
+        self.declare_parameter('show_pose_mask', True)
 
         # 트래커 / ReID / EMA 주요 임계 파라미터 (launch/CLI에서 --ros-args -p 로 일괄 조정 가능)
         tracker_param_defaults = {
@@ -129,6 +155,7 @@ class GestureTestNode(Node):
         self.publish_target_topics = bool(self.get_parameter('publish_target_topics').value)
         self.show_gui = bool(self.get_parameter('show_gui').value)
         self.show_reid_viz = bool(self.get_parameter('show_reid_viz').value)
+        self.show_pose_mask = bool(self.get_parameter('show_pose_mask').value)
         imgsz = int(self.get_parameter('imgsz').value)
         device = str(self.get_parameter('device').value)
         fist_hold = int(self.get_parameter('fist_hold_frames').value)
@@ -181,10 +208,12 @@ class GestureTestNode(Node):
         )
         self.last_loc_result: Optional[TargetLocalizationResult] = None
         self.last_loc_log_time = 0.0
+        self._current_frame_stamp = None
 
         self._cap = None
         self._cap_lock = threading.Lock()
         self._latest_cam_frame: Optional[np.ndarray] = None
+        self._latest_cam_stamp = None
         self._stop_event = threading.Event()
         self._cap_thread: Optional[threading.Thread] = None
         self._cam_timer = None
@@ -305,31 +334,35 @@ class GestureTestNode(Node):
             if ret and frame is not None:
                 if frame.shape[1] != 640 or frame.shape[0] != 480:
                     frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+                stamp_msg = self.get_clock().now().to_msg()
                 with self._cap_lock:
                     self._latest_cam_frame = frame
+                    self._latest_cam_stamp = stamp_msg
             else:
                 time.sleep(0.02)
 
     def _poll_local_frame(self):
         with self._cap_lock:
             frame = self._latest_cam_frame
+            frame_stamp = self._latest_cam_stamp
             self._latest_cam_frame = None
+            self._latest_cam_stamp = None
         if frame is not None:
-            self.handle_frame(frame)
+            self.handle_frame(frame, frame_stamp=frame_stamp)
 
     def _compressed_cb(self, msg: CompressedImage):
         try:
             np_arr = np.frombuffer(msg.data, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is not None:
-                self.handle_frame(frame)
+                self.handle_frame(frame, frame_stamp=msg.header.stamp)
         except Exception as exc:
             self.get_logger().warn(f'Compressed decode error: {exc}', throttle_duration_sec=5.0)
 
     def _raw_cb(self, msg: Image):
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.handle_frame(frame)
+            self.handle_frame(frame, frame_stamp=msg.header.stamp)
         except Exception as exc:
             self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
 
@@ -409,6 +442,9 @@ class GestureTestNode(Node):
         elif key in (ord('p'), ord('P')):
             self.publish_target_topics = not self.publish_target_topics
             self.get_logger().info(f'[타겟 토픽 발행] publish_target_topics={self.publish_target_topics}')
+        elif key in (ord('m'), ord('M')):
+            self.show_pose_mask = not self.show_pose_mask
+            self.get_logger().info(f'[포즈/마스크 오버레이] show_pose_mask={self.show_pose_mask}')
 
     def _publish_status(self, status_text: str):
         if status_text != self.last_status_str:
@@ -488,10 +524,11 @@ class GestureTestNode(Node):
         pub_tag = ''
         if self.localizer is not None and not self.publish_target_topics:
             pub_tag = ' | PUB:OFF'
+        mask_tag = '' if self.show_pose_mask else ' | MASK:OFF'
         state_txt = (
             f'FPS:{self.fps:4.1f} | Total:{self.total_ms:4.1f}ms | '
             f'Gesture:{self.gesture_ms:4.1f}ms | CPU:{self.cpu_percent:4.1f}% | '
-            f'{"SCANNING" if gesture_active else "LOCKED"}{adapt_str}{pub_tag}'
+            f'{"SCANNING" if gesture_active else "LOCKED"}{adapt_str}{pub_tag}{mask_tag}'
         )
         cv2.rectangle(frame, (0, self.BAR_HEIGHT), (w, self.BAR_HEIGHT + 24), (24, 24, 24), -1)
         cv2.putText(
@@ -544,16 +581,114 @@ class GestureTestNode(Node):
             cv2.LINE_AA,
         )
 
+    def _draw_pose_and_mask_overlays(
+        self,
+        vis: np.ndarray,
+        src_frame: np.ndarray,
+        detections: List[UnifiedTrackedPerson],
+    ):
+        """히스토그램 추출용 3부위 마스크를 반투명 블렌딩하고 Pose 스켈레톤·관절 마커를 그립니다."""
+        if not self.show_pose_mask or self.tracker is None or len(detections) == 0:
+            return
+
+        extractor = self.tracker.current_extractor
+        in_guard = (
+            self.tracker.mode == self.tracker.MODE_ADAPTIVE
+            and self.tracker.metrics.adaptive_state == 'GUARD'
+        )
+        target_locked = self.tracker.target_id is not None
+
+        mask_overlay = vis.copy()
+        contour_items = []
+        for p in detections:
+            exclude_boxes = (
+                [o.bbox for o in detections if o.track_id != p.track_id] if in_guard else None
+            )
+            part_masks = extractor.extract_part_masks(
+                src_frame,
+                p.bbox,
+                mask_poly=p.mask_poly,
+                keypoints=p.keypoints,
+                exclude_boxes=exclude_boxes,
+            )
+            if part_masks is None:
+                continue
+            (rx1, ry1, rx2, ry2), upper_m, mid_m, lower_m = part_masks
+            sub = mask_overlay[ry1:ry2, rx1:rx2]
+            palette = self.PART_MASK_COLORS[
+                'active' if (p.is_target or not target_locked) else 'muted'
+            ]
+            for part_mask, color in zip((upper_m, mid_m, lower_m), palette):
+                if part_mask.any():
+                    sub[part_mask > 0] = color
+                    contour_items.append((rx1, ry1, part_mask, color))
+
+        if contour_items:
+            cv2.addWeighted(
+                mask_overlay,
+                self.MASK_OVERLAY_ALPHA,
+                vis,
+                1.0 - self.MASK_OVERLAY_ALPHA,
+                0,
+                vis,
+            )
+            # 선분 확장 영역(`mid`/`lower` 스트립 포함)이 어두운 옷 위에서도 경계가 보이도록 외곽선 표시
+            for rx1, ry1, part_mask, color in contour_items:
+                contours, _ = cv2.findContours(
+                    part_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                valid_cnts = [c for c in contours if cv2.contourArea(c) >= 12.0]
+                if valid_cnts:
+                    cv2.drawContours(
+                        vis,
+                        valid_cnts,
+                        -1,
+                        color,
+                        1,
+                        lineType=cv2.LINE_AA,
+                        offset=(rx1, ry1),
+                    )
+
+        kp_thresh = PoseKeypointFeatureExtractor.KP_CONF_THRESH
+        for p in detections:
+            if p.keypoints is None or len(p.keypoints) < 17:
+                continue
+            kp = p.keypoints
+            emph = p.is_target or not target_locked
+            for i1, i2, edge_color in self.POSE_EDGES:
+                if float(kp[i1, 2]) >= kp_thresh and float(kp[i2, 2]) >= kp_thresh:
+                    pt1 = (int(kp[i1, 0]), int(kp[i1, 1]))
+                    pt2 = (int(kp[i2, 0]), int(kp[i2, 1]))
+                    cv2.line(
+                        vis,
+                        pt1,
+                        pt2,
+                        edge_color if emph else (150, 150, 150),
+                        2 if emph else 1,
+                        cv2.LINE_AA,
+                    )
+
+            for idx in range(5, 17):
+                if float(kp[idx, 2]) >= kp_thresh:
+                    pt = (int(kp[idx, 0]), int(kp[idx, 1]))
+                    radius = 4 if emph else 2
+                    color = (0, 255, 255) if emph else (190, 190, 190)
+                    if emph:
+                        cv2.circle(vis, pt, radius + 1, (30, 30, 30), 1, cv2.LINE_AA)
+                    cv2.circle(vis, pt, radius, color, -1, cv2.LINE_AA)
+
     def _estimate_candidate_spatial(self, person: UnifiedTrackedPerson, w: int, h: int):
         """ReID 후보 검증용 3D 위치 추정 콜백(토픽 발행 없이 map 또는 base_link XY 좌표와 센서 출처 반환)."""
         if self.localizer is None:
             return None
-        res = self.localizer.localize_target(person, w, h, publish=False)
+        res = self.localizer.localize_target(
+            person, w, h, publish=False, frame_stamp=self._current_frame_stamp
+        )
         if res.map_xyz is not None:
             return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source
         return (res.base_xyz[0], res.base_xyz[1]), 'base_link', res.source
 
-    def handle_frame(self, frame: np.ndarray):
+    def handle_frame(self, frame: np.ndarray, frame_stamp=None):
         """
         프레임 1장을 입력받아 전체 추적 -> 제스처 등록 -> 3D 위치 추정 -> GUI 렌더링을 수행하는 메인 파이프라인.
 
@@ -571,6 +706,7 @@ class GestureTestNode(Node):
         t_start = time.perf_counter()
         now_wall = time.time()
         self.last_frame_wall_time = now_wall
+        self._current_frame_stamp = frame_stamp
 
         dt = now_wall - self.prev_time
         self.prev_time = now_wall
@@ -662,7 +798,11 @@ class GestureTestNode(Node):
             if target is not None and self.localizer is not None:
                 h_f, w_f = frame.shape[:2]
                 loc_res = self.localizer.localize_target(
-                    target, w_f, h_f, publish=self.publish_target_topics
+                    target,
+                    w_f,
+                    h_f,
+                    publish=self.publish_target_topics,
+                    frame_stamp=frame_stamp,
                 )
                 self.last_loc_result = loc_res
                 if now_wall - self.last_loc_log_time >= 1.0:
@@ -673,8 +813,13 @@ class GestureTestNode(Node):
                         map_str = f'X={mx:+.2f}m, Y={my:+.2f}m [{loc_res.map_source}]'
                     else:
                         map_str = 'map TF 대기중'
+                    sync_str = (
+                        f' ({loc_res.sync_dt_ms:+.0f}ms)'
+                        if loc_res.sync_dt_ms is not None
+                        else ''
+                    )
                     self.get_logger().info(
-                        f'[타겟 위치 ID={loc_res.track_id} | {loc_res.source}] '
+                        f'[타겟 위치 ID={loc_res.track_id} | {loc_res.source}{sync_str}] '
                         f'base: ({bx:+.2f},{by:+.2f})m ({loc_res.base_dist_m:.2f}m) | map: {map_str}'
                     )
             else:
@@ -699,6 +844,7 @@ class GestureTestNode(Node):
 
         if self.show_gui:
             vis = frame.copy()
+            self._draw_pose_and_mask_overlays(vis, frame, detections)
             for p in detections:
                 x1, y1, x2, y2 = p.bbox
                 if p.is_target:
@@ -716,7 +862,8 @@ class GestureTestNode(Node):
                     if self.last_loc_result is not None:
                         lr = self.last_loc_result
                         bx, by, _ = lr.base_xyz
-                        coord_txt = f'Bot:({bx:+.2f},{by:+.2f})m {lr.base_dist_m:.2f}m [{lr.source}]'
+                        sync_tag = f' {lr.sync_dt_ms:+.0f}ms' if lr.sync_dt_ms is not None else ''
+                        coord_txt = f'Bot:({bx:+.2f},{by:+.2f})m {lr.base_dist_m:.2f}m [{lr.source}{sync_tag}]'
                         if lr.map_xyz is not None:
                             mx, my, _ = lr.map_xyz
                             coord_txt += f' Map:({mx:+.2f},{my:+.2f})m'
