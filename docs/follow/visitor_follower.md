@@ -1,6 +1,17 @@
 # visitor_follower 실행하면 일어나는 일
 
-`src/arti_follow/arti_follow/visitor_follower.py` 한 파일. 로봇 1대(`/robot1`)가 관람객 1명을 맡아
+노드 하나(`visitor_follower`), 파일은 기능별로 넷 (`src/arti_follow/arti_follow/`):
+
+| 파일 | 맡는 것 |
+|---|---|
+| `visitor_follower.py` | 노드 본체: 파라미터, 구독·발행·액션 서버 등록, 입력 콜백(`on_person` 등), `control`/`step`(상태 분기), 진단 |
+| `prepare.py` | ① 호출·등록 `prepare_tour`: `run_prepare`, `undock`, `localize`, `face_start`, `wait_visitor`, `registered_wait` |
+| `tour.py` | ② 관람 `start_tour`: `run_tour`, `follow`, `search`, `end_tour`, 작품 설명 feedback |
+| `motion.py` | 주행·추정 공통: `PersonKF`(칼만 필터), `face`, `obstacles`·`field`·`dwa`, `ramp`, `drive` |
+
+`class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node)` — 세 파일의 함수를 상속해서 한 노드로 쓴다 (`self.state`, lock 공유).
+
+로봇 1대(`/robot1`)가 관람객 1명을 맡아
 **관람 시작 → 등록 → 추종 → 분실 처리 → 관람 끝**까지 움직임을 담당한다.
 작품 설명 판단은 `artwork_zone`, 음성은 `arti_audio`의 `guide_audio_node`, 사람 인식은 `person_tracker`가 한다.
 
