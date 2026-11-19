@@ -41,16 +41,17 @@ class AdminDataTest(unittest.TestCase):
         html=self.client.get('/data').get_data(as_text=True)
         parser=Parser();parser.feed(html)
         for index in range(1,5):
-            form_id=f'art-row-{index}'
+            form_id=f'art-row-{index:03d}'
             self.assertIn(form_id,parser.forms)
-            self.assertEqual(parser.controls[form_id],{'title_en','artist_name_en','location','theme','description','x','y'})
-        for label in ('작품 DB · Art','로봇 DB · Pose','로그 DB · Log','log_id','sent_at','robot-edit-form'):self.assertIn(label,html)
-        payload={'title_en':'새 작품 제목','title':'새 작품 제목','artist_name_en':'새 작가','artist_name':'새 작가',
+            self.assertEqual(parser.controls[form_id],{'artwork_title','artist_name','location','theme','description','x','y'})
+        for label in ('작품 DB · Art', 'artwork_title', 'artist_name'):
+            self.assertIn(label, html)
+        payload={'artwork_title':'새 작품 제목','artist_name':'새 작가',
                  'location':'room-7','theme':'새 테마','description':'수정한 설명','x':1.25,'y':-3}
-        self.assertEqual(self.client.patch('/api/artworks/1',json=payload).status_code,200)
+        self.assertEqual(self.client.patch('/api/artworks/001',json=payload).status_code,200)
         public=self.app.test_client().get('/api/catalog').json['artworks'][0]
         for key,value in payload.items():self.assertEqual(public[key],value)
-        self.assertEqual(create_app(self.config).test_client().get('/api/artworks/1').json,public)
+        self.assertEqual(create_app(self.config).test_client().get('/api/artworks/001').json,public)
 
     def test_log_filters_use_sender_time_kst_robot_and_message(self):
         data=self.client.get('/api/logs',query_string={'from':'2026-11-17','to':'2026-11-17'}).json

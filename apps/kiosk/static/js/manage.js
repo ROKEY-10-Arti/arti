@@ -25,12 +25,12 @@ document.addEventListener('input', event => {
   if (!form) return;
   if (form.matches('.artwork-row-form, .artwork-form, #robot-edit-form')) form.dataset.dirty = 'true';
 });
-function updateArtworkForms(index, data, savedForm) {
-  for (const form of artworkForms.filter(form => form.dataset.index === index)) {
+function updateArtworkForms(artworkId, data, savedForm) {
+  for (const form of artworkForms.filter(form => form.dataset.artworkId === artworkId)) {
     if (form !== savedForm && form.dataset.dirty === 'true') continue;
     for (const field of form.elements) if (field.name in data) field.value = data[field.name] ?? '';
     const heading = form.querySelector('h3');
-    if (heading) heading.textContent = `${data.artwork_code} · ${data.title}`;
+    if (heading) heading.textContent = `${data.artwork_id} · ${data.artwork_title}`;
   }
 }
 for (const form of artworkForms) form.addEventListener('submit', async event => {
@@ -40,12 +40,12 @@ for (const form of artworkForms) form.addEventListener('submit', async event => 
   if (button.disabled) return;
   const controls = [...form.elements];
   try {
-    const payload = artworkPayload(Object.fromEntries(new FormData(form)), form.matches('.artwork-row-form'));
+    const payload = artworkPayload(Object.fromEntries(new FormData(form)));
     controls.forEach(control => {control.disabled = true;});
     message.textContent = '저장 중…';
-    const data = await jsonRequest(`/api/artworks/${form.dataset.index}`, writeOptions('PATCH', payload));
+    const data = await jsonRequest(`/api/artworks/${form.dataset.artworkId}`, writeOptions('PATCH', payload));
     form.dataset.dirty = 'false';
-    updateArtworkForms(form.dataset.index, data, form);
+    updateArtworkForms(form.dataset.artworkId, data, form);
     message.textContent = '저장 완료 · 키오스크에 자동 반영';
   } catch (error) {
     message.textContent = error.message || '서버 연결을 확인해 주세요.';

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {artworkPayload, posePayload, logRows, robotRows, numericValue} from '../static/js/admin-data.js';
-const inline = artworkPayload({title_en:'new title',artist_name_en:'new artist',location:'007',theme:'theme',description:'text',x:'0',y:''}, true);
-assert.deepEqual(inline,{title_en:'new title',title:'new title',artist_name_en:'new artist',artist_name:'new artist',location:'007',theme:'theme',description:'text',x:0,y:null});
-assert.deepEqual(artworkPayload({year:'',title:'local title',title_en:'English',x:'-2.5',y:'3'}),{year:null,title:'local title',title_en:'English',x:-2.5,y:3});
+const inline = artworkPayload({artwork_title:'new title',artist_name:'new artist',location:'007',theme:'theme',description:'text',x:'0',y:''});
+assert.deepEqual(inline,{artwork_title:'new title',artist_name:'new artist',location:'007',theme:'theme',description:'text',x:0,y:null});
+assert.deepEqual(artworkPayload({artwork_title:'Artwork title',image_alt:'',x:'-2.5',y:'3'}),{artwork_title:'Artwork title',image_alt:'',x:-2.5,y:3});
 for (const value of ['NaN','Infinity','oops','1e13']) assert.throws(()=>numericValue(value));
 assert.deepEqual(posePayload({x:'0',y:'1',theta:'-1.2',frame_id:'map'},true),{active:true,frame_id:'map',pose:{x:0,y:1,theta:-1.2}});
 assert.deepEqual(posePayload({x:'',y:'',theta:'',frame_id:'map'},false),{active:false,frame_id:'map',pose:null});

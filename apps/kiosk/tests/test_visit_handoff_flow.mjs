@@ -8,7 +8,7 @@ async function checkFlow(manual) {
   let time=0, timerId=0;
   const timers=new Map(), sources=[], documentEvents=new Map(), windowEvents=new Map(), writes=[];
   const root={innerHTML:'', querySelectorAll:()=>[]};
-  const overlay={innerHTML:'', firstElementChild:null, querySelector:()=>null};
+  const overlay={innerHTML:'', firstElementChild:null, querySelector:()=>({focus(){}})};
   const stub={focus(){},classList:{add(){},remove(){},toggle(){}},textContent:'',querySelector:()=>null};
   const storage=new Map([['arti-preparation','session-handoff']]);
   const session={id:'session-handoff', mode:'course', courseId:null, artworkIds:['art-01'], visitedIds:[], status:'calling', robotId:'DEV-ARTI'};
@@ -17,7 +17,7 @@ async function checkFlow(manual) {
     addEventListener(key,fn){this.handlers[key]=fn;}
     close(){this.closed=true;}
   }
-  install('document',{hidden:false, activeElement:null, querySelector:selector=>{
+  install('document',{hidden:false, activeElement:null, body:stub, querySelector:selector=>{
     if(selector==='#app')return root;
     if(selector==='#overlay')return overlay;
     if(['#main','#announcer','#toast','h1'].includes(selector))return stub;
@@ -34,7 +34,7 @@ async function checkFlow(manual) {
       writes.push(JSON.parse(options.body));
       return {ok:true,json:async()=>({...session,status:'active',startedAt:123})};
     }
-    const data=url==='/api/catalog'?{artworks:[{id:'art-01',artwork_index:1,artwork_id:'001',title:'artwork1',artist_name:'artist1',title_en:'artwork1',artist_name_en:'artist1',theme:'theme1',description:'description1',location:'location1',image_path:'/static/art/art-001.png'}],courses:[]}
+    const data=url==='/api/catalog'?{artworks:[{artwork_id:'001',artwork_title:'artwork1',artist_name:'artist1',theme:'theme1',description:'description1',location:'location1',image_path:'/static/art/art-001.png'}],courses:[]}
       :url==='/api/auth/status'?{authenticated:false}:url==='/api/test-mode'?{enabled:false}:session;
     return {ok:true,json:async()=>data};
   });
@@ -45,7 +45,7 @@ async function checkFlow(manual) {
     const source=sources.find(source=>source.url.includes('/preparation/events'));
     assert(source);
     source.handlers.preparation({data:JSON.stringify({session_id:session.id,phase:'ready',message:'준비 완료',robot_id:'DEV-ARTI',progress:1,dev_mode:true})});
-    const click=async action=>{const button={dataset:{action},disabled:false};await documentEvents.get('click')({target:{closest:()=>button}});};
+    const click=async (action, dataset={})=>{const button={dataset:{action, ...dataset},disabled:false};await documentEvents.get('click')({target:{closest:()=>button}});};
     await click('start-tour');
     assert(root.innerHTML.includes('즐거운 관람 되세요!'));
     assert(!root.innerHTML.includes('지금, 이 작품') && !root.innerHTML.includes('description1'));
@@ -58,6 +58,13 @@ async function checkFlow(manual) {
     else {time=10000;pending.fn();}
     assert(root.innerHTML.includes('page-home'));
     assert.deepEqual(writes,[{status:'active'}], '첫 화면 복귀는 관람 완료/취소나 가짜 방문 기록을 저장하지 않습니다.');
+    await click('exhibition');
+    assert.match(root.innerHTML, /data-action="view-art" data-id="001"/);
+    assert.match(root.innerHTML, /<h3>artwork1<\/h3>/);
+    await click('view-art', {id:'001'});
+    assert.match(overlay.innerHTML, /<h2>artwork1<\/h2>/);
+    assert.match(overlay.innerHTML, /<p class="artwork-artist">artist1<\/p>/);
+    assert.match(overlay.innerHTML, /<p>description1<\/p>/);
   } finally {
     windowEvents.get('pagehide')?.();
     Date.now=nativeNow;

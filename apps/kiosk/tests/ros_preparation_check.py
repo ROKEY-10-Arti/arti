@@ -109,7 +109,7 @@ def main():
                 if exists:
                     with sqlite3.connect(app.config['DATABASE']) as db:
                         expected, = db.execute(
-                            'SELECT description FROM Art WHERE artwork_index=?', (artwork_id,)
+                            'SELECT description FROM Art WHERE artwork_id=?', (f"{artwork_id:03d}",)
                         ).fetchone()
                     assert future.result().description == expected
 

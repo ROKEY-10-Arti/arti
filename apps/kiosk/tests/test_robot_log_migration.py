@@ -13,7 +13,7 @@ class RobotLogMigrationTest(unittest.TestCase):
             config={'TESTING':True,'DATABASE':path,'ROS_PREPARATION_REQUIRED':False}
             app=create_app(config)
             client=login_admin(app.test_client())
-            client.patch('/api/artworks/1',json={'title_en':'보존할 작품','location':'room-9','x':4.2})
+            client.patch('/api/artworks/001',json={'artwork_title':'보존할 작품','location':'room-9','x':4.2})
             record=client.post('/api/sessions',json={'mode':'free','artworkIds':['art-01']}).json
             with sqlite3.connect(path) as db:
                 before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in ('Art','Pose','admin_users','admin_sessions','courses')}

@@ -3,28 +3,24 @@
 import json
 
 
-# 기존 키오스크/API의 필드 이름은 유지하면서 실제 SQL 컬럼을 사용합니다.
-ARTWORK_SELECT = """SELECT artwork_index, artist_name, theme, title, description,
-    artwork_code, artwork_title AS title_en, artist AS artist_name_en,
-    image_path, image_alt, artwork_id, location, x, y, x_min, x_max, y_min, y_max FROM Art"""
+ARTWORK_SELECT = """SELECT artwork_id, artwork_title, artist_name, theme, description,
+    image_path, image_alt, location, x, y, x_min, x_max, y_min, y_max FROM Art"""
 SESSION_SELECT = """SELECT *, record_id AS id, route AS course_id,
     created_time AS created_at, end_time AS ended_at FROM TourSession"""
-ARTWORK_COLUMNS = {'title_en': 'artwork_title', 'artist_name_en': 'artist'}
 
 
 def insert_artwork(db, art, replace=False):
-    mapped = {ARTWORK_COLUMNS.get(key, key): value for key, value in art.items()}
     if replace:
-        updates = {key: value for key, value in mapped.items()
-                   if key not in {'artwork_index', 'artwork_id'}}
+        updates = {key: value for key, value in art.items()
+                   if key not in {'artwork_id', 'x', 'y'}}
         db.execute(
             f"UPDATE Art SET {', '.join(field + '=?' for field in updates)} WHERE artwork_id=?",
             [*updates.values(), art['artwork_id']],
         )
     else:
         db.execute(
-            f"INSERT OR IGNORE INTO Art ({', '.join(mapped)}) VALUES ({', '.join('?' for _ in mapped)})",
-            list(mapped.values()),
+            f"INSERT OR IGNORE INTO Art ({', '.join(art)}) VALUES ({', '.join('?' for _ in art)})",
+            list(art.values()),
         )
 
 
@@ -45,30 +41,42 @@ def initialize_database(db, root):
                 # 기존 관람 상태는 키오스크 내부 동작을 위해 보존합니다.
                 db.execute('ALTER TABLE Log RENAME TO TourSession')
                 db.execute('DROP INDEX IF EXISTS log_created_time')
-        rebuild_art = 'Art' in old_tables and db.execute('PRAGMA user_version').fetchone()[0] < 5
+        previous_art_columns = {row['name'] for row in db.execute('PRAGMA table_info(Art)')}
+        rebuild_art = 'artwork_index' in previous_art_columns
         if rebuild_art:
-            db.execute('ALTER TABLE Art RENAME TO Art_previous_v4')
+            db.execute('ALTER TABLE Art RENAME TO Art_before_v7')
         for statement in (root / 'schema.sql').read_text(encoding='utf-8').split(';'):
             if statement.strip():
                 db.execute(statement)
 
-        for column in ('year', 'medium', 'curator_notes'):
-            if column in {row['name'] for row in db.execute('PRAGMA table_info(Art)')}:
-                db.execute(f'ALTER TABLE Art DROP COLUMN {column}')
         if rebuild_art:
-            columns = ', '.join(row['name'] for row in db.execute('PRAGMA table_info(Art_previous_v4)') if row['name'] not in ('year', 'medium', 'curator_notes'))
-            db.execute(f'INSERT INTO Art ({columns}) SELECT {columns} FROM Art_previous_v4')
-            db.execute('DROP TABLE Art_previous_v4')
+            bounds = ('x_min', 'x_max', 'y_min', 'y_max')
+            old_bounds = ', '.join(field if field in previous_art_columns else 'NULL' for field in bounds)
+            db.execute(f"""INSERT INTO Art
+                (artwork_id, artwork_title, artist_name, location, theme, description,
+                 x, y, image_path, image_alt, x_min, x_max, y_min, y_max)
+                SELECT artwork_id,
+                       CASE WHEN trim(artwork_title) = '' THEN title ELSE artwork_title END,
+                       CASE WHEN trim(artist_name) = '' THEN artist ELSE artist_name END,
+                       location, theme, description, x, y, image_path, image_alt, {old_bounds}
+                FROM Art_before_v7""")
+            db.execute('DROP TABLE Art_before_v7')
 
+        stored_coordinate_ids = {row['artwork_id'] for row in db.execute('SELECT artwork_id FROM Art')}
         # 이전과 테이블 교체를 하나의 트랜잭션으로 처리하여 실패하면 원래 상태로 되돌립니다.
         if 'artworks' in old_tables:
             for row in db.execute('SELECT * FROM artworks').fetchall():
                 old = dict(row)
+                artwork_id = f"{old['artwork_index']:03d}"
                 art = next(dict(item) for item in catalog['artworks']
-                           if item['artwork_index'] == old['artwork_index'])
+                           if item['artwork_id'] == artwork_id)
                 art.update({key: value for key, value in old.items() if key in art})
+                art['artwork_title'] = old.get('title_en') or old.get('title') or art['artwork_title']
+                art['artist_name'] = old.get('artist_name') or old.get('artist_name_en') or art['artist_name']
                 art['theme'] = {'자연': 'nature', '색채': 'color', '추상': 'abstract'}.get(art['theme'], art['theme'])
                 insert_artwork(db, art)
+                if {'x', 'y'} & old.keys():
+                    stored_coordinate_ids.add(artwork_id)
             db.execute('DROP TABLE artworks')
         if 'robots' in old_tables:
             db.execute('''INSERT INTO Pose (robot_id, x, y, theta, active, frame_id, pose_updated_at)
@@ -86,7 +94,7 @@ def initialize_database(db, root):
 
         for art in catalog['artworks']:
             insert_artwork(db, art)
-        # 예전 임시 작품만 한 번 갱신하며, 이미 수정한 실제 작품은 보존합니다.
+        # 새 전시 데이터는 스키마 이전 여부와 관계없이 버전당 한 번 반영합니다.
         artwork_version = catalog.get('artwork_version')
         if artwork_version and not db.execute(
             'SELECT 1 FROM catalog_migrations WHERE version=?', (artwork_version,)
@@ -99,12 +107,22 @@ def initialize_database(db, root):
         if content_version and not db.execute(
             'SELECT 1 FROM catalog_migrations WHERE version=?', (content_version,)
         ).fetchone():
-            content_fields = ('title', 'title_en', 'artist_name', 'artist_name_en', 'location', 'theme', 'description')
-            for art in catalog['artworks']:
-                assignments = ', '.join(ARTWORK_COLUMNS.get(field, field) + '=?' for field in content_fields)
-                db.execute(f'UPDATE Art SET {assignments} WHERE artwork_id=?',
-                           [art[field] for field in content_fields] + [art['artwork_id']])
+            if not rebuild_art:
+                content_fields = ('artwork_title', 'artist_name', 'location', 'theme', 'description')
+                assignments = ', '.join(field + '=?' for field in content_fields)
+                for art in catalog['artworks']:
+                    db.execute(f'UPDATE Art SET {assignments} WHERE artwork_id=?',
+                               [art[field] for field in content_fields] + [art['artwork_id']])
             db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (content_version,))
+        for field, version_key in (('artist_name', 'artwork_artist_version'),
+                                   ('location', 'artwork_location_version')):
+            field_version = catalog.get(version_key)
+            if field_version and not db.execute(
+                'SELECT 1 FROM catalog_migrations WHERE version=?', (field_version,)
+            ).fetchone():
+                db.executemany(f'UPDATE Art SET {field}=? WHERE artwork_id=?',
+                               [(art[field], art['artwork_id']) for art in catalog['artworks']])
+                db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (field_version,))
         for course in catalog['courses']:
             db.execute('INSERT OR IGNORE INTO courses (id, data) VALUES (?, ?)',
                        (course['id'], json.dumps(course, ensure_ascii=False)))
@@ -126,12 +144,14 @@ def initialize_database(db, root):
         # 위치 미수신 상태는 NULL입니다. robot-02는 수신/활성화 전까지 비활성입니다.
         db.execute("INSERT OR IGNORE INTO Pose (robot_id, active) VALUES ('robot-01', 1)")
         db.execute("INSERT OR IGNORE INTO Pose (robot_id, active) VALUES ('robot-02', 0)")
-        if "x_min" not in {row["name"] for row in db.execute("PRAGMA table_info(Art)")}:
-            for field in ("x_min", "x_max", "y_min", "y_max"):
-                db.execute(f"ALTER TABLE Art ADD COLUMN {field} REAL")
+        if 'x_min' not in previous_art_columns:
             ranges = [(-2.56,-2.51,1.02,1.45), (-2.52,3.51,2.5,4.01),
                       (-1.51,-1.02,5.14,5.15), (0.06,0.43,3.51,3.96)]
-            for index, (left,right,bottom,top) in enumerate(ranges, 1):
-                db.execute("UPDATE Art SET x_min=?,x_max=?,y_min=?,y_max=?,x=?,y=? WHERE artwork_index=?",
-                           (left,right,bottom,top,round((left+right)/2,4),round((bottom+top)/2,4),index))
-        db.execute('PRAGMA user_version = 6')
+            for index, (left, right, bottom, top) in enumerate(ranges, 1):
+                artwork_id = f'{index:03d}'
+                db.execute("UPDATE Art SET x_min=?,x_max=?,y_min=?,y_max=? WHERE artwork_id=?",
+                           (left, right, bottom, top, artwork_id))
+                if artwork_id not in stored_coordinate_ids:
+                    db.execute("UPDATE Art SET x=?,y=? WHERE artwork_id=?",
+                               (round((left + right) / 2, 4), round((bottom + top) / 2, 4), artwork_id))
+        db.execute('PRAGMA user_version = 7')

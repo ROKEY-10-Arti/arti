@@ -18,7 +18,7 @@ function environment() {
 
 // 같은 페이지에서 DB/API 응답이 바뀌면 표와 선택 경로가 최신 값을 사용합니다.
 {
-  let row = {artwork_index: 1, artwork_id: '001', title: 'artwork1', title_en: 'artwork1', artist_name: 'artist1', artist_name_en: 'artist1', location: 'location1', theme: 'theme1', description: 'description1'};
+  let row = {artwork_id: '001', artwork_title: 'artwork1', artist_name: 'artist1', location: 'location1', theme: 'theme1', description: 'description1'};
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     assert.equal(url, '/api/catalog'); assert.equal(options.cache, 'no-cache');
@@ -27,9 +27,9 @@ function environment() {
   try {
     assert.equal(await loadCatalog(), true);
     assert.equal(await loadCatalog(), false, 'Unchanged content must not reset the checkbox DOM');
-    row = {...row, title_en: 'Updated from SQL', artist_name_en: 'New Artist', location: 'new-room', theme: 'updated-theme', description: 'New description'};
+    row = {...row, artwork_title: 'Updated from SQL', artist_name: 'New Artist', location: 'new-room', theme: 'updated-theme', description: 'New description'};
     assert.equal(await loadCatalog(), true);
-    const markup = courseSelection(artworks, ['art-01']);
+    const markup = courseSelection(artworks, ['001']);
     for (const value of ['Updated from SQL','New Artist','new-room','updated-theme','New description']) assert(markup.includes(value));
     assert(markup.includes(' checked'), 'Catalog changes must preserve selected artwork IDs');
   } finally { globalThis.fetch = originalFetch; }

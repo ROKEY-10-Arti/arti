@@ -21,48 +21,43 @@
       <summary id="artworks-heading">작품 DB · Art <small>표에서 수정 후 행별 저장</small></summary>
       <p>저장한 작품 정보는 DB에 보관됩니다. 키오스크 작품 화면은 연결이 정상일 때 약 3초마다 변경 사항을 확인합니다. 작품 ID는 고정입니다.</p>
       <div class="table-wrap"><table class="art-editor">
-        <thead><tr><th scope="col">artwork_id</th><th scope="col">artwork_title</th><th scope="col">artist</th><th scope="col">location</th><th scope="col">theme</th><th scope="col">description</th><th scope="col">x (m)</th><th scope="col">y (m)</th><th scope="col">저장</th></tr></thead>
-        <tbody>{% for art in catalog.artworks %}{% set form_id = 'art-row-' ~ art.artwork_index %}<tr data-art-index="{{ art.artwork_index }}">
+        <thead><tr><th scope="col">artwork_id</th><th scope="col">artwork_title</th><th scope="col">artist_name</th><th scope="col">location</th><th scope="col">theme</th><th scope="col">description</th><th scope="col">x (m)</th><th scope="col">y (m)</th><th scope="col">저장</th></tr></thead>
+        <tbody>{% for art in catalog.artworks %}{% set form_id = 'art-row-' ~ art.artwork_id %}<tr data-artwork-id="{{ art.artwork_id }}">
           <th scope="row"><code>{{ art.artwork_id }}</code></th>
-          <td><input form="{{ form_id }}" name="title_en" value="{{ art.title_en }}" aria-label="작품 {{ art.artwork_id }} 제목" required maxlength="200"></td>
-          <td><input form="{{ form_id }}" name="artist_name_en" value="{{ art.artist_name_en }}" aria-label="작품 {{ art.artwork_id }} 작가" required maxlength="200"></td>
+          <td><input form="{{ form_id }}" name="artwork_title" value="{{ art.artwork_title }}" aria-label="작품 {{ art.artwork_id }} 제목" required maxlength="200"></td>
+          <td><input form="{{ form_id }}" name="artist_name" value="{{ art.artist_name }}" aria-label="작품 {{ art.artwork_id }} 작가" required maxlength="200"></td>
           <td><input form="{{ form_id }}" name="location" value="{{ art.location }}" aria-label="작품 {{ art.artwork_id }} 위치" required maxlength="64"></td>
           <td><input form="{{ form_id }}" name="theme" value="{{ art.theme }}" aria-label="작품 {{ art.artwork_id }} 테마" required maxlength="200"></td>
           <td><textarea form="{{ form_id }}" name="description" rows="2" aria-label="작품 {{ art.artwork_id }} 설명" required maxlength="10000">{{ art.description }}</textarea></td>
           <td>{{ art.x_min }} ~ {{ art.x_max }}<br>대표 x <input form="{{ form_id }}" name="x" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.x if art.x is not none else '' }}" aria-label="작품 {{ art.artwork_id }} x 좌표"></td>
           <td>{{ art.y_min }} ~ {{ art.y_max }}<br>대표 y <input form="{{ form_id }}" name="y" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.y if art.y is not none else '' }}" aria-label="작품 {{ art.artwork_id }} y 좌표"></td>
-          <td><form id="{{ form_id }}" class="artwork-row-form" data-index="{{ art.artwork_index }}"><button type="submit">저장</button><p class="save-message" role="status" aria-live="polite"></p></form></td>
+          <td><form id="{{ form_id }}" class="artwork-row-form" data-artwork-id="{{ art.artwork_id }}"><button type="submit">저장</button><p class="save-message" role="status" aria-live="polite"></p></form></td>
         </tr>{% endfor %}</tbody>
       </table></div>
-      <p class="help">좌표를 모르면 빈칸으로 저장하세요. 표의 제목·작가를 저장하면 상세 화면의 제목·작가도 같은 내용으로 맞춥니다.</p>
+      <p class="help">좌표를 모르면 빈칸으로 저장하세요.</p>
       <details class="advanced-artworks"><summary>이미지 확인·상세 작품 정보 수정</summary>
       <div class="artworks">{% for art in catalog.artworks %}
-        <article><form class="artwork-form" data-index="{{ art.artwork_index }}" aria-label="작품 {{ art.artwork_index }} 정보">
-          <img class="managed-art-image" src="{{ art.image_path }}" alt="{{ art.image_alt or art.title }}" width="1536" height="1024" loading="lazy">
-          <h3>{{ art.artwork_code }} · {{ art.title }}</h3>
-          <p>작품 ID: <code>{{ art.artwork_id }}</code></p>
-          <label for="location-{{ art.artwork_index }}">작품 위치 코드 (location)</label>
-          <input id="location-{{ art.artwork_index }}" name="location" value="{{ art.location }}" required maxlength="64">
-          <label for="x-{{ art.artwork_index }}">작품 x 좌표 (m)</label>
-          <input id="x-{{ art.artwork_index }}" name="x" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.x if art.x is not none else '' }}">
-          <label for="y-{{ art.artwork_index }}">작품 y 좌표 (m)</label>
-          <input id="y-{{ art.artwork_index }}" name="y" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.y if art.y is not none else '' }}">
-          <label for="artist-{{ art.artwork_index }}">작가 이름 (상세 화면)</label>
-          <input id="artist-{{ art.artwork_index }}" name="artist_name" value="{{ art.artist_name }}" required maxlength="200">
-          <label for="artist-en-{{ art.artwork_index }}">표에 표시할 작가</label>
-          <input id="artist-en-{{ art.artwork_index }}" name="artist_name_en" value="{{ art.artist_name_en }}" maxlength="200">
-          <label for="theme-{{ art.artwork_index }}">작품 테마</label>
-          <input id="theme-{{ art.artwork_index }}" name="theme" value="{{ art.theme }}" required maxlength="200">
-          <label for="title-{{ art.artwork_index }}">작품 제목 (상세 화면)</label>
-          <input id="title-{{ art.artwork_index }}" name="title" value="{{ art.title }}" required maxlength="200">
-          <label for="title-en-{{ art.artwork_index }}">표에 표시할 작품 제목</label>
-          <input id="title-en-{{ art.artwork_index }}" name="title_en" value="{{ art.title_en }}" maxlength="200">
-          <label for="description-{{ art.artwork_index }}">작품 설명</label>
-          <textarea id="description-{{ art.artwork_index }}" name="description" required maxlength="10000" rows="5">{{ art.description }}</textarea>
-          <label for="alt-{{ art.artwork_index }}">그림 대체 설명</label>
-          <textarea id="alt-{{ art.artwork_index }}" name="image_alt" maxlength="500" rows="2">{{ art.image_alt }}</textarea>
+        <article><form class="artwork-form" data-artwork-id="{{ art.artwork_id }}" aria-label="작품 {{ art.artwork_id }} 정보">
+          <img class="managed-art-image" src="{{ art.image_path }}" alt="{{ art.image_alt or art.artwork_title }}" width="1536" height="1024" loading="lazy">
+          <h3>{{ art.artwork_id }} · {{ art.artwork_title }}</h3>
+          <label for="location-{{ art.artwork_id }}">작품 위치 코드 (location)</label>
+          <input id="location-{{ art.artwork_id }}" name="location" value="{{ art.location }}" required maxlength="64">
+          <label for="x-{{ art.artwork_id }}">작품 x 좌표 (m)</label>
+          <input id="x-{{ art.artwork_id }}" name="x" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.x if art.x is not none else '' }}">
+          <label for="y-{{ art.artwork_id }}">작품 y 좌표 (m)</label>
+          <input id="y-{{ art.artwork_id }}" name="y" type="number" step="any" min="-1000000000000" max="1000000000000" value="{{ art.y if art.y is not none else '' }}">
+          <label for="artist-{{ art.artwork_id }}">작가 이름</label>
+          <input id="artist-{{ art.artwork_id }}" name="artist_name" value="{{ art.artist_name }}" required maxlength="200">
+          <label for="theme-{{ art.artwork_id }}">작품 테마</label>
+          <input id="theme-{{ art.artwork_id }}" name="theme" value="{{ art.theme }}" required maxlength="200">
+          <label for="title-{{ art.artwork_id }}">작품 제목</label>
+          <input id="title-{{ art.artwork_id }}" name="artwork_title" value="{{ art.artwork_title }}" required maxlength="200">
+          <label for="description-{{ art.artwork_id }}">작품 설명</label>
+          <textarea id="description-{{ art.artwork_id }}" name="description" required maxlength="10000" rows="5">{{ art.description }}</textarea>
+          <label for="alt-{{ art.artwork_id }}">그림 대체 설명</label>
+          <textarea id="alt-{{ art.artwork_id }}" name="image_alt" maxlength="500" rows="2">{{ art.image_alt }}</textarea>
           <p class="image-path">이미지: <code>{{ art.image_path }}</code></p>
-          <button type="submit">작품 {{ art.artwork_index }} 저장</button>
+          <button type="submit">작품 {{ art.artwork_id }} 저장</button>
           <p class="save-message" role="status" aria-live="polite"></p>
         </form></article>
       {% endfor %}</div>

@@ -140,7 +140,7 @@ def create_app(test_config=None):
     def catalog_data():
         db = get_db()
         return {
-            "artworks": [dict(row) for row in db.execute(ARTWORK_SELECT + " ORDER BY artwork_index")],
+            "artworks": [dict(row) for row in db.execute(ARTWORK_SELECT + " ORDER BY artwork_id")],
             "courses": [json.loads(row["data"]) for row in db.execute("SELECT data FROM courses ORDER BY id")],
         }
 
@@ -161,7 +161,7 @@ def create_app(test_config=None):
             with app.app_context():
                 g.database_path = app.config["DATABASE"]
                 row = get_db().execute(
-                    "SELECT description FROM Art WHERE artwork_index=?", (artwork_id,)
+                    "SELECT description FROM Art WHERE artwork_id=?", (f"{artwork_id:03d}",)
                 ).fetchone()
                 return row["description"] if row else None
         except sqlite3.Error:
@@ -188,7 +188,7 @@ def create_app(test_config=None):
                 artwork = f"art-{artwork_id:02d}"
                 visited = json.loads(row["visited_ids"])
                 if (row["status"] == "active" and artwork not in visited
-                        and db.execute("SELECT 1 FROM Art WHERE artwork_index=?", (artwork_id,)).fetchone()):
+                        and db.execute("SELECT 1 FROM Art WHERE artwork_id=?", (f"{artwork_id:03d}",)).fetchone()):
                     db.execute("UPDATE TourSession SET visited_ids=? WHERE record_id=?",
                                (json.dumps([*visited, artwork]), job.session["id"]))
 
@@ -239,7 +239,8 @@ def create_app(test_config=None):
         if mode not in ("course", "free"):
             abort(400, description="mode는 course 또는 free여야 합니다.")
         catalog = catalog_data()
-        ids = validate_ids(body.get("artworkIds"), {f"art-{art['artwork_index']:02d}" for art in catalog["artworks"]})
+        # 관람 세션의 기존 ID 형식 art-01은 DB의 001에서 변환합니다.
+        ids = validate_ids(body.get("artworkIds"), {f"art-{int(art['artwork_id']):02d}" for art in catalog["artworks"]})
         if not ids:
             abort(400, description="관람할 작품을 하나 이상 선택해 주세요.")
         if mode == "free" and course_id is not None:

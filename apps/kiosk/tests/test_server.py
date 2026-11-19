@@ -65,7 +65,7 @@ class ServerTest(unittest.TestCase):
                 json.dumps({"id": "B", "ids": ["art-04", "art-05", "art-02", "art-03"]}),))
         restarted = login_admin(create_app(self.config).test_client())
         catalog = restarted.get("/api/catalog").json
-        self.assertEqual([art["artwork_index"] for art in catalog["artworks"]], [1, 2, 3, 4])
+        self.assertEqual([art["artwork_id"] for art in catalog["artworks"]], ["001", "002", "003", "004"])
         with sqlite3.connect(self.config["DATABASE"]) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM artworks_legacy_v1").fetchone()[0], 5)
         self.assertEqual(catalog["courses"][0]["ids"], ["art-01", "art-02", "art-03"])
@@ -80,10 +80,10 @@ class ServerTest(unittest.TestCase):
         # 다음 실행 때는 기존 데이터를 다시 덮어쓰지 않습니다.
         with sqlite3.connect(self.config["DATABASE"]) as db:
             art = catalog["artworks"][0]
-            art["title"] = "수정한 제목"
-            db.execute("UPDATE Art SET title=? WHERE artwork_index=?", (art["title"], art["artwork_index"]))
+            art["artwork_title"] = "수정한 제목"
+            db.execute("UPDATE Art SET artwork_title=? WHERE artwork_id=?", (art["artwork_title"], art["artwork_id"]))
         twice = create_app(self.config).test_client()
-        self.assertEqual(twice.get("/api/catalog").json["artworks"][0]["title"], "수정한 제목")
+        self.assertEqual(twice.get("/api/catalog").json["artworks"][0]["artwork_title"], "수정한 제목")
 
     def test_cancel_and_terminal_state(self):
         session, url = self.create_session()

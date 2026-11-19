@@ -1,5 +1,5 @@
 import {connectSimulator,stopSimulator} from './simulator-feed.js';
-import { artworks, getArtwork, artImage, loadCatalog } from './data.js';
+import { artworks, getArtwork, artImage, loadCatalog, tourArtworkId, catalogArtworkId } from './data.js';
 import { createSession, getSession, beginPreparation, registerVisitor, cancelPreparation, startSession, cancelSession, toggleDevAvailability, stopDevAvailability, injectDevPreparationReady, DEMO_MODE } from './services.js';
 import { content } from './content.js';
 import { serviceTerms } from './terms.js';
@@ -125,15 +125,15 @@ function modePage() {
 }
 
 function selectedIds() {
-  return state.mode === 'free' ? artworks.map(art => art.id)
-    : selectedArtworks(artworks, state.selectedArtworkIds).map(art => art.id);
+  return state.mode === 'free' ? artworks.map(art => art.artwork_id)
+    : selectedArtworks(artworks, state.selectedArtworkIds).map(art => art.artwork_id);
 }
 
 function coursePage() {
   const ids = selectedIds();
   return `<div class="course-workspace"><div class="course-intro">${sectionTop('CHOOSE YOUR ARTWORKS', '관람할 작품을<br>선택해 주세요', '여러 작품을 선택할 수 있어요.')}<p class="catalog-status" data-catalog-status role="status">작품 정보는 DB에서 자동 갱신돼요.</p></div>
     ${courseSelection(artworks, state.selectedArtworkIds)}
-    <section class="course-map-panel" aria-labelledby="course-map-heading"><div class="preview-heading"><span class="eyebrow">GALLERY MAP</span><h2 id="course-map-heading">작품 위치</h2></div>${galleryMap(ids)}</section>
+    <section class="course-map-panel" aria-labelledby="course-map-heading"><div class="preview-heading"><span class="eyebrow">GALLERY MAP</span><h2 id="course-map-heading">작품 위치</h2></div>${galleryMap(ids.map(tourArtworkId))}</section>
     <div class="course-selection-next"><span class="selection-count">선택한 작품 <b>${ids.length}개</b></span><button class="button primary" data-action="call" ${!ids.length || state.busy ? 'disabled' : ''}>아티 만나기 ${icon('arrow')}</button></div></div>`;
 }
 
@@ -163,13 +163,13 @@ function sessionPage() {
 }
 
 function collectionSection() {
-  return `<section class="collection-section" aria-labelledby="collection-heading"><div class="collection-heading"><div><span class="eyebrow">THE COLLECTION · 2026</span><h2 id="collection-heading">작품으로 만나는, 하나의 전시</h2></div><p>작품을 눌러 아티의 이야기를 만나보세요.</p></div><div class="collection-grid">${artworks.map(art => `<button class="collection-card" data-action="view-art" data-id="${esc(art.id)}" aria-label="${esc(art.title)} 작품 상세 보기"><div class="collection-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.title)}" width="1536" height="1024" loading="lazy"><span class="collection-code">${esc(art.artwork_code)}</span></div><div class="collection-copy"><span class="small-tag">${esc(art.theme)}</span><h3>${esc(art.title)}</h3><p class="collection-english" lang="en">${esc(art.title_en)}</p><p class="collection-artist">${esc(art.artist)}</p><span class="collection-link">작품 이야기 ${icon('arrow')}</span></div></button>`).join('')}</div></section>`;
+  return `<section class="collection-section" aria-labelledby="collection-heading"><div class="collection-heading"><div><span class="eyebrow">THE COLLECTION · 2026</span><h2 id="collection-heading">작품으로 만나는, 하나의 전시</h2></div><p>작품을 눌러 아티의 이야기를 만나보세요.</p></div><div class="collection-grid">${artworks.map(art => `<button class="collection-card" data-action="view-art" data-id="${esc(art.artwork_id)}" aria-label="${esc(art.artwork_title)} 작품 상세 보기"><div class="collection-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.artwork_title)}" width="1536" height="1024" loading="lazy"><span class="collection-code">${esc(art.artwork_id)}</span></div><div class="collection-copy"><span class="small-tag">${esc(art.theme)}</span><h3>${esc(art.artwork_title)}</h3><p class="collection-artist">${esc(art.artist_name)}</p><span class="collection-link">작품 이야기 ${icon('arrow')}</span></div></button>`).join('')}</div></section>`;
 }
 
 function showArtwork(id) {
   const art = getArtwork(id);
   if (!art) return;
-  showDialog(`<article class="artwork-detail"><div class="artwork-detail-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.title)}" width="1536" height="1024"></div><div class="artwork-detail-copy"><div class="artwork-detail-overline"><span class="eyebrow">${esc(art.artwork_code)}</span><span class="small-tag">${esc(art.theme)}</span></div><h2>${esc(art.title)}</h2><p class="artwork-title-en" lang="en">${esc(art.title_en)}</p><p class="artwork-artist">${esc(art.artist)} <span lang="en">${esc(art.artist_name_en)}</span></p><div class="artwork-description">${art.description.split(/\n\s*\n/).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}</div></div></article>`, `${esc(art.title)} 작품 상세`);
+  showDialog(`<article class="artwork-detail"><div class="artwork-detail-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.artwork_title)}" width="1536" height="1024"></div><div class="artwork-detail-copy"><div class="artwork-detail-overline"><span class="eyebrow">${esc(art.artwork_id)}</span><span class="small-tag">${esc(art.theme)}</span></div><h2>${esc(art.artwork_title)}</h2><p class="artwork-artist">${esc(art.artist_name)}</p><div class="artwork-description">${art.description.split(/\n\s*\n/).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}</div></div></article>`, `${esc(art.artwork_title)} 작품 상세`);
 }
 
 function mediaPage(kind) {
@@ -357,7 +357,7 @@ async function callRobot() {
   state.busy = true; render();
   try {
     if (!hasAvailableRobot()) { navigate('home'); return; }
-    state.session = await createSession({ mode:state.mode, artworkIds:selectedIds(), courseId:null });
+    state.session = await createSession({ mode:state.mode, artworkIds:selectedIds().map(tourArtworkId), courseId:null });
     state.stage='calling'; prepStep=0; preparation={phase:'calling',message:'아티를 호출하고 있어요.',progress:0,connected:false}; state.visited=[];
     rememberPreparation(state.session.id);
     history.push(state.page); state.page='session'; render({focus:true,scroll:true});
@@ -407,7 +407,7 @@ function watchSimulatedSession(){
     if(data.preparation?.phase==='cancelled' && data.runtime.preparation_phase!=='cancelled')return;
     stopPreparation?.();stopPreparation=null;
     simulatedRuntime=data.runtime;state.session=data.session;state.visited=data.session.visitedIds;
-    state.mode=data.session.mode;state.selectedArtworkIds=[...data.session.artworkIds];
+    state.mode=data.session.mode;state.selectedArtworkIds=data.session.artworkIds.map(catalogArtworkId);
     if(data.runtime.preparation_phase){
       preparation={...data.preparation,connected:true};state.stage=preparation.phase;
       prepStep=({calling:0,moving:1,arrived:2,registering:2,waiting_ready:3,ready:3})[state.stage]??0;
@@ -448,7 +448,7 @@ document.addEventListener('click', async event => {
   if (action === 'confirm') { const fn=dialogAction; closeDialog(); await fn?.(); return; }
   if (action === 'choose-mode') { state.mode=target.dataset.mode; navigate(state.mode === 'course' ? 'course' : 'free'); }
   if (action === 'select-all-artworks') {
-    state.selectedArtworkIds = artworks.map(art => art.id);
+    state.selectedArtworkIds = artworks.map(art => art.artwork_id);
     render(); document.querySelector('[data-action="clear-artworks"]').focus({preventScroll:true});
   }
   if (action === 'clear-artworks') {
@@ -538,7 +538,7 @@ loadCatalog().then(async () => {
   if (pending) {
     try {
       const session=await getSession(pending);
-      if (session.status === 'calling') { state.session=session; state.mode=session.mode; state.selectedArtworkIds=[...session.artworkIds]; state.page='session'; history=['mode']; connectPreparation(); }
+      if (session.status === 'calling') { state.session=session; state.mode=session.mode; state.selectedArtworkIds=session.artworkIds.map(catalogArtworkId); state.page='session'; history=['mode']; connectPreparation(); }
       else rememberPreparation(null);
     } catch { rememberPreparation(null); }
   }

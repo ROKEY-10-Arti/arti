@@ -9,15 +9,14 @@ export async function loadCatalog({signal} = {}) {
   const data = await response.json();
   const signature = JSON.stringify(data);
   if (signature === catalogSignature) return false;
-  // ROS/관람 기록의 내부 ID는 유지하고, 표시용 작품 코드와 이미지는 DB에서 읽습니다.
-  artworks.splice(0, artworks.length, ...data.artworks.map(art => ({
-    ...art, id: `art-${String(art.artwork_index).padStart(2, '0')}`,
-    artist: art.artist_name, number: art.artwork_index,
-  })));
+  artworks.splice(0, artworks.length, ...data.artworks);
   courses.splice(0, courses.length, ...(data.courses || []));
   catalogSignature = signature;
   return true;
 }
 
-export const getArtwork = id => artworks.find(art => art.id === id);
+export const getArtwork = id => artworks.find(art => art.artwork_id === id);
 export const artImage = art => art.image_path;
+// 관람 세션, ROS, 평면도에서 사용하는 기존 ID 형식입니다.
+export const tourArtworkId = id => `art-${String(Number(id)).padStart(2, '0')}`;
+export const catalogArtworkId = id => id.slice(4).padStart(3, '0');

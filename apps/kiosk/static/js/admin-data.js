@@ -8,10 +8,9 @@ export function numericValue(value) {
   if (!Number.isFinite(number) || Math.abs(number) > 1e12) throw new Error('좌표는 ±1e12 범위의 숫자로 입력해 주세요.');
   return number;
 }
-export function artworkPayload(values, inline = false) {
+export function artworkPayload(values) {
   const payload = {...values};
   for (const axis of ['x','y']) if (axis in payload) payload[axis] = numericValue(payload[axis]);
-  if (inline) {payload.title = payload.title_en; payload.artist_name = payload.artist_name_en;}
   return payload;
 }
 export function posePayload(values, active) {

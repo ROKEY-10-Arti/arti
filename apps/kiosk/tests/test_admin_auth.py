@@ -41,11 +41,11 @@ class AdminAuthTest(unittest.TestCase):
         self.assertEqual(self.client.patch(url, json={"status": "active"}).status_code, 200)
 
     def test_direct_api_writes_are_rejected_without_login(self):
-        original = self.client.get("/api/artworks/1").json
-        self.assertEqual(self.client.patch("/api/artworks/1", json={"title": "forbidden"}).status_code, 401)
+        original = self.client.get("/api/artworks/001").json
+        self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "forbidden"}).status_code, 401)
         self.assertEqual(self.client.put("/api/robots/robot-01", json={"active": False, "pose": None}).status_code, 401)
         self.assertEqual(self.client.post("/api/dev/availability", json={"action": "toggle"}).status_code, 401)
-        self.assertEqual(self.client.get("/api/artworks/1").json, original)
+        self.assertEqual(self.client.get("/api/artworks/001").json, original)
 
     def test_first_account_is_local_only_and_cannot_be_overwritten(self):
         self.assertEqual(self.client.get("/login").headers["Location"], "/admin/setup")
@@ -71,14 +71,14 @@ class AdminAuthTest(unittest.TestCase):
         login_admin(self.client)
         self.assertEqual(self.client.get("/data").status_code, 200)
         self.client.environ_base.pop("HTTP_X_CSRF_TOKEN")
-        self.assertEqual(self.client.patch("/api/artworks/1", json={"title": "changed"}).status_code, 403)
-        self.assertEqual(self.client.patch("/api/artworks/1", json={"title": "changed"},
+        self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "changed"}).status_code, 403)
+        self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "changed"},
                                           headers={"X-CSRF-Token": "wrong"}).status_code, 403)
-        self.assertEqual(self.client.patch("/api/artworks/1", json={"title": "changed"},
+        self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "changed"},
                                           headers={"X-CSRF-Token": "잘못된토큰"}).status_code, 403)
         token = self.token()
         old_cookie = self.client.get_cookie("arti_admin_session").value
-        result = self.client.patch("/api/artworks/1", json={"title": "changed"}, headers={"X-CSRF-Token": token})
+        result = self.client.patch("/api/artworks/001", json={"artwork_title": "changed"}, headers={"X-CSRF-Token": token})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(self.client.post("/logout").status_code, 403)
         self.assertEqual(self.client.get("/logout").status_code, 405)
@@ -149,7 +149,7 @@ class AdminAuthTest(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get("/api/sessions", headers=headers).status_code, 401)
-        self.assertEqual(self.client.patch("/api/artworks/1", headers=headers, json={"title": "no"}).status_code, 401)
+        self.assertEqual(self.client.patch("/api/artworks/001", headers=headers, json={"artwork_title": "no"}).status_code, 401)
         self.assertEqual(self.client.put("/api/robots/robot-01", headers={"Authorization": "Bearer wrong"},
                                          json={"active": False, "pose": None}).status_code, 401)
         self.assertEqual(self.client.put("/api/robots/robot-01", headers={"Authorization": "Bearer 틀린토큰"},

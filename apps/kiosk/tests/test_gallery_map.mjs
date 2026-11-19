@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { tourArtworkId } from '../static/js/data.js';
 import { buildRoute, gallery, galleryMap, waypoints, artworkZones } from '../static/js/gallery-map.js';
 
-const artworks = ['art-01', 'art-02', 'art-03', 'art-04'];
+const artworks = ['001', '002', '003', '004'].map(tourArtworkId);
 const obstacle = gallery.obstacle;
 let checked = 0;
 
@@ -43,8 +44,9 @@ assert(buildRoute(['art-01']).some(p => p[0] === waypoints['art-04'][0] && p[1] 
 assert.throws(() => buildRoute(['art-05']));
 assert.throws(() => buildRoute(['art-01', 'art-01']));
 const svg = galleryMap([...artworks].reverse());
-assert(svg.includes('작품 1 → 2 → 3 → 4'));
-assert(svg.includes('시계 방향'));
+for (const [index, id] of artworks.entries()) {
+  assert.match(svg, new RegExp(`data-artwork-id="${id}"[^>]*><title>작품 ${index + 1} · 선택됨`));
+}
 assert(svg.includes('키오스크'));
 assert.equal(gallery.kiosk[0], gallery.width);
 assert(waypoints['art-01'][0] > waypoints['art-02'][0]);
