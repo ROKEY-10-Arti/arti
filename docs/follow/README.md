@@ -27,7 +27,6 @@
 | 입력 | `scan` | LaserScan | 벽·기둥 등 장애물 |
 | 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 바닥 물체 (base_link 높이 5~30 cm, 1.2 m 안) |
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
-| 입력 | `follow/enable` | Bool | false면 `cmd_vel`을 보내지 않음 (작품 설명 중, 도킹 등) |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
 | 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / busy·undock_failed·no_localization·canceled …) |
 | 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`, prepare_tour 성공 뒤에만. 아니면 `not_prepared`·`busy`·`unsupported_mode`). 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
@@ -42,7 +41,7 @@
 | 상태 | 언제 | 동작 (플로우차트) |
 |---|---|---|
 | READY | 처음 | `arti/prepare_tour` 액션 기다림. `cmd_vel`을 보내지 않음 |
-| UNDOCK | 액션 받음 | 도크에 붙어 있으면 undock (도크 밖이면 건너뜀) |
+| UNDOCK | 액션 받음 | undock. 관람은 항상 도크에서 시작 → 도크 밖이면 거절(`not_docked`) |
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
 | WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): "인식되었습니다" 안내 → REGISTERED. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |

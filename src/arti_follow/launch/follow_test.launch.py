@@ -49,7 +49,7 @@ BAG_TOPICS = [
     'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
     'target_person/marker', 'top_cam/pose_in_map',
-    'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
+    'cmd_vel', 'follow/state', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
     'artwork_zone/state', 'arti/tour_end',                        # 작품 구역 (tour.launch.py), 관람 끝
 ]
 

@@ -35,7 +35,7 @@
   ├ start = false     → 바로 끝냄: success=false, message=not_requested
   └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
                          등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
-                         실패: undock_failed / no_undock_server / no_localization / canceled
+                         실패: not_docked (도크 밖) / undock_failed / no_undock_server / no_localization / canceled
 
 ② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만)
   ├ artwork_ids에 작품이 있음 → success=false, message=unsupported_mode (코스관람 = robot4 몫)
@@ -50,8 +50,8 @@
 READY
   │ prepare_tour                                       ┐
   ▼                                                    │
-UNDOCK        도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임). 도크 밖이면 건너뜀
-  │             실패 → 관람 끝 (undock_failed / no_undock_server)
+UNDOCK        Create 3 undock 액션 (로봇이 스스로 움직임). 관람은 항상 도크에서 시작
+  │             도크 밖이면 거절 (not_docked), 실패 → 관람 끝 (undock_failed / no_undock_server)
   ▼
 LOCALIZE      AMCL에 initialpose(출발 지점)를 보내고 map 위치가 근처(0.3 m)로 잡힐 때까지 기다림
   │             10 s 안에 map 위치가 아예 없으면 → 관람 끝 (no_localization)
@@ -132,7 +132,7 @@ run_tour                                                                  └ 0.
 안전   TF(odom→base_link)가 없거나 scan이 0.5 s 넘게 안 오면 정지
 ```
 
-`follow/enable`이 false면 계산은 하지만 `cmd_vel`을 보내지 않는다 (다른 노드에 주행을 넘길 때).
+`start_enabled:=false`(launch `drive:=false`)면 계산은 하지만 `cmd_vel`을 보내지 않는다 (시험용).
 
 ## 5. 키오스크가 받는 것 (feedback 0.2 s마다)
 
@@ -170,7 +170,6 @@ run_tour                                                                  └ 0.
 | 입력 | `oakd/stereo/image_raw/compressedDepth`, `oakd/stereo/camera_info` | | 로봇 OAK-D |
 | 입력 | `tf`, `tf_static` | | 로봇, AMCL |
 | 입력 | `dock_status` | DockStatus | 로봇 |
-| 입력 | `follow/enable` | Bool | (필요할 때) |
 | 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | artwork_zone |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | 로봇 |
 | 출력 | `cmd_vel` | TwistStamped | 로봇 |

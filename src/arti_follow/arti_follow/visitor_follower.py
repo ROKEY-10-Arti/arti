@@ -11,7 +11,6 @@
       scan (LaserScan)            벽·기둥 등 장애물
       oakd/stereo/image_raw/compressedDepth, oakd/stereo/camera_info   바닥에 떨어진 물체
       tf, tf_static               좌표 변환
-      follow/enable (Bool)        false면 cmd_vel을 보내지 않음 (작품 설명 중, 도킹 등)
       dock_status (irobot_create_msgs/DockStatus)   도크에 붙어 있는지 (붙어 있을 때만 undock)
       arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
                                   feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
@@ -34,7 +33,7 @@
 상태 (플로우차트 순서). 시작은 READY — arti/prepare_tour 액션이 와야 움직인다 (auto_start면 켜자마자 prepare+start)
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
   ── 여기부터 REGISTERED까지 = prepare_tour ──
-  UNDOCK      도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 도크 밖이면 건너뜀
+  UNDOCK      Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 관람은 항상 도크에서 시작 → 도크 밖이면 거절(not_docked)
   LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다림
   START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
               face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
@@ -79,14 +78,16 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, Empty, Int32, String
+from std_msgs.msg import Empty, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 import yaml
 
 from arti_follow.motion import apply, MotionMixin, PersonKF, yaw_of
 from arti_follow.prepare import PrepareMixin
-from arti_follow.tour import TourMixin
+from arti_follow.tour import TourMixin, TRACKING
+
+LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받는 상태 (그 밖에는 버림)
 
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
@@ -139,7 +140,7 @@ PARAMS = {
     'floor_max_height': 0.3,        #   (위는 LiDAR가 봄)
     'floor_min_points': 3,          # 10 cm 칸에 점이 이만큼 모여야 물체 (흩어진 잡음 제거)
     'depth_keep': 1.0,              # depth 장애물을 이 시간 동안 기억 [s]
-    'start_enabled': True,          # 시작할 때 cmd_vel을 보낼지 (false면 follow/enable true가 올 때까지 계산만)
+    'start_enabled': True,          # false면 계산만 하고 cmd_vel을 보내지 않음 (follow_test.launch.py drive:=false)
     'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
     'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
@@ -174,7 +175,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
     def __init__(self):
         """노드 준비: 파라미터·설정 파일 읽기, 구독·발행·액션 서버·타이머 등록. 상태 READY.
         구독  tf, tf_static, target_person/point_map, scan, oakd camera_info·compressedDepth,
-              follow/enable, dock_status, artwork_zone/explaining·explained
+              dock_status, artwork_zone/explaining·explained
         발행  cmd_vel, follow/state, initialpose, guide_message, arti/tour_end
         액션  서버 arti/prepare_tour·arti/start_tour, 클라이언트 undock
         타이머 control_period(0.1 s)마다 control()"""
@@ -208,7 +209,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             lambda m: setattr(self, 'cam_k', (m.k[0], m.k[4], m.k[2], m.k[5])), 10)
         if self.p['use_depth']:
             sub(CompressedImage, 'oakd/stereo/image_raw/compressedDepth', self.on_depth, qos_profile_sensor_data)
-        sub(Bool, 'follow/enable', self.on_enable, 10)
         sub(DockStatus, 'dock_status', lambda m: setattr(self, 'docked', m.is_docked), qos_profile_sensor_data)
         sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
         sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
@@ -219,15 +219,13 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
-        self.artwork_total = self.count_artworks()  # 작품 수 (새 StartTour feedback에는 total이 없어 지금은 로그·확인용)
 
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
         self.docked = None                          # dock_status (아직 못 받으면 None)
         self.active, self.end_reason = False, ''    # 관람(준비 포함) 중인지, 끝난 이유 (액션 result)
-        self.touring = False                        # start_tour가 진행 중인지 (두 번째 start_tour는 busy)
         self.ready_at = None                        # REGISTERED가 된 시각 (ready_timeout 기준)
-        self.registered, self.explaining, self.visited = False, 0, []    # 이번 관람: 인식됨, 설명 중 작품 번호(0 = 없음), 설명한 작품
+        self.explaining, self.visited = 0, []      # 이번 관람: 설명 중 작품 번호(0 = 없음), 설명한 작품
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
         self.face_until = self.loc_at = self.pose_sent = None
@@ -305,17 +303,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.get_logger().info(f'시작 때 바라볼 곳: {zid} {point}')
         return point
 
-    def count_artworks(self):
-        """artworks.yaml의 작품 수를 센다 (feedback total).
-        받음: (파라미터) zones_file
-        돌려줌: 작품 수 (못 읽으면 0)"""
-        try:
-            with open(self.config_file('zones_file', 'artworks.yaml'), encoding='utf-8') as f:
-                return len((yaml.safe_load(f) or {}).get('artworks') or [])
-        except (OSError, PackageNotFoundError, yaml.YAMLError) as e:
-            self.get_logger().warn(f'작품 수를 못 읽음 ({e!r}) → total 0')
-            return 0
-
     # ---------- 입력 ----------
 
     def now(self):
@@ -348,7 +335,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         받음: msg.header.frame_id, msg.header.stamp (그 시각 TF로 변환), msg.point.x, y
         바뀜: kf.x (위치·속도), seen (마지막으로 본 시각), seen_since (등록 확인: 계속 보이기 시작한 시각)
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
-        if self.state not in ('WAIT_VISITOR', 'REGISTERED', 'FOLLOW', 'SEARCH', 'WAIT'):
+        if self.state not in LISTEN:
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
@@ -420,16 +407,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
                                     return_inverse=True, return_counts=True)
             base = base[cnt[inv.ravel()] >= p['floor_min_points']]
         self.floor_pts, self.floor_time = apply(f, base[:, :2]), self.now()
-
-    def on_enable(self, msg):
-        """[구독] follow/enable (Bool) — false면 바로 정지하고 이후 cmd_vel을 보내지 않음 (다른 노드에 주행을 넘길 때).
-        받음: msg.data
-        바뀜: enabled"""
-        if not msg.data:
-            self.drive(0.0, 0.0)                    # 멈춘 뒤 cmd_vel을 넘겨줌
-        self.enabled = msg.data
-
-    # ---------- 상태 (플로우차트) ----------
 
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:

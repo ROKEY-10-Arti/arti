@@ -14,18 +14,20 @@ from std_msgs.msg import Empty
 
 from arti_follow.motion import wrap
 
+TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')     # 관람 중 = 관람객을 따라가거나 찾는 상태 (start_tour 뒤)
+
 
 class TourMixin:
     """VisitorFollower가 상속해서 쓰는 관람 단계 함수."""
 
     def goal_problem(self, goal):
         """start_tour를 시작할 수 없으면 이유 (검사만). lock 안에서 부른다.
-        받음: goal (goal.request.artwork_ids), (active, touring, state)
+        받음: goal (goal.request.artwork_ids), (active, state)
         돌려줌: '' (문제 없음) / 'unsupported_mode' (artwork_ids가 있음 = 코스관람, robot4 몫)
                 / 'busy' (이미 관람 중) / 'not_prepared' (prepare_tour로 등록이 안 끝남)"""
         if goal is not None and len(goal.request.artwork_ids) > 0:
             return 'unsupported_mode'
-        if self.touring:
+        if self.state in TRACKING:
             return 'busy'
         if not self.active or self.state != 'REGISTERED':
             return 'not_prepared'
@@ -40,7 +42,6 @@ class TourMixin:
         with self.lock:
             problem = self.goal_problem(goal)
             if not problem:
-                self.touring = True
                 self.get_logger().info('관람 시작 → 추종')
                 self.set_state('FOLLOW')            # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
         if problem:
@@ -69,7 +70,7 @@ class TourMixin:
     def send_feedback(self, goal):
         """내부 상태 → 키오스크용 feedback (StartTour.action, docs/common/ros2_interfaces.md).
         새로 끝까지 설명한 작품이 있으면 → ARTWORK_COMPLETED + 그 작품 번호 (작품마다 한 번)
-        설명 중 → EXPLAINING, FOLLOW·SEARCH·WAIT·LOST → FOLLOW, 그 밖 → MOVING (관람 중에는 거의 없음).
+        설명 중 → EXPLAINING, 그 밖 → FOLLOW (관람 중 상태는 FOLLOW·SEARCH·WAIT·LOST뿐).
         받음: goal, (state, explaining, visited, reported)
         내보냄: feedback (state, artwork_id)"""
         if goal is None:
@@ -79,15 +80,9 @@ class TourMixin:
             self.reported += 1
             goal.publish_feedback(StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=done))
             return
-        explaining = self.explaining if self.state in ('FOLLOW', 'SEARCH', 'WAIT') else 0
-        if explaining:
-            state = 'EXPLAINING'
-        elif self.state in ('FOLLOW', 'SEARCH', 'WAIT', 'LOST'):
-            state = 'FOLLOW'
-        else:
-            state = 'MOVING'
+        explaining = self.explaining if self.state in TRACKING else 0
         goal.publish_feedback(StartTour.Feedback(
-            state=state, artwork_id=explaining))
+            state='EXPLAINING' if explaining else 'FOLLOW', artwork_id=explaining))
 
     def follow(self, now, pose, here):
         """[FOLLOW] step [6]에서: 관람객 위치를 알고 마지막으로 본 지 lost_timeout(3 s) 안 → 0.8 m 유지하며 따라간다.
@@ -169,9 +164,9 @@ class TourMixin:
         """관람 끝: 정지 → 관람객 데이터 삭제 → arti/tour_end 발행(다른 노드도 삭제) → state.
         받음: state   다음 상태 'READY' (취소·실패) 또는 'LOST' (분실)
               reason  끝난 이유 → 액션 result.message ('canceled', 'lost', 'undock_failed' ...)
-        바뀜: active = touring = False → run_prepare·run_tour 루프가 끝나 result를 보냄
+        바뀜: active = False → run_prepare·run_tour 루프가 끝나 result를 보냄
         내보냄: cmd_vel 0, arti/tour_end, follow/state"""
-        self.active, self.touring, self.end_reason = False, False, reason
+        self.active, self.end_reason = False, reason
         self.drive(0.0, 0.0)
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
         self.tour_end_pub.publish(Empty())

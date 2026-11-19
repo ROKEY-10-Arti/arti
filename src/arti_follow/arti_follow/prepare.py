@@ -17,6 +17,9 @@ from std_msgs.msg import String
 from arti_follow.motion import wrap
 
 
+DOCK_STATUS_WAIT = 3.0     # 호출 때 dock_status를 이만큼 기다림 (노드를 막 켰을 때) [s]
+
+
 class PrepareMixin:
     """VisitorFollower가 상속해서 쓰는 호출·등록 단계 함수."""
 
@@ -32,12 +35,12 @@ class PrepareMixin:
 
     def begin_tour(self):
         """관람 시작 준비: 지난 관람객 데이터(위치, 등록, 본 작품)를 지우고 active = True, 첫 상태로.
-        바뀜: kf.x, seen, holding, 단계 타이머, registered, explaining, visited, seen_since, active, touring, end_reason
+        바뀜: kf.x, seen, holding, 단계 타이머, explaining, visited, seen_since, active, end_reason
               state → UNDOCK (undock 파라미터 false면 LOCALIZE)"""
         self.kf.x, self.seen, self.holding = None, -1e9, False
         self.face_until = self.loc_at = self.pose_sent = None
-        self.active, self.touring, self.end_reason, self.ready_at = True, False, '', None
-        self.registered, self.explaining, self.visited = False, 0, []
+        self.active, self.end_reason, self.ready_at = True, '', None
+        self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
         self.get_logger().info('호출 → 관람 준비 시작 (undock → 위치 → 키오스크 → 등록)')
@@ -105,12 +108,18 @@ class PrepareMixin:
         goal.publish_feedback(PrepareTour.Feedback(state=state))
 
     def undock(self, goal):
-        """도크에 붙어 있으면 Create 3에 undock 액션을 보내고 끝날 때까지 기다린다 (로봇이 스스로 움직임).
+        """Create 3에 undock 액션을 보내고 끝날 때까지 기다린다 (로봇이 스스로 움직임).
+        관람은 항상 도크에서 시작한다 → 도크 밖이면 거절 (undock 뒤 initialpose = 도크 앞이 맞으려면 도크에서 출발해야 함).
         받음: goal (취소 확인용), (docked: dock_status)
-        돌려줌: '' (성공 또는 이미 도크 밖) / 'no_undock_server' / 'undock_failed' / 'canceled'"""
-        if self.docked is False:
-            self.get_logger().info('이미 도크 밖 → undock 건너뜀')
-            return ''
+        돌려줌: '' (성공) / 'not_docked' (도크 밖, dock_status 못 받음) / 'no_undock_server' / 'undock_failed' / 'canceled'"""
+        end = time.monotonic() + DOCK_STATUS_WAIT
+        while self.docked is None and time.monotonic() < end:   # 노드를 막 켜서 dock_status를 아직 못 받았을 때
+            time.sleep(0.1)
+        if self.docked is not True:
+            self.get_logger().error('도크에 붙어 있지 않음 (dock_status '
+                                    f'{"없음" if self.docked is None else "is_docked=false"}) → 호출 거절. '
+                                    '관람은 도크에서 시작한다')
+            return 'not_docked'
         if not self.undock_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error(f'undock 액션 서버 없음 ({self.get_namespace().rstrip("/")}/undock)')
             return 'no_undock_server'
@@ -251,9 +260,8 @@ class PrepareMixin:
     def on_registered(self, confirmed):
         """등록 완료 순간에 할 일 (한곳에). 나중에 인식 모듈이 등록 신호를 주면 부르는 조건만 바꾼다.
         받음: confirmed  끊김 없이 보인 시간 [s] (로그용)
-        바뀜: registered = True → run_prepare가 feedback REGISTERED + result success로 키오스크에 보고
-        내보냄: guide_message recognized_guide("recognized") → 음성 '인식되었습니다'"""
-        self.registered = True                      # 등록 완료 표시 (prepare_tour 성공)
+        내보냄: guide_message recognized_guide("recognized") → 음성 '인식되었습니다'
+        (키오스크 보고는 wait_visitor가 바꾸는 state REGISTERED를 run_prepare가 보고 feedback·result로)"""
         self.get_logger().info(f'관람객 등록 완료 ({confirmed:.1f} s 끊김 없이 보임)')
         if self.p['recognized_guide']:
             self.guide_pub.publish(String(data=self.p['recognized_guide']))   # "인식되었습니다"
