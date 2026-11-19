@@ -67,9 +67,9 @@ REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 �
   │ start_tour                                         ┐
   ▼                                                    │ start_tour
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
-  │ 좌표가 3 s(lost_timeout) 안 옴
+  │ 좌표가 1.5 s(lost_timeout) 안 옴
   ▼
-SEARCH        마지막 좌표까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색
+SEARCH        마지막 좌표까지 이동(최대 5 s, 뒤쪽이면 먼저 제자리 회전) → 거기서 odom 기준 한 바퀴(약 10 s) 회전 탐색
   ▼
 WAIT          정지 대기 10 s
   ▼
@@ -124,11 +124,11 @@ run_tour                                                                  └ 0.
 
 ```
 좌표   칼만 필터(등속)로 위치·속도를 매끄럽게. 예측과 너무 다른 좌표는 버림 (5번 연속이면 다시 시작)
-목표   관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
+목표   관람객이 0.3 s 뒤 있을 곳에서 0.8 m 앞 지점
 멈춤   0.85 m 안이면 감속해 서서 관람객 쪽으로 돎, 0.95 m 밖이 되면 다시 출발 (섰다 갔다 방지)
-회피   LiDAR(벽·기둥) + OAK-D depth(바닥 물체 5~30 cm, 1.2 m 안)로 10 cm 격자
+회피   LiDAR(벽·기둥)만으로 10 cm 격자 (OAK-D depth는 2026-11-18에 뺌: 빈 바닥이 장애물로 잡혀 멀리 있는 관람객을 못 따라감)
        → 칸마다 목표까지 돌아가는 거리(BFS) → (v, w) 후보를 1.5 s 굴려 보고 안 부딪히며 가장 가까워지는 것 (DWA)
-속도   최대 0.3 m/s, 1.5 rad/s. 후진하지 않음
+속도   최대 0.3 m/s, 0.8 rad/s. 후진하지 않음. 서 있을 때 0.1 rad/s보다 작은 회전은 0 (Create 3가 작은 회전을 크게 돎)
 안전   TF(odom→base_link)가 없거나 scan이 0.5 s 넘게 안 오면 정지
 ```
 
@@ -206,18 +206,18 @@ ros2 topic echo /robot1/follow/state
 |---|---|---|
 | `target_distance` | 0.8 | 유지 거리 [m] |
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 등록 확인 시간 / 끊김으로 보는 간격 [s] |
-| `lost_timeout` | 3.0 | 좌표가 이만큼 안 오면 SEARCH [s] |
+| `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
+| `search_move_time` / `search_arrive` | 5 / 0.35 | 마지막 위치로 이동하는 시간 상한 [s] / 도착 거리 [m] |
 | `search_time` / `wait_time` | 10 / 10 | 회전 탐색 / 정지 대기 [s] |
-| `max_linear` / `max_angular` | 0.3 / 1.5 | 최대 속도 [m/s] / [rad/s] |
+| `max_linear` / `max_angular` | 0.3 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `undock` | true | 시작 때 undock |
-| `use_depth` | true | 바닥 물체 회피 (빈 바닥에서 점이 잡히면 `floor_min_height` 올리기) |
 | `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
 | `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
 
 ## 한계
 
 - 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다
-- depth가 3.2 Hz라 바닥 물체 반응이 늦을 수 있다
+- LiDAR 평면보다 낮은 바닥 물체(가방 등)는 못 본다 (depth를 뺐음)
 - 등록은 "1 s 동안 계속 보임"까지만 본다. 특징 수집·한 명 확인(T13)은 아직 없다
 - 관람 끝에 도크로 돌아가는 기능(RETURNING)은 아직 없다

@@ -8,8 +8,7 @@
 
 입력  target_person/point_map (PointStamped, frame_id map)  인식 모듈이 준 관람객 좌표
                                   → TF(map→odom)로 odom 좌표로 바꿔 씀 (localization 필요)
-      scan (LaserScan)            벽·기둥 등 장애물
-      oakd/stereo/image_raw/compressedDepth, oakd/stereo/camera_info   바닥에 떨어진 물체
+      scan (LaserScan)            벽·기둥 등 장애물 (OAK-D depth는 쓰지 않음, 2026-11-18 제거)
       tf, tf_static               좌표 변환
       dock_status (irobot_create_msgs/DockStatus)   도크에 붙어 있는지 (붙어 있을 때만 undock)
       arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
@@ -44,7 +43,8 @@
               ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
   ── 여기부터 = start_tour ──
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
-  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
+  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지(search_move_time 상한) 이동
+          → 거기서 2π/search_time 일정 속도로 odom 기준 한 바퀴(360°) 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
   LOST    wait_time 지남 → 정지, 액션 끝 (reason lost). 다시 시작하려면 액션을 새로 보냄
   SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW
@@ -64,7 +64,6 @@ import time
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from arti_interfaces.action import PrepareTour, StartTour
-import cv2
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from irobot_create_msgs.action import Undock
 from irobot_create_msgs.msg import DockStatus
@@ -77,7 +76,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Empty, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
@@ -111,21 +110,29 @@ PARAMS = {
     'target_distance': 0.8,         # 유지 거리 [m]
     'distance_tolerance': 0.05,     # 이 안이면 전진 안 함 [m]
     'restart_margin': 0.15,         # 멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)
-    'lead_time': 0.5,               # 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐)
-    'kf_accel_std': 1.0,            # 칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2]
-    'kf_meas_std': 0.15,            # 칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m]
+    'lead_time': 0.3,               # 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐)
+                                    #   0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)
+    'kf_accel_std': 2.0,            # 칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2] (1.0 → 2.0: 걷기 시작·멈춤에 빨리 반응)
+    'kf_meas_std': 0.2,             # 칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m] (0.15 → 0.2: 이상값으로 버리는 좌표 4.7 % → 3.2 %)
     'kf_gate': 9.21,                # 칼만: 예측과 이만큼(마할라노비스 거리^2, 2차원 99 %) 넘게 다르면 이상값으로 버림
     'kf_max_rejects': 5,            # 연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 필터를 새로 시작
     'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
     'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
-    'lost_timeout': 3.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
-    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 회전 탐색 시간 (플로우차트 10초) [s]
-    'search_move_time': 0.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s]
-    'wait_time': 10.0,              # 그다음 정지 대기 (플로우차트 10초) [s]
-    'search_spin': 0.6,             # 회전 탐색 최소 속도. 남은 시간에 한 바퀴가 안 되면 더 빨리 돎 [rad/s]
-    'max_linear': 0.3, 'max_angular': 1.5,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
-    'linear_accel': 0.5, 'angular_accel': 3.0,      # [m/s^2], [rad/s^2]
-    'linear_decel': 0.4,            # 멈출 때 감속 [m/s^2] (0.3 m/s → 0.75 s, 약 11 cm 더 감)
+    'lost_timeout': 1.5,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)
+    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 (플로우차트 10초) → 2π/10 = 0.63 rad/s [s]
+    'search_spin_extra': 3.0,       # 한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]
+    'search_move_time': 5.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s] (0 → 5: 사람이 그 자리에 서 있으면 영원히 못 도착)
+    'search_arrive': 0.35,          # 최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)
+    'wait_time': 10.0,              # 회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]
+    'search_spin': 0.3,             # 회전 탐색 최소 속도 [rad/s] (보통은 2π/search_time)
+    'turn_first_angle': 1.0,        # SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°)
+                                    #   DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤
+    'max_linear': 0.3, 'max_angular': 0.8,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
+                                    #   max_angular 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24)
+    'linear_accel': 0.8, 'angular_accel': 1.5,      # [m/s^2], [rad/s^2] (0.5 → 0.8: 빨리 0.3 m/s까지, 3.0 → 1.5: 회전이 덜 들쑥날쑥)
+    'linear_decel': 0.8,            # 멈출 때 감속 [m/s^2] (0.4 → 0.8: 0.3 m/s에서 약 6 cm만 더 감, 너무 가까이 가는 것 줄임)
+    'min_spin_cmd': 0.1,            # 서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s]
+                                    #   Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림
     'control_period': 0.1, 'sim_time': 1.5,         # 제어 주기, 후보를 굴려 볼 시간 [s]
     'v_samples': 7, 'w_samples': 15,
     'robot_radius': 0.2, 'safety_margin': 0.05,     # [m]
@@ -134,13 +141,6 @@ PARAMS = {
     'w_turn': 0.02,                 # 비용: 회전 (같은 조건이면 직진)
     'scan_min_range': 0.2,          # 이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]
     'scan_timeout': 0.5,            # scan이 이보다 오래 안 오면 정지 [s]
-    'use_depth': True,              # 바닥 물체 회피 켜기
-    'depth_step': 8,                # depth 몇 픽셀마다 한 점
-    'depth_max_range': 1.2,         # 이보다 먼 depth는 잡음이 커서 안 씀 (실측: 1 m 너머 ±0.1~0.3 m) [m]
-    'floor_min_height': 0.05,       # 바닥 물체 높이 범위 (base_link 기준, 아래는 바닥 잡음) [m]
-    'floor_max_height': 0.3,        #   (위는 LiDAR가 봄)
-    'floor_min_points': 3,          # 10 cm 칸에 점이 이만큼 모여야 물체 (흩어진 잡음 제거)
-    'depth_keep': 1.0,              # depth 장애물을 이 시간 동안 기억 [s]
     'start_enabled': True,          # false면 계산만 하고 cmd_vel을 보내지 않음 (follow_test.launch.py drive:=false)
     'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
@@ -175,7 +175,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
     """관람객 추종 노드: 키오스크 액션(start_tour) 응대 + 상태 기계(step) + 주행(dwa)."""
     def __init__(self):
         """노드 준비: 파라미터·설정 파일 읽기, 구독·발행·액션 서버·타이머 등록. 상태 READY.
-        구독  tf, tf_static, target_person/point_map, scan, oakd camera_info·compressedDepth,
+        구독  tf, tf_static, target_person/point_map, scan,
               dock_status, artwork_zone/explaining·explained
         발행  cmd_vel, follow/state, initialpose, guide_message, arti/tour_end
         액션  서버 arti/prepare_tour·arti/start_tour, 클라이언트 undock
@@ -186,9 +186,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.seen = -1e9                            # 관람객 좌표를 마지막으로 받은 시각
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
         self.lost_at, self.turn, self.spin_at, self.spin_speed, self.holding = 0.0, 1.0, None, 0.0, False
+        self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
-        self.floor_pts, self.floor_time = np.zeros((0, 2)), -1e9
-        self.cam_k = self.cam_tf = None
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
         self.diag = Diag() if self.p['diag'] else None
@@ -206,10 +205,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
         sub(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
-        sub(CameraInfo, 'oakd/stereo/camera_info',
-            lambda m: setattr(self, 'cam_k', (m.k[0], m.k[4], m.k[2], m.k[5])), 10)
-        if self.p['use_depth']:
-            sub(CompressedImage, 'oakd/stereo/image_raw/compressedDepth', self.on_depth, qos_profile_sensor_data)
         sub(DockStatus, 'dock_status', lambda m: setattr(self, 'docked', m.is_docked), qos_profile_sensor_data)
         sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
         sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
@@ -375,40 +370,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.scan_pts = apply(f, np.stack([r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])], 1))
         self.scan_time = self.now()
 
-    def on_depth(self, msg):
-        """[구독] oakd/stereo/image_raw/compressedDepth — 깊이 영상이 올 때마다.
-        깊이 → 3D 점 → base_link 높이 floor_min~floor_max(5~30 cm)만 = 바닥 물체 → 10 cm 칸에 3점 이상만 → odom.
-        받음: msg.data (12바이트 헤더 + 16비트 PNG, mm), (cam_k: camera_info의 fx, fy, cx, cy)
-        바뀜: floor_pts (바닥 물체 점), floor_time"""
-        p = self.p
-        if self.cam_tf is None:
-            try:
-                tr = self.tf.lookup_transform(p['base_frame'], msg.header.frame_id, Time()).transform
-            except Exception:
-                return
-            x, y, z, w = tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w
-            rot = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
-            self.cam_tf = (rot, np.array([tr.translation.x, tr.translation.y, tr.translation.z]))
-        f = self.lookup(p['odom_frame'], p['base_frame'], Time.from_msg(msg.header.stamp))
-        # compressedDepth = 12바이트 헤더 + PNG(16비트, mm)
-        depth = cv2.imdecode(np.frombuffer(bytes(msg.data[12:]), np.uint8), cv2.IMREAD_UNCHANGED)
-        if self.cam_k is None or f is None or depth is None:
-            return
-        s, (fx, fy, cx, cy) = p['depth_step'], self.cam_k
-        z = depth[::s, ::s] / 1000.0
-        v, u = np.mgrid[0:depth.shape[0]:s, 0:depth.shape[1]:s]
-        ok = (z > 0.2) & (z < p['depth_max_range'])
-        cam = np.stack([(u[ok] - cx) * z[ok] / fx, (v[ok] - cy) * z[ok] / fy, z[ok]], 1)
-        base = cam @ self.cam_tf[0].T + self.cam_tf[1]
-        base = base[(base[:, 2] > p['floor_min_height']) & (base[:, 2] < p['floor_max_height'])]
-        if len(base):                               # 10 cm 칸에 floor_min_points개 이상 모인 점만
-            _, inv, cnt = np.unique(np.floor(base[:, :2] / 0.1).astype(int), axis=0,
-                                    return_inverse=True, return_counts=True)
-            base = base[cnt[inv.ravel()] >= p['floor_min_points']]
-        self.floor_pts, self.floor_time = apply(f, base[:, :2]), self.now()
-
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:
         lock을 걸어 run_tour(다른 스레드)와 동시에 상태를 바꾸지 않게 하고, (diag) 걸린 시간을 기록한다."""
@@ -559,8 +520,6 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
                     self.say(True, f'[시간] {name}: 최소 지연 {lat_min * 1000:.0f} ms → {ahead}. '
                                    f'PC·로봇 시간 동기화(chrony/NTP) 확인')
         expected = ['scan', 'target_person/point_map', 'tf']
-        if self.p['use_depth']:
-            expected.append('oakd/stereo/image_raw/compressedDepth')
         for name in [t for t in expected if t not in topics]:
             log.warn(f'[입력] {name}: {span:.1f} s 동안 한 번도 안 옴')
         n, _, gap = stat('control.gap')

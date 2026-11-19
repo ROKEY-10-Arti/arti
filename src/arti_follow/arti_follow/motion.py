@@ -105,14 +105,12 @@ class MotionMixin:
         return self.drive(*self.ramp(0.0, w))
 
     def obstacles(self):
-        """지금 피해야 할 장애물 점 = 라이다 점 + depth_keep(1 s) 안의 바닥 물체 점.
-        받음: (scan_pts, floor_pts, floor_time)
+        """지금 피해야 할 장애물 점 = 라이다 점만.
+        OAK-D depth 바닥 점은 뺐다 (2026-11-18, free_tracking 9715cbf): 관람객이 멀면 빈 바닥이 장애물로 잡혀
+        DWA가 목표까지 길이 없다고 보고 조용히 멈춤 (docs/troubleshooting/follow/2026-11-18-far-visitor-stall-depth-floor.md)
+        받음: (scan_pts)
         돌려줌: 장애물 점 (N, 2) odom"""
-        # depth(바닥 물체)는 초당 약 3번만 와서, 마지막으로 받은 걸 depth_keep(1 s) 동안 기억해서 쓴다.
-        # 1 s 넘게 안 왔으면 오래된 점이라 버린다 (이미 치운 물체를 계속 피하지 않게).
-        fresh = self.now() - self.floor_time < self.p['depth_keep']
-        # 라이다 점(벽·기둥) + (최근이면) 바닥 물체 점을 한 배열로 합친다 → dwa·field가 장애물로 씀
-        return np.concatenate([self.scan_pts] + ([self.floor_pts] if fresh else []))
+        return self.scan_pts
 
     def dwa(self, pose, goal, face):
         """(v, w) 후보를 굴려 보고, 안 부딪히면서 목표까지 '돌아가는 거리'가 가장 줄어드는 것을 고른다 (DWA).
@@ -132,6 +130,8 @@ class MotionMixin:
                          min(p['max_linear'], v0 + p['linear_accel'] * dt), p['v_samples'])
         ws = np.linspace(max(-p['max_angular'], w0 - p['angular_accel'] * dt),
                          min(p['max_angular'], w0 + p['angular_accel'] * dt), p['w_samples'])
+        if ws[0] <= 0.0 <= ws[-1]:
+            ws = np.union1d(ws, [0.0])              # 정확히 0도 후보로 (없으면 0.01 같은 값이 계속 뽑혀 제자리에서 돎)
         # 출력: V, W (105,)  모든 조합을 한 줄로 편 것. 후보 i = (V[i], W[i])
         V, W = (g.ravel() for g in np.meshgrid(vs, ws))
         # ── ② 굴려 보기 (sim_time 1.5 s를 0.1 s씩 15칸) ─────────────────────────────
@@ -250,10 +250,26 @@ class MotionMixin:
         w = w0 + float(np.clip(w - w0, -p['angular_accel'] * dt, p['angular_accel'] * dt))
         return v, w
 
+    def go_to(self, pose, goal):
+        """정해진 지점(odom)으로 이동 (SEARCH에서 마지막 위치로 갈 때).
+        목표 방향이 turn_first_angle(약 57°)보다 틀어져 있으면 먼저 제자리 회전, 아니면 DWA.
+        DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈추기 때문.
+        받음: pose (x, y, yaw) odom, goal (x, y) odom
+        내보냄: drive(...)"""
+        err = float(wrap(math.atan2(goal[1] - pose[1], goal[0] - pose[0]) - pose[2]))
+        if abs(err) > self.p['turn_first_angle']:
+            self.dbg['turn_first'] = True
+            w = float(np.clip(1.5 * err, -self.p['max_angular'], self.p['max_angular']))
+            return self.drive(*self.ramp(0.0, w))
+        return self.drive(*self.dwa(pose, goal, goal))
+
     def drive(self, v, w):
         """속도 명령을 로봇에 보낸다. enabled가 false면 보내지 않음. 보낸 값을 self.cmd에 기억 (ramp·dwa가 '지금 속도'로 씀).
+        서 있을 때(v≈0) min_spin_cmd보다 작은 회전은 0으로: Create 3는 아주 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림.
         받음: v  전진 속도 [m/s], w  회전 속도 [rad/s] (+ 왼쪽)
         내보냄: cmd_vel (TwistStamped: twist.linear.x = v, twist.angular.z = w)"""
+        if abs(v) < 0.01 and abs(w) < self.p['min_spin_cmd']:
+            w = 0.0
         self.cmd = (v, w)
         if not self.enabled:
             self.cmd = (0.0, 0.0)

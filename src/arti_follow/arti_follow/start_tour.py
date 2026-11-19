@@ -98,43 +98,45 @@ class TourMixin:
 
     def search(self, now, pose, here):
         """[SEARCH → WAIT → LOST] step [10] 다음: 관람객을 놓침 (lost_timeout 넘게 좌표가 안 옴, kf.x는 있음).
-        마지막 위치로 이동 → 거기서 search_time 동안 한 바퀴 회전 → wait_time 동안 정지 대기 → LOST (관람 끝).
-        좌표가 다시 오면 step [6]이 FOLLOW로 돌린다.
-        받음: now, pose, here, (kf.x, lost_at, spin_at, turn)
+        마지막 위치로 이동(search_move_time 상한) → 거기서 odom 기준 한 바퀴(360°) 회전 → wait_time 동안 정지 대기
+        → LOST (관람 끝). 좌표가 다시 오면 step [6]이 FOLLOW로 돌린다.
+        받음: now, pose, here, (kf.x, lost_at, spin_at, spun, spin_yaw, wait_at, turn)
         내보냄: set_state(SEARCH/WAIT), drive(...), 끝나면 end_tour(LOST, lost)"""
         p = self.p
-        # ---- 여기부터 = 사람을 놓침 (3 s 넘게 좌표가 안 옴) ----
+        # ---- 여기부터 = 사람을 놓침 (lost_timeout 넘게 좌표가 안 옴) ----
         last, vel = self.person()
         # [11] 방금 놓쳤나? (직전 상태가 FOLLOW) → 예: 놓친 시각·회전 방향 기억 (한 번만) / 아니오: 건너뜀
         # 방금 놓친 순간(직전까지 FOLLOW)에만 한 번: 놓친 시각과 사람이 가던 쪽(왼/오른)을 기억 → 나중에 그쪽으로 돈다
-        if self.state == 'FOLLOW': # 놓친 순간 1회 
-            self.lost_at, self.spin_at = now, None # lost-at은 언제 놓쳤나? spin_at은 회전 탐색은 아직 안 시작함
+        if self.state == 'FOLLOW':
+            self.lost_at, self.spin_at, self.wait_at = now, None, None
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
         # [12] 아직 회전 탐색 전인가? (spin_at == None) → 예: 마지막 위치로 이동 또는 회전 준비 / 아니오: 아래로
-        # 1) 아직 회전 탐색 전: 마지막으로 본 곳까지 먼저 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다)
+        # 1) 마지막으로 본 곳까지 먼저 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다).
+        #    search_move_time(5 s) 상한: 사람이 그 자리에 서 있으면 영원히 도착하지 못하므로
         if self.spin_at is None:
             cap = p['search_move_time']             # 0이면 시간 제한 없음
-            # [12-1] 마지막 위치까지 0.5 m 넘게 남았나? (시간 제한 안인가?) → 예: 그쪽으로 이동 / 아니오: 도착 → 회전 시작 시각 기록
-            # 아직 0.5 m 넘게 남았고 (시간 제한이 있으면) 그 안이면 계속 이동
-            if np.linalg.norm(last - here) > 0.5 and (cap <= 0 or now - self.lost_at < cap):
+            if np.linalg.norm(last - here) > p['search_arrive'] and (cap <= 0 or now - self.lost_at < cap):
                 self.set_state('SEARCH')
                 self.dbg['reason'] = 'search_move'
-                return self.drive(*self.dwa(pose, last, last))
-            self.spin_at = now                      # 도착 → 여기서부터 search_time 동안 한 바퀴 (가속분 5 % 여유)
-            self.spin_speed = float(np.clip(1.05 * 2 * math.pi / max(p['search_time'], 1e-3),
+                return self.go_to(pose, last)       # 목표가 뒤쪽이면 먼저 돌고, 아니면 DWA
+            self.spin_at, self.spun, self.spin_yaw = now, 0.0, pose[2]   # 도착 → 여기서 한 바퀴
+            self.spin_speed = float(np.clip(2 * math.pi / max(p['search_time'], 1e-3),
                                             p['search_spin'], p['max_angular']))
-        t = now - self.spin_at
-        # [13] 회전 탐색 10 s가 안 지났나? (t = now - spin_at < search_time) → 예: 제자리 회전 / 아니오(10 s 이상): 아래로
-        # 2) 도착 뒤 10 s 동안 제자리 한 바퀴: 카메라 화각(88°) 밖으로 나간 사람을 다시 화면에 넣으려고.
-        #    사람이 가던 쪽부터 돈다 (그쪽에 있을 가능성이 크다)
-        if t < p['search_time']:
-            self.set_state('SEARCH') # SEARCH 상태로 바꿈 
-            self.dbg['reason'] = 'search_spin'
-            return self.drive(*self.ramp(0.0, self.turn * self.spin_speed))
-        # [14] 회전 10 s + 대기 10 s가 다 지났나? (t >= search_time + wait_time) → 예: 관람 끝 LOST / 아니오: 아래 WAIT
-        # 4) 회전 10 s + 대기 10 s 다 지남 → 더 기다려도 못 찾는다고 보고 관람 끝 (키오스크에 result lost)
-        if t >= p['search_time'] + p['wait_time']:
+        # [13] 아직 한 바퀴를 다 안 돌았나? (odom yaw로 돈 각도를 잼) → 예: 제자리 회전 / 아니오: 정지 대기 시작
+        # 2) 도착 지점에서 일정 속도(2π/search_time)로 한 바퀴: 카메라 화각 밖으로 나간 사람을 다시 화면에 넣으려고.
+        #    사람이 가던 쪽부터 돈다. 시간이 아니라 실제로 돈 각도로 끝냄 (Create 3 회전 속도가 명령과 달라서)
+        if self.wait_at is None:
+            self.spun += abs(float(wrap(pose[2] - self.spin_yaw)))
+            self.spin_yaw = pose[2]
+            if self.spun < 2 * math.pi and now - self.spin_at < p['search_time'] + p['search_spin_extra']:
+                self.set_state('SEARCH')
+                self.dbg['reason'] = 'search_spin'
+                return self.drive(*self.ramp(0.0, self.turn * self.spin_speed))
+            self.wait_at = now
+            self.get_logger().info(f'회전 탐색 끝: {math.degrees(self.spun):.0f}° / {now - self.spin_at:.1f} s → 정지 대기')
+        # [14] 정지 대기 wait_time이 지났나? → 예: 관람 끝 LOST / 아니오: 아래 WAIT
+        if now - self.wait_at >= p['wait_time']:
             return self.end_tour('LOST', 'lost')
         # 3) 회전으로도 못 찾음 → 멈춰서 기다림 (관람객이 로봇 쪽으로 와 주길). 좌표가 다시 오면 위 FOLLOW로 돌아감
         self.set_state('WAIT')
