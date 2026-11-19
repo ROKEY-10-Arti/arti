@@ -157,6 +157,11 @@ class LidarPersonLocalizer:
         publish_cam_tf = bool(_param_or_cfg('publish_cam_tf', True))
         self.scan_sync_slop_sec = float(_param_or_cfg('scan_sync_slop_sec', 0.25))
         self.require_scan_sync = bool(_param_or_cfg('require_scan_sync', True))
+        # 관측 전용(publish_target_topics=false)일 때는 기본적으로 도킹 중인 로봇의 라이다 모터를 임의로 켜지 않음
+        publish_topics = bool(_param_or_cfg('publish_target_topics', True))
+        self.auto_start_lidar_motor = bool(
+            _param_or_cfg('auto_start_lidar_motor', publish_topics)
+        )
 
         self.xyz = (cam_x, cam_y, cam_z)
         if use_deg:
@@ -200,10 +205,18 @@ class LidarPersonLocalizer:
         self.scan_sub = node.create_subscription(
             LaserScan, self.scan_topic, self._on_scan, qos_profile_sensor_data
         )
-        self.motor_client = node.create_client(Empty, self.start_motor_srv)
+        self.motor_client = (
+            node.create_client(Empty, self.start_motor_srv)
+            if self.auto_start_lidar_motor
+            else None
+        )
         self._motor_requested = False
         self._startup_time = time.time()
-        self._watchdog_timer = node.create_timer(2.5, self._check_lidar_motor)
+        self._watchdog_timer = (
+            node.create_timer(2.5, self._check_lidar_motor)
+            if self.auto_start_lidar_motor
+            else None
+        )
 
         # 3. 타겟 인물 위치 발행 토픽 (로봇 기준 / 맵 기준 / RViz 마커)
         self.pub_point_base = node.create_publisher(
@@ -312,7 +325,7 @@ class LidarPersonLocalizer:
 
     def _check_lidar_motor(self):
         """도킹 스테이션 위에서 라이다 모터가 멈춰 있을 때 자동으로 1회 기동."""
-        if self._motor_requested:
+        if not self.auto_start_lidar_motor or self.motor_client is None or self._motor_requested:
             return
         if time.time() - self.last_scan_WallTime > 2.2:
             self._motor_requested = True
