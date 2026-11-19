@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
-from .zone_geometry import exit_semicircle, boundary_points
+from .zone_geometry import semicircle_from_diameter, boundary_points
 from .guided_tour_plan import load_course_config
 
 
@@ -37,16 +37,18 @@ class ZoneMarkerNode(Node):
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub = self.create_publisher(MarkerArray, 'arti/a_course/zones', qos)
-        # (라벨, 반원, 색상) 목록. 출구는 항상 표시(주황)
-        self.zones = [('EXIT', exit_semicircle(), (1., .42, .08))]
+        # (라벨, 반원, 색상) 목록. 전부 a_course.yaml에서 읽음
+        self.zones = []
         filename = self.get_parameter('config_file').value
         if filename:
             try:
                 cfg = load_course_config(filename)
+                if cfg.exit_marker is not None:
+                    self.zones.append(('EXIT', semicircle_from_diameter(*cfg.exit_marker), (1., .42, .08)))  # 출구: 주황
                 self.zones.append(('KIOSK', cfg.kiosk_zone, (.05, .75, .95)))     # 키오스크: 파랑
                 self.zones.extend((f'ART {a.artwork_id}', a.zone, (.12, .92, .22)) for a in cfg.artworks)  # 작품: 초록
             except Exception as exc:
-                self.get_logger().warn(f'작품 좌표가 아직 준비되지 않아 출구만 표시: {exc}')
+                self.get_logger().warn(f'a_course.yaml을 읽지 못해 반원을 표시하지 않음: {exc}')
         self.timer = self.create_timer(1.0, self.publish_markers)   # 1초마다 재발행
         self.publish_markers()
 

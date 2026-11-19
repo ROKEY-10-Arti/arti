@@ -13,5 +13,4 @@ setup(name=package_name, version='0.1.0', packages=find_packages(),
       license='Apache-2.0',
       # ros2 run arti_pc2_nav <이름> 으로 실행되는 노드들
       entry_points={'console_scripts': ['a_course_node = arti_pc2_nav.a_course_node:main',
-                                                'zone_marker_node = arti_pc2_nav.zone_marker_node:main',
-                                                'hardcoded_tts_node = arti_pc2_nav.hardcoded_tts_node:main']})
+                                                'zone_marker_node = arti_pc2_nav.zone_marker_node:main']})

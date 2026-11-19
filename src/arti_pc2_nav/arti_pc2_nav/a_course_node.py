@@ -1,51 +1,66 @@
-"""ArtI PC2 코스 주행 ROS2 노드 (ROS2 Jazzy / Nav2). 객체 인식은 사용하지 않음.
+"""ArtI PC2 코스 주행 ROS2 노드 (ROS2 Jazzy / Nav2).
 
 역할:
-  - /robot4/arti/tour/select (또는 /arti/course_request) 로 'A' 요청을 받으면
-    안전 점검(_check_ready) -> Undock -> 센서 재수신 대기 -> 코스 시작.
+  - [PC3 -> PC2] /robot4/arti/prepare_tour (arti_interfaces/PrepareTour 액션 서버, 키오스크 "로봇 호출")
+    안전 점검 -> Undock -> 키오스크 이동 -> 관람객 등록(person_tracker) -> success, 키오스크 앞 대기.
+    feedback state: UNDOCKING -> MOVING -> ARRIVED -> REGISTERING -> REGISTERED
+  - [PC3 -> PC2] /robot4/arti/start_tour (arti_interfaces/StartTour 액션 서버, 키오스크 "관람 시작")
+    prepare_tour 성공(키오스크 앞 대기) 뒤에만. artwork_ids 작품을 YAML 코스 순서로 관람 -> 출구 -> 도킹 -> result.
+    feedback state: MOVING(+이동할 작품) / EXPLAINING / ARTWORK_COMPLETED(+작품) / RETURNING
+    이동 중 관람객이 멀어지면 멈추고 come_here 안내, 10초 안 오면 도킹 복귀 (visitor_lost).
+    취소(Action Cancel)·Nav2 실패도 도킹 복귀. result는 도킹이 끝난 뒤.
   - 실제 판단은 course_engine.TourMachine 이 하고, 이 노드는
     센서 데이터를 넣어 주고(tick) 나온 Event를 ROS 동작으로 실행(_dispatch)합니다.
 
 주요 토픽 (namespace = robot4 기준):
-  구독  arti/tour/select, /arti/course_request   코스 요청 ('A' 등)
-        amcl_pose, odom, scan, battery_state, dock_status, tf
-        arti/explanation_result                  TTS 해설 완료 응답(JSON)
-        /arti/course_recovery                    운영자 재시도 {"request_id","action":"retry"}
-  발행  /arti/course_status                      상태 JSON
-        guide_message                            안내 문구('start','tour_end','안녕히가세요')
-        arti/explanation_request                 TTS 해설 요청(JSON)
+  구독  amcl_pose, odom, scan, battery_state, dock_status, tf
+        target_person/point_map                  관람객 위치 (person_tracker, 등록·거리 감시에 사용)
+  발행  /arti/course_status                      상태 JSON (디버그·로그용, PC3와의 약속은 액션 2개)
+        guide_message                            안내 키('register','recognized','start','tour_end' ...) -> arti_audio
+        arti/tour_end                            (Empty) person_tracker 등록 대상 지우기 (호출 시작·관람 없이 종료)
   액션  navigate_to_pose(Nav2), undock, dock(irobot_create_msgs)
+        explain_artwork(arti_interfaces/ExplainArtwork, 작품 번호 int) -> arti_audio guide_audio_node
 
 map 좌표 목표는 항상 실측 설정 파일에서 읽고, 절대 임의로 만들지 않습니다.
 cmd_vel은 절대 발행하지 않습니다. 이동은 Nav2 컨트롤러만 담당합니다.
 """
 from __future__ import annotations
+import collections
 import json
 import math
 import time
+import uuid
 from typing import Optional
 
 import rclpy
 from rclpy.time import Time
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
-from rclpy.action import ActionClient
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from tf2_ros import Buffer, TransformListener
 from sensor_msgs.msg import BatteryState, LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 from .course_engine import TourMachine, Event
-from .guided_tour_plan import Pose2D, parse_course_request, load_course_config
+from .guided_tour_plan import Pose2D, load_course_config
 
-# 선택 의존성: 없는 환경에서도 노드는 뜨도록 None 처리
-try:
-    from arti_interfaces.action import ExplainArtwork   # 오디오팀 액션 (현재는 topic 방식 사용)
-except ImportError:
-    ExplainArtwork = None
+from arti_interfaces.action import ExplainArtwork   # 작품 해설 액션 (서버: arti_audio guide_audio_node)
+from arti_interfaces.action import PrepareTour      # 로봇 호출·등록 (클라이언트: PC3 키오스크)
+from arti_interfaces.action import StartTour        # 코스관람 시작 (클라이언트: PC3 키오스크)
+
+# prepare_tour feedback 순서 (팀 명세서 3.1)
+PREPARE_STATES = ('UNDOCKING', 'MOVING', 'ARRIVED', 'REGISTERING', 'REGISTERED')
+
+# 엔진 상태 -> start_tour feedback state (팀 명세서 3.2). 그 밖의 상태는 feedback 안 바꿈
+TOUR_MOVING = ('NAV_ARTWORK', 'CANCELING', 'VERIFY_STOP', 'WAIT_VISITOR',
+               'NAV_EXIT', 'CANCELING_EXIT', 'VERIFY_EXIT_STOP')
+TOUR_RETURNING = ('FAREWELL', 'NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'DOCKING', 'WAIT_DOCK_CONFIRM')
 
 try:
     from irobot_create_msgs.action import Undock, Dock  # TurtleBot4(Create3) 도킹 액션
@@ -69,18 +84,12 @@ class ACourseNode(Node):
         self.declare_parameter('simulation_battery_percent', -1.0)  # 시뮬레이션 배터리 값
         self.declare_parameter('minimum_battery_percent', 30.0)     # 이 값 미만이면 출발 거부
         self.declare_parameter('map_frame', 'map')
-        self.declare_parameter('initial_pose_timeout', 3.0)
         self.declare_parameter('undock_timeout', 25.0)
         self.declare_parameter('dock_timeout', 90.0)
         self.declare_parameter('require_dock_status', True)    # Dock 후 is_docked 토픽 확인 필수
         # 명시적 모의 전용; 물리 도킹 성공으로 COMPLETED 표시하지 않음.
         self.declare_parameter('simulate_docking', False)
         self.declare_parameter('require_tf', True)             # map->base_link TF 필수 여부
-        # 해설 전달 방식:
-        #   'action' = arti_interfaces/ExplainArtwork 액션
-        #   'topic'  = hardcoded_tts_node (arti/explanation_request -> arti/explanation_result, JSON String)
-        #   launch 파일에서는 'topic'을 넘겨 줍니다.
-        self.declare_parameter('explanation_transport', 'action')
         # [실물 로봇] TurtleBot4 power_saver가 도킹 중 LiDAR를 꺼서
         # scan/AMCL/TF가 언도킹 전까지 오래된 값임. 언도킹 후 다시 들어올 때까지 대기.
         self.declare_parameter('post_undock_sensor_timeout', 30.0)
@@ -89,6 +98,24 @@ class ACourseNode(Node):
         # LiDAR 재시작 후 Nav2가 새 map->odom TF를 쓰려면 몇 초 필요.
         # 너무 빨리 목표를 보내면 'Initial robot pose is not available'로 ABORT됨.
         self.declare_parameter('post_undock_settle_time', 3.0)
+        # [prepare_tour] 관람객 등록 — 값은 arti_follow visitor_follower와 같게
+        self.declare_parameter('visitor_topic', 'target_person/point_map')  # person_tracker 출력 (namespace 안)
+        self.declare_parameter('register_confirm_time', 1.0)   # 이만큼 끊김 없이 보이면 등록 [s]
+        self.declare_parameter('register_gap', 0.5)            # 인식이 이보다 오래 끊기면 확인 다시 [s]
+        self.declare_parameter('register_timeout', 60.0)       # 키오스크 도착 후 등록 제한 -> 실패, 도킹 복귀 [s]
+        self.declare_parameter('ready_timeout', 130.0)         # 등록 후 start_tour 대기 제한 -> 도킹 복귀 [s] (robot1과 같음)
+        self.declare_parameter('skip_register', False)         # true면 인식 없이 등록 (person_tracker 없이 시험)
+        self.declare_parameter('register_guide', 'register')            # guide_lines.yaml 키: 손바닥 안내
+        self.declare_parameter('recognized_guide', 'recognized')        # 인식 완료
+        self.declare_parameter('register_failed_guide', 'register_failed')  # 등록 실패 / 관람객 분실
+        # [start_tour] 관람 중 관람객 거리 감시 (판단 값은 arti_follow와 같게. 주행은 Nav2라 주행 값은 안 씀)
+        self.declare_parameter('watch_visitor', True)          # false면 감시 안 함
+        self.declare_parameter('far_distance', 1.5)            # 이보다 멀면 Nav2 goal 취소(정지) + come_here [m]
+        self.declare_parameter('resume_distance', 0.95)        # 멈춘 뒤 이 안으로 오면 같은 목표 다시 전송 [m] (0.8+0.15)
+        self.declare_parameter('lost_timeout', 3.0)            # 인식이 이만큼 끊기면 안 보이는 것 [s] (arti_follow)
+        self.declare_parameter('visitor_give_up', 10.0)        # 멈춘 뒤 이만큼 안 오면 관람 끝 -> 도킹 복귀 [s]
+        self.declare_parameter('start_guide', 'start')         # guide_lines.yaml 키: 관람 시작
+        self.declare_parameter('come_here_guide', 'come_here') # 따라오세요 (관람객이 멀어짐)
 
         # Nav2/AMCL lifecycle 상태 확인용 클라이언트
         # _lifecycle[name] = [GetState 클라이언트, 진행 중 future, active 여부]
@@ -140,7 +167,22 @@ class ACourseNode(Node):
             self._machine = TourMachine(
                 load_course_config(filename),
                 simulate_explanation=bool(self.get_parameter('simulation_mode').value),
-                dock_timeout=float(self.get_parameter('dock_timeout').value))
+                dock_timeout=float(self.get_parameter('dock_timeout').value),
+                register_confirm_time=float(self.get_parameter('register_confirm_time').value),
+                register_gap=float(self.get_parameter('register_gap').value),
+                register_timeout=float(self.get_parameter('register_timeout').value),
+                ready_timeout=float(self.get_parameter('ready_timeout').value),
+                skip_register=bool(self.get_parameter('skip_register').value),
+                register_guide=str(self.get_parameter('register_guide').value),
+                recognized_guide=str(self.get_parameter('recognized_guide').value),
+                register_failed_guide=str(self.get_parameter('register_failed_guide').value),
+                watch_visitor=bool(self.get_parameter('watch_visitor').value),
+                far_distance=float(self.get_parameter('far_distance').value),
+                resume_distance=float(self.get_parameter('resume_distance').value),
+                lost_timeout=float(self.get_parameter('lost_timeout').value),
+                visitor_give_up=float(self.get_parameter('visitor_give_up').value),
+                start_guide=str(self.get_parameter('start_guide').value),
+                come_here_guide=str(self.get_parameter('come_here_guide').value))
         except Exception as exc:
             self._config_error = str(exc)
             self.get_logger().error(f'좌표 설정 오류. 이동 차단: {self._config_error}')
@@ -151,14 +193,11 @@ class ACourseNode(Node):
         self._nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self._undock_client = ActionClient(self, Undock, 'undock') if Undock else None
         self._dock_client = ActionClient(self, Dock, 'dock') if Dock else None
-        self._explain_client = ActionClient(self, ExplainArtwork, 'explain_artwork') if ExplainArtwork else None
+        self._explain_client = ActionClient(self, ExplainArtwork, 'explain_artwork')
         self._explain_goal = None
         self._status_pub = self.create_publisher(String, '/arti/course_status', 10)
         self._guide_pub = self.create_publisher(String, 'guide_message', 10)
-        self._explanation_pub = self.create_publisher(String, 'arti/explanation_request', 10)
-        # 코스 요청 (둘 중 아무 토픽이나)
-        self.create_subscription(String, '/arti/course_request', self._on_request, 10)
-        self.create_subscription(String, 'arti/tour/select', self._on_request, 10)
+        self._tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)   # person_tracker 대상 지우기
         # [실물 로봇] AMCL은 amcl_pose를 reliable + transient_local 로 발행하므로 QoS를 맞춤
         # (기본 QoS로는 마지막 위치를 받지 못함)
         amcl_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -170,21 +209,25 @@ class ACourseNode(Node):
         if DockStatus is not None:
             self.create_subscription(DockStatus, 'dock_status', self._on_dock_status,
                                      qos_profile_sensor_data)
-        # TODO(객체인식팀): ROS API 합의 후 등록 관람객 ID와 타임스탬프가 있는
-        # map 좌표 관람객 검출 결과를 여기에 연결.
-        # self.create_subscription(RegisteredVisitor, 'visitor/registered', self._on_registered, ...)
-        # self.create_subscription(TrackedVisitor, 'visitor/tracking', self._on_tracking, ...)
-        # 현재 PC2 단독 테스트에서는 관람객 인식 없이 KIOSK_STOPPED 후 바로 진행.
-        # TODO(오디오팀): 시뮬레이션의 2초 모의 해설을 ExplainArtwork 액션/서비스로
-        # 대체하고 그 결과를 explanation_result()로 넘길 것.
-        # 해설 결과 JSON 토픽 (hardcoded_tts_node 가 재생 완료 후 발행)
-        self.create_subscription(String, 'arti/explanation_result', self._on_explanation_result, 10)
-        # 운영자 복구 승인
-        self.create_subscription(String, '/arti/course_recovery', self._on_recovery, 10)
-        # TODO(PC3팀): /arti/get_course 서비스와 /arti/course_status 응답은
-        # 합의된 인터페이스로 교체. String/JSON은 임시 어댑터.
+        # 관람객 위치 (person_tracker: 손바닥으로 대상이 정해진 뒤부터 발행). 등록 판정에 사용
+        self.create_subscription(PointStamped, self.get_parameter('visitor_topic').value,
+                                 self._on_visitor, 10)
+        # [PC3 -> PC2] 로봇 호출·등록 액션. 실행 함수는 끝날 때까지 기다리므로 별도 스레드 그룹에서 돈다.
+        # 실행 함수는 상태를 바꾸지 않고, _tick(기본 그룹)이 판단해 둔 결과(_prep)를 읽어 feedback/result로 보낸다.
+        self._prep = None          # 진행 중인 prepare_tour: dict(start, feedback, outcome, cancel)
+        self._prepare_server = ActionServer(
+            self, PrepareTour, 'arti/prepare_tour', self._prepare_execute,
+            goal_callback=self._prepare_goal, cancel_callback=lambda _g: CancelResponse.ACCEPT,
+            callback_group=ReentrantCallbackGroup())
+        # [PC3 -> PC2] 코스관람 시작 액션. 같은 방식: 판단은 _update_tour(_tick), 실행 함수는 중계만.
+        self._tour = None          # 진행 중인 start_tour: dict(ids, started, feedback(deque), outcome, cancel)
+        self._tour_server = ActionServer(
+            self, StartTour, 'arti/start_tour', self._tour_execute,
+            goal_callback=self._tour_goal, cancel_callback=lambda _g: CancelResponse.ACCEPT,
+            callback_group=ReentrantCallbackGroup())
         self.create_timer(.1, self._tick)   # 10Hz 메인 루프
-        self.get_logger().info('PC2 node initialized; enable_motion must be true to accept requests')
+        self.get_logger().info('PC2 node initialized (prepare_tour, start_tour 대기); '
+                               'enable_motion must be true to accept requests')
 
     def _now(self):
         """현재 ROS 시각(초)."""
@@ -269,12 +312,8 @@ class ACourseNode(Node):
             return 'AMCL/map_server/Nav2 lifecycle not active'
         # 해설 수단 준비 확인 (simulation_mode면 생략)
         if not self.get_parameter('simulation_mode').value:
-            if self.get_parameter('explanation_transport').value == 'topic':
-                # TTS 노드가 arti/explanation_request 를 구독하고 있어야 함
-                if self._explanation_pub.get_subscription_count() == 0:
-                    return 'TTS 노드 미실행 (arti/explanation_request 구독자 없음)'
-            elif self._explain_client is None or not self._explain_client.server_is_ready():
-                return '실물 ExplainArtwork 액션 미준비'
+            if not self._explain_client.server_is_ready():
+                return 'explain_artwork 액션 서버 미준비 (arti_audio guide_audio_node 실행 확인)'
         # 작품 4까지 다 돌고 나서야 Dock 서버가 없다는 걸 알면 안 되므로 출발 전에 확인.
         mock_dock = (self.get_parameter('simulation_mode').value and
                      self.get_parameter('simulate_docking').value)
@@ -295,35 +334,32 @@ class ACourseNode(Node):
     # 코스 요청 -> 언도킹
     # ------------------------------------------------------------
 
-    def _on_request(self, msg):
-        """코스 요청 수신 ('A'). 점검 통과 시 언도킹부터 시작."""
-        # 이미 무언가 진행 중이면 중복 요청 거절
-        if (self._undocking or self._await_sensors_since is not None or self._docking_inflight or self._dock_goal is not None
-                or self._nav_inflight or self._goal_handle is not None
+    def _busy(self):
+        """무언가 진행 중이면 True (중복 요청 거절용)."""
+        return (self._undocking or self._await_sensors_since is not None or self._docking_inflight
+                or self._dock_goal is not None or self._nav_inflight or self._goal_handle is not None
                 or self._undock_failed_latched
-                or (self._machine and self._machine.state not in ('IDLE','DONE','ERROR'))):
-            self._reject('코스주행 중복 요청')
-            return
-        try:
-            req = parse_course_request(msg.data)
-        except ValueError as exc:
-            self._reject(str(exc)); return
+                or (self._machine is not None and self._machine.state not in ('IDLE', 'DONE', 'ERROR')))
+
+    def _begin_course(self, request_id: str) -> Optional[str]:
+        """[prepare_tour] 점검 통과 시 언도킹부터 시작 (키오스크에서 등록 후 멈춤).
+        거절하면 이유 문자열, 시작하면 None."""
+        if self._busy():
+            return '코스주행 중복 요청'
         reason = self._check_ready()
         if reason:
-            self._reject(reason); return
-        if not req.all_artworks:
-            self._reject('이번 구현은 전체 코스 A 전용입니다'); return
+            return reason
         if self._is_docked is None or self._now()-self._dock_status_stamp > 3.0:
-            self._reject('최신 dock_status 없음'); return
+            return '최신 dock_status 없음'
         self._session += 1
         self._pending_cancel = False
         self._goal_handle = None
         try:
             # 언도킹 '전'의 정확한 도킹 위치를 먼저 기록.
             # Nav2 복귀 목표는 언도킹 '후' 충돌 없는 위치로 갱신됨.
-            events = self._machine.start(req, self._now(), self._pose)
+            events = self._machine.start(request_id, self._now(), self._pose)
         except ValueError as exc:
-            self._reject(str(exc)); return
+            return str(exc)
         if self._is_docked is False:
             # 이미 언도킹 상태: 바로 키오스크로 출발
             self._machine.set_post_undock_pose(self._pose)
@@ -332,20 +368,213 @@ class ACourseNode(Node):
             # 시뮬레이션 전용: 언도킹 생략
             if not self.get_parameter('simulation_mode').value:
                 self._dispatch(self._machine.fail('실기에서는 도킹 해제를 임의로 건너뛸 수 없습니다'))
-                return
-            self._emit({'request_id': req.request_id, 'state': 'UNDOCK_SKIPPED',
+                return None
+            self._emit({'request_id': request_id, 'state': 'UNDOCK_SKIPPED',
                         'detail': '시뮬레이터 시작 시 이미 undocked라고 가정', 'completed': []})
             self._dispatch(events)
         else:
             # 도킹 상태: Undock 액션 실행, 키오스크 이동 Event는 끝난 뒤로 보류
             if self._undock_client is None or not self._undock_client.server_is_ready():
                 self._dispatch(self._machine.fail('Undock 액션 서버 미준비'))
-                return
+                return None
             self._undocking = True
             self._undock_started = self._now()
             self._pending_nav = events
             future = self._undock_client.send_goal_async(Undock.Goal())
             future.add_done_callback(self._undock_accepted)
+        return None
+
+    # ------------------------------------------------------------
+    # [PC3 -> PC2] prepare_tour 액션 (로봇 호출·등록)
+    #   스레드 나눔: _prepare_execute(액션 스레드)는 기다리며 feedback/result만 보내고,
+    #   시작·판단·취소는 전부 _update_prepare(_tick, 기본 스레드)가 한다.
+    # ------------------------------------------------------------
+
+    def _prepare_goal(self, goal_request):
+        """goal 받을지: start=false거나 이미 호출 처리 중이면 거절 (액션 스레드, 읽기만)."""
+        if not goal_request.start:
+            self.get_logger().warn('prepare_tour 거절: start=false')
+            return GoalResponse.REJECT
+        if self._prep is not None:
+            self.get_logger().warn('prepare_tour 거절: 이미 호출 처리 중')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _prepare_execute(self, goal):
+        """[액션 스레드] prepare_tour goal 하나를 끝까지: 시작 요청 -> feedback 중계 -> result."""
+        prep = {'start': None, 'feedback': None, 'outcome': None, 'cancel': False}
+        self._prep = prep                       # _tick이 다음 주기에 시작 처리
+        sent = -1                               # 마지막으로 보낸 feedback 순번 (PREPARE_STATES)
+        try:
+            while rclpy.ok():
+                if goal.is_cancel_requested:
+                    prep['cancel'] = True       # _tick이 복귀 처리 후 outcome = canceled
+                outcome = prep['outcome']
+                state = 'REGISTERED' if outcome and outcome[0] == 'success' else prep['feedback']
+                if state in PREPARE_STATES and PREPARE_STATES.index(state) > sent:
+                    # 짧게 지나간 단계(ARRIVED 등)도 빠짐없이 순서대로 보냄.
+                    # 처음 보내는 게 UNDOCKING이 아니면(이미 언독 상태) MOVING부터.
+                    idx = PREPARE_STATES.index(state)
+                    first = sent + 1 if sent >= 0 else (0 if state == 'UNDOCKING' else 1)
+                    for name in PREPARE_STATES[first:idx+1]:
+                        goal.publish_feedback(PrepareTour.Feedback(state=name))
+                    sent = idx
+                if outcome is not None:
+                    kind, message = outcome
+                    if kind == 'success':
+                        goal.succeed()
+                    elif kind == 'canceled' and goal.is_cancel_requested:
+                        goal.canceled()
+                    else:
+                        goal.abort()
+                    self.get_logger().info(f'prepare_tour 끝: {kind} ({message})')
+                    return PrepareTour.Result(success=kind == 'success', message=message)
+                time.sleep(0.1)
+            goal.abort()
+            return PrepareTour.Result(success=False, message='shutdown')
+        finally:
+            self._prep = None
+
+    def _update_prepare(self, now):
+        """[_tick] 진행 중인 prepare_tour의 시작·feedback·결과·취소를 판단해 _prep에 적어 둔다."""
+        prep = self._prep
+        if prep is None or prep['outcome'] is not None:
+            return
+        m = self._machine
+        # (1) 시작: 점검 -> 언독 -> 키오스크 (거절이면 바로 실패)
+        if prep['start'] is None:
+            self._tour_end_pub.publish(Empty())         # 지난 관람객 등록 지우기
+            reason = self._begin_course(str(uuid.uuid4()))
+            prep['start'] = reason or ''
+            if reason:
+                self._reject(reason)
+                prep['outcome'] = ('fail', reason)
+            return
+        # (2) 취소 (PC3 Action Cancel): 언독 중이면 끝날 때까지 기다렸다가 복귀
+        if prep['cancel'] and not (self._undocking or self._await_sensors_since is not None):
+            if m.state not in ('IDLE', 'DONE', 'ERROR'):
+                self._abort_home('canceled', now)
+                prep['outcome'] = ('canceled', 'canceled')
+                return
+        # (3) 지금 단계 -> feedback 이름 / 끝났는지
+        if self._undocking or self._await_sensors_since is not None:
+            prep['feedback'] = 'UNDOCKING'
+        elif m.state in ('NAV_KIOSK', 'CANCELING'):
+            prep['feedback'] = 'MOVING'
+        elif m.state == 'VERIFY_STOP':
+            prep['feedback'] = 'ARRIVED'
+        elif m.state == 'REGISTERING':
+            prep['feedback'] = 'REGISTERING'
+        elif m.state == 'WAIT_START':
+            prep['feedback'] = 'REGISTERED'
+            prep['outcome'] = ('success', 'registered')
+        elif m.state == 'ERROR':
+            prep['outcome'] = ('fail', m.fail_reason or 'error')
+        elif m.end_reason:
+            # 등록 실패·Nav2 실패 등으로 도킹 복귀 시작
+            self._tour_end_pub.publish(Empty())
+            prep['outcome'] = ('fail', m.end_reason)
+
+    def _on_visitor(self, msg):
+        """target_person/point_map 수신 -> 인식 시각·map 좌표 기록 (등록 판정, 관람 중 거리 감시)."""
+        if self._machine is not None:
+            self._machine.visitor_seen(self._now(), (msg.point.x, msg.point.y))
+
+    def _abort_home(self, reason, now):
+        """[_tick] 관람 그만두고 도킹 복귀: 해설 중이면 끊고, person_tracker 대상도 지움."""
+        if self._explain_goal is not None:
+            self._explain_goal.cancel_goal_async()
+            self._explain_goal = None
+        self._dispatch(self._machine.abort_to_home(reason, now))
+        self._tour_end_pub.publish(Empty())
+
+    # ------------------------------------------------------------
+    # [PC3 -> PC2] start_tour 액션 (코스관람 시작)
+    # ------------------------------------------------------------
+
+    def _tour_goal(self, goal_request):
+        """goal 받을지: 이미 관람 중이면 거절. 준비(WAIT_START) 여부는 _update_tour가 보고 실패로 알림."""
+        if self._tour is not None:
+            self.get_logger().warn('start_tour 거절: 이미 관람 중')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _tour_execute(self, goal):
+        """[액션 스레드] start_tour goal 하나를 끝까지: feedback 중계 -> 도킹 후 result."""
+        tour = {'ids': list(goal.request.artwork_ids), 'started': False, 'last': None,
+                'done_count': 0, 'feedback': collections.deque(), 'outcome': None, 'cancel': False}
+        self._tour = tour
+        try:
+            while rclpy.ok():
+                if goal.is_cancel_requested:
+                    tour['cancel'] = True
+                while tour['feedback']:
+                    state, art = tour['feedback'].popleft()
+                    goal.publish_feedback(StartTour.Feedback(state=state, artwork_id=art))
+                if tour['outcome'] is not None and not tour['feedback']:
+                    kind, message = tour['outcome']
+                    if kind == 'success':
+                        goal.succeed()
+                    elif kind == 'canceled' and goal.is_cancel_requested:
+                        goal.canceled()
+                    else:
+                        goal.abort()
+                    self.get_logger().info(f'start_tour 끝: {kind} ({message})')
+                    return StartTour.Result(success=kind == 'success', message=message)
+                time.sleep(0.1)
+            goal.abort()
+            return StartTour.Result(success=False, message='shutdown')
+        finally:
+            self._tour = None
+
+    def _update_tour(self, now):
+        """[_tick] 진행 중인 start_tour의 시작·feedback·결과·취소 판단."""
+        tour = self._tour
+        if tour is None or tour['outcome'] is not None:
+            return
+        m = self._machine
+        # (1) 시작: prepare_tour로 등록된 뒤(WAIT_START)에만
+        if not tour['started']:
+            tour['started'] = True
+            reason = self._check_ready() if m.state == 'WAIT_START' else 'not_prepared'
+            if not reason:
+                try:
+                    self._dispatch(m.begin_tour(tour['ids'], now))
+                except ValueError as exc:
+                    reason = str(exc)
+            if reason:
+                self.get_logger().warn(f'start_tour 거절: {reason}')
+                tour['outcome'] = ('fail', reason)
+            return
+        # (2) 취소: 도킹 복귀 (result는 도킹 뒤 canceled)
+        if tour['cancel'] and not m.end_reason and m.state not in ('DONE', 'ERROR'):
+            self._abort_home('canceled', now)
+        # (3) 작품 설명 완료 -> ARTWORK_COMPLETED (작품마다 한 번)
+        while tour['done_count'] < len(m.completed):
+            tour['feedback'].append(('ARTWORK_COMPLETED', int(m.completed[tour['done_count']])))
+            tour['done_count'] += 1
+        # (4) 지금 상태 -> feedback (바뀔 때만)
+        if m.state in TOUR_MOVING:
+            moving_to = (m.plan.artworks[m.index].artwork_id
+                         if 0 <= m.index < len(m.plan.artworks) and not m.exit_pending else 0)
+            current = ('MOVING', int(moving_to))
+        elif m.state == 'EXPLAINING':
+            current = ('EXPLAINING', int(m.plan.artworks[m.index].artwork_id))
+        elif m.state in TOUR_RETURNING:
+            current = ('RETURNING', 0)
+        else:
+            current = tour['last']
+        if current is not None and current != tour['last']:
+            tour['feedback'].append(current)
+            tour['last'] = current
+        # (5) 끝: 도킹까지 끝난 뒤 result
+        if m.state == 'DONE':
+            if not m.end_reason:
+                tour['outcome'] = ('success', 'completed')
+            else:
+                tour['outcome'] = ('canceled' if m.end_reason == 'canceled' else 'fail', m.end_reason)
+        elif m.state == 'ERROR':
+            tour['outcome'] = ('fail', m.fail_reason or 'error')
 
     def _undock_accepted(self, future):
         """Undock goal 수락 여부 확인 -> 결과 대기 등록."""
@@ -426,7 +655,7 @@ class ACourseNode(Node):
                             'state': 'EXPLANATION_REQUESTED',
                             'detail': str(event.value), 'completed': list(self._machine.completed)})
                 if not self.get_parameter('simulation_mode').value:
-                    self._start_explanation(str(event.value))   # 실제 TTS 해설 요청
+                    self._start_explanation(int(event.value))   # 작품 번호로 해설 요청
 
     # ------------------------------------------------------------
     # Nav2 NavigateToPose
@@ -573,28 +802,6 @@ class ACourseNode(Node):
             self._dispatch(self._machine.fail(f'Dock 결과 조회 실패: {exc}'))
 
     # ------------------------------------------------------------
-    # 해설(TTS) 결과
-    # ------------------------------------------------------------
-
-    def _on_explanation_result(self, msg):
-        """arti/explanation_result JSON 수신 -> 해설 완료 처리.
-
-        형식: {"request_id":"...", "artwork_id":"2", "success":true}
-        현재 request_id 와 다르면 옛 응답이므로 무시.
-        """
-        if self._machine is None or self.get_parameter('simulation_mode').value:
-            return
-        try:
-            data = json.loads(msg.data)
-            if data.get('request_id') != self._machine.request_id:
-                return
-            events = self._machine.explanation_result(
-                str(data['artwork_id']), data['success'] is True, self._now())
-            self._dispatch(events)
-        except (ValueError, KeyError, TypeError) as exc:
-            self.get_logger().warn(f'잘못된 해설 결과: {exc}')
-
-    # ------------------------------------------------------------
     # 메인 루프 (10Hz)
     # ------------------------------------------------------------
 
@@ -603,6 +810,15 @@ class ACourseNode(Node):
         if self._machine is None:
             return
         now = self._now()
+        self._update_prepare(now)   # prepare_tour 시작·feedback·결과·취소
+        self._update_tour(now)      # start_tour 시작·feedback·결과·취소
+        # Nav2 이동 실패(WAIT_RECOVERY): PC3에 재시도 수단이 없으므로 도킹 복귀. 복귀 중 실패면 멈추고 ERROR
+        if self._machine.state == 'WAIT_RECOVERY':
+            if self._machine.returning:
+                self._dispatch(self._machine.fail(f'복귀 실패: {self._machine.recover_reason}'))
+            else:
+                self.get_logger().warn(f'Nav2 실패 -> 도킹 복귀: {self._machine.recover_reason}')
+                self._abort_home('nav_failed', now)
 
         # (1) Nav2/AMCL 노드 lifecycle 상태 폴링 (id 3 = active)
         for client, future, active in list(self._lifecycle.values()):
@@ -672,7 +888,7 @@ class ACourseNode(Node):
         if self._machine.state in ('NAV_KIOSK', 'NAV_ARTWORK', 'NAV_HOME', 'NAV_EXIT', 'CANCELING',
                                    'CANCELING_HOME', 'CANCELING_EXIT',
                                    'VERIFY_STOP', 'VERIFY_HOME_STOP', 'VERIFY_EXIT_STOP',
-                                   'FAREWELL', 'EXPLAINING',
+                                   'FAREWELL', 'EXPLAINING', 'REGISTERING', 'WAIT_START', 'WAIT_VISITOR',
                                    'DOCKING', 'WAIT_DOCK_CONFIRM'):
             pose_age = now - self._pose_stamp if self._pose else float('inf')
             odom_age = now - self._odom_stamp
@@ -696,25 +912,14 @@ class ACourseNode(Node):
     # ------------------------------------------------------------
 
     def _start_explanation(self, artwork_id):
-        """작품 해설 요청. topic 방식이면 hardcoded_tts_node 로 JSON 발행."""
-        if self.get_parameter('explanation_transport').value == 'topic':
-            if self._explanation_pub.get_subscription_count() == 0:
-                self._dispatch(self._machine.fail('TTS 구독 노드가 없음: arti/explanation_request'))
-                return
-            # event 값은 explanation_id('art_01')이므로, TTS 노드가 쓰는 artwork_id('1')로 바꿔 보냄
-            art_id = self._machine.plan.artworks[self._machine.index].artwork_id
-            request = {'request_id': self._machine.request_id, 'artwork_id': art_id}
-            self._explanation_pub.publish(String(data=json.dumps(request, ensure_ascii=False)))
-            self.get_logger().info(f'TTS 해설 요청: 작품 {art_id}')
-            return
-        # --- action 방식 (arti_interfaces/ExplainArtwork) ---
-        if self._explain_client is None or not self._explain_client.server_is_ready():
-            self._dispatch(self._machine.fail('ExplainArtwork 액션 서버 미준비 (arti_interfaces 확인)'))
+        """작품 해설 요청: explain_artwork 액션 goal(작품 번호 int) 전송.
+        guide_audio_node가 이 번호로 PC3 /arti/description에 설명을 묻고 읽어 준다."""
+        if not self._explain_client.server_is_ready():
+            self._dispatch(self._machine.fail('explain_artwork 액션 서버 미준비 (arti_audio guide_audio_node)'))
             return
         goal = ExplainArtwork.Goal()
         goal.artwork_id = artwork_id
-        if hasattr(goal, 'request_id'):
-            goal.request_id = self._machine.request_id
+        self.get_logger().info(f'작품 {artwork_id} 해설 요청 (explain_artwork)')
         token = self._session
         self._explain_client.send_goal_async(goal).add_done_callback(
             lambda f: self._explain_accepted(f, token, artwork_id))
@@ -746,35 +951,15 @@ class ACourseNode(Node):
         except Exception as exc:
             self._dispatch(self._machine.fail(f'해설 결과 실패: {exc}'))
 
-    # ------------------------------------------------------------
-    # 운영자 복구
-    # ------------------------------------------------------------
-
-    def _on_recovery(self, msg):
-        """/arti/course_recovery {"request_id":"...","action":"retry"} -> 실패 구간 재시도."""
-        try:
-            data = json.loads(msg.data)
-            if (self._machine.state != 'WAIT_RECOVERY'
-                or data.get('request_id') != self._machine.request_id
-                or data.get('action') != 'retry'):
-                return
-            if self._nav_inflight or self._goal_handle is not None or self._cancel_inflight:
-                self.get_logger().warn('Nav2 목표 취소 완료 전에는 복구 불가')
-                return
-            reason = self._check_ready()
-            if reason:
-                self.get_logger().warn(f'복구 거절: {reason}')
-                return
-            self._dispatch(self._machine.retry(self._now()))
-        except (KeyError, ValueError, TypeError) as exc:
-            self.get_logger().warn(f'잘못된 복구 요청: {exc}')
-
 
 def main(args=None):
     rclpy.init(args=args)
     node = ACourseNode()
+    # prepare_tour 실행 함수가 기다리는 동안에도 _tick·콜백이 돌도록 스레드 여러 개
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass   # Ctrl+C 정상 종료
     finally:

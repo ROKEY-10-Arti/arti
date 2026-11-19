@@ -12,5 +12,9 @@
   <exec_depend>action_msgs</exec_depend><exec_depend>visualization_msgs</exec_depend><exec_depend>tf2_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>arti_interfaces</exec_depend>  <!-- ExplainArtwork, PrepareTour, StartTour -->
+  <exec_depend>arti_audio</exec_depend>       <!-- launch에서 guide_audio.launch.py include -->
+  <exec_depend>person_tracker</exec_depend>   <!-- launch에서 웹캠·인식 노드 include -->
+  <exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend>
   <export><build_type>ament_python</build_type></export>
 </package>
