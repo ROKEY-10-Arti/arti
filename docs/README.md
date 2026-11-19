@@ -11,6 +11,9 @@ docs/
 ├── follow/              사용자 추종 팀 (src/arti_follow/)
 │   ├── README.md            범위, 노드·인터페이스·파라미터 설계, 확인 필요 사항
 │   └── tasks.md             노션 작업 목록 T01~T46 체크리스트
+├── course/              코스관람 (src/arti_pc2_nav/, robot4)
+│   ├── README.md            다른 팀과 주고받는 것, 패키지 README 링크
+│   └── arti_course_flow.drawio  흐름 그림 (예전 구조 기준)
 └── troubleshooting/     에러 기록 (하위 폴더도 env/robot/common/follow)
 ```
 
