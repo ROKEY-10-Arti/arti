@@ -19,7 +19,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
-from arti_follow.artwork_zone import load_zones
+from arti_common.zones import load_zones   # 구역 읽기 (두 로봇 공통)
 
 ART = (0.2, 0.5, 1.0)       # 작품 구역 색
 GUIDE = (1.0, 0.6, 0.1)     # 안내 구역 색

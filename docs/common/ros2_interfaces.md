@@ -30,6 +30,27 @@
 
 Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한다.
 
+### 2.1 키오스크 흐름 (로봇별, 2026-11-19)
+
+두 로봇 모두 `prepare_tour` → `start_tour` 순서. 차이는 `start_tour`를 보내는 때.
+
+```
+ robot1 (자유관람)                                robot4 (코스관람)
+ [호출] ─▶ /robot1/arti/prepare_tour              [호출] ─▶ /robot4/arti/prepare_tour
+          ◀─ success                                       ◀─ success
+ [관람 시작] 버튼 ─▶ /robot1/arti/start_tour {[]}   바로 자동 ─▶ /robot4/arti/start_tour {[1, 3, 4]}
+```
+
+| 키오스크 규칙 | robot1 | robot4 |
+|---|---|---|
+| [호출] 켜는 조건 | `/robot1/dock_status` is_docked = true | `/robot4/dock_status` is_docked = true |
+| `start_tour` 보내는 때 | 관람객이 [관람 시작]을 누를 때 (prepare success 뒤 한 번) | prepare success 직후 자동 |
+| 대기 제한 | prepare success 뒤 120 s 안에 안 누르면 처음 화면 (로봇은 130 s 뒤 스스로 끝냄) | 없음 |
+| `artwork_ids` | `[]` | 선택한 작품 번호 |
+
+robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 busy·not_prepared 검사를 하지 않는다.
+도크 밖에서 호출되면 `not_docked`로 거절 (관람은 항상 도크에서 시작).
+
 ## 3. 메시지 타입
 
 ### 3.1 PrepareTour.action
@@ -67,6 +88,7 @@ Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한
 ### 3.3 Description.srv
 작품 ID는 ROS 통신에서 `int32`로 통일, PC3에서 필요 시 DB 문자열 ID로 변환.
 
+
 ## 4. 작품 위치 및 구역 정보
 
 | 데이터 | 위치 | 용도 |
@@ -88,8 +110,9 @@ Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한
 | `/robot{1,4}/odom` | nav_msgs/Odometry | 이동 상태 |
 
 ## 6. 통합 구현 체크리스트
-- [ ] PC1·PC2: PrepareTour Action Server 구현 (언독·이동·관람객 등록까지)
-- [ ] StartTour에서 준비 단계 중복 실행 제거
+- [x] PC1: PrepareTour Action Server 구현 (언독·이동·관람객 등록까지, visitor_follower, 2026-11-18)
+- [ ] PC2: PrepareTour Action Server 구현
+- [x] PC1: StartTour에서 준비 단계 중복 실행 제거 (prepare_tour 성공 뒤에만 받음)
 - [ ] PC3: 각 로봇 Action Client 연결
 - [ ] PC3: `/arti/description` Service Server 구현
 - [x] PC1: Description Service Client 구현 (arti_audio `guide_audio_node`, 2026-11-18)

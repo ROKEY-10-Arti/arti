@@ -1,15 +1,23 @@
 """추종 테스트를 한 번에: 웹캠 사람 인식 + visitor_follower(실제 주행) + ros2 bag 녹화.
 
     ros2 launch arti_follow follow_test.launch.py
-    → <ns>/arti/start_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림,
-      인식 창에서 따라갈 사람을 마우스로 클릭하면 "인식되었습니다" 안내 후 따라간다
+    → <ns>/arti/prepare_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림 (등록),
+      그다음 <ns>/arti/start_tour 액션을 보내면 따라간다.
+      관람객 등록: tracker:=gesture(기본)면 로봇 앞에서 손 제스처(주먹 → 손바닥 펴기),
+      tracker:=front면 로봇 바로 앞 사람 자동 등록 또는 인식 창 클릭 → "인식되었습니다" 안내
+      ros2 action send_goal /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}" --feedback
       ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}" --feedback
 
 옵션
     drive:=false             인식·계산·로그만 하고 cmd_vel은 보내지 않음
     test:=false              ros2 bag 녹화 끄기
     bag_dir:=<폴더>          bag 저장 폴더 (기본 ~/arti_bags/follow, 그 아래 <날짜_시각>/)
-    tracker:=camera          카메라만 띄우고 인식 노드(multi_tracker_node)는 뺌 (인식은 다른 PC·bag 재생에서)
+    tracker:=gesture         (기본) gesture_test_node: 손 제스처(주먹 → 손바닥)로 관람객 등록
+                             (visitor_follower auto_register 끔)
+    tracker:=front           front_tracker_node: 로봇 바로 앞 사람 자동 등록(register_front) + 클릭 등록
+    tracker:=all             multi_tracker_node (예전 노드, 모델·모드 바꾸는 벤치마크 화면) + 앞 사람 자동 등록
+    tracker:=camera          카메라만 띄우고 인식 노드는 뺌 (인식은 다른 PC·bag 재생에서)
+    (gesture·front는 person_tracker BaseTrackerNode를 상속한 같은 구조, 좌표 토픽·형식은 셋 다 같음)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
     auto_start:=true         액션 없이 켜자마자 관람 시작
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
@@ -17,7 +25,7 @@
 
 뜨는 것
     phone_camera.launch.py (person_tracker)   camera_pub: 웹캠 → <ns>/top_cam/image_raw/compressed, top_cam_tf
-    multi_tracker_node (person_tracker)       YOLO 인식 + LiDAR → <ns>/target_person/point_map
+    인식 노드 (person_tracker, tracker 인자) YOLO 인식·ReID + LiDAR → <ns>/target_person/point_map
                                               인식 창: 사람 박스 + 로봇까지 거리(m) (타겟 초록, '~'는 LiDAR 없이 박스 크기로 추정)
     visitor_follower                          좌표 → <ns>/cmd_vel (화면 없음, 로그만)
 인식 노드는 네임스페이스를 붙여 띄운다. 안 붙이면 설정 파일을 못 찾아 네임스페이스 없는 토픽을 구독해서
@@ -46,14 +54,22 @@ from launch_ros.actions import Node
 BAG_TOPICS = [
     'scan', 'tf', 'tf_static', 'odom', 'amcl_pose',              # 로봇 센서·위치
     'target_person/point_map', 'target_person/point_base',       # 인식 모듈 출력
-    'target_person/marker', 'top_cam/pose_in_map',
-    'cmd_vel', 'follow/state', 'follow/enable', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
+    'target_person/marker', 'top_cam/pose_in_map', 'target_person/register_front', 'gesture/status',
+    'cmd_vel', 'follow/state', 'initialpose', 'guide_message', 'dock_status',                  # visitor_follower 입출력
     'artwork_zone/state', 'arti/tour_end',                        # 작품 구역 (tour.launch.py), 관람 끝
 ]
 
 
 # tracker 인자: all = 카메라 + 인식 노드, camera = 카메라만, none = 둘 다 안 띄움
-TRACKER_MODES = ('all', 'camera', 'none')
+TRACKER_MODES = ('gesture', 'front', 'all', 'camera', 'none')
+# 인식 노드: (executable, node name, parameters)
+TRACKER_NODES = {
+    'gesture': ('gesture_test_node', 'gesture_test_node', {}),
+    'front': ('front_tracker_node', 'front_tracker_node', {}),
+    'all': ('multi_tracker_node', 'multi_person_tracker_node',
+            {'show_info_window': False,      # 화면은 인식 영상 창 하나만
+             'show_distance': True}),        # 박스마다 거리(m)
+}
 
 
 def pc_time_sync():
@@ -66,8 +82,8 @@ def pc_time_sync():
         return f'확인 실패 ({e})'
 
 
-def tracker_actions(ns, with_node=True):
-    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스). with_node=False면 카메라만.
+def tracker_actions(ns, mode):
+    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스). mode=camera면 카메라만.
     카메라(video_source)는 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0)."""
     try:
         share = get_package_share_directory('person_tracker')
@@ -76,12 +92,11 @@ def tracker_actions(ns, with_node=True):
     camera = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'phone_camera.launch.py')),
         launch_arguments={'namespace': ns}.items())
-    tracker = Node(package='person_tracker', executable='multi_tracker_node',
-                   name='multi_person_tracker_node', namespace=ns, output='screen',
-                   parameters=[{'show_info_window': False,      # 화면은 인식 영상 창 하나만
-                                'show_distance': True}])        # 박스마다 거리(m)
-    if not with_node:
+    if mode not in TRACKER_NODES:
         return [camera]
+    executable, name, params = TRACKER_NODES[mode]
+    tracker = Node(package='person_tracker', executable=executable, name=name, namespace=ns,
+                   output='screen', parameters=[params])
     return [camera, TimerAction(period=2.0, actions=[tracker])]     # 카메라가 먼저 켜지게
 
 
@@ -97,7 +112,8 @@ def make_nodes(context):
     tracker = arg('tracker').lower()
     if tracker not in TRACKER_MODES:
         raise RuntimeError(f'tracker:={tracker} → {" | ".join(TRACKER_MODES)} 중 하나')
-    params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true'}
+    params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true',
+              'auto_register': tracker in ('front', 'all')}   # 제스처 등록이면 앞 사람 등록 요청 안 보냄
     actions = []
 
     if test:                                        # ros2 bag 녹화 (폴더는 ros2 bag이 만든다)
@@ -112,7 +128,7 @@ def make_nodes(context):
                                    f'bag 저장: {out}'))
 
     if tracker != 'none':
-        actions += tracker_actions(ns, with_node=tracker == 'all')
+        actions += tracker_actions(ns, tracker)
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
@@ -128,10 +144,11 @@ def generate_launch_description():
         DeclareLaunchArgument('drive', default_value='true', description='false면 cmd_vel을 보내지 않음'),
         DeclareLaunchArgument('test', default_value='true',
                               description='ros2 bag으로 BAG_TOPICS + /rosout을 bag_dir에 녹화 (카메라 영상 제외)'),
-        DeclareLaunchArgument('tracker', default_value='all', choices=list(TRACKER_MODES),
-                              description='all: 카메라+인식 노드, camera: 카메라만, none: 안 띄움'),
+        DeclareLaunchArgument('tracker', default_value='gesture', choices=list(TRACKER_MODES),
+                              description='gesture(기본): 제스처 등록, front: 앞 사람 자동·클릭 등록, '
+                                          'all: 예전 multi_tracker_node, camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
-                              description='true면 start_tour 액션 없이 켜자마자 관람 시작 (undock → 초기 위치 → 인식 → 추종)'),
+                              description='true면 액션 없이 켜자마자 prepare → start (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
                               description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),

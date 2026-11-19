@@ -11,6 +11,8 @@ def bootstrap_venv():
     candidates = []
     if os.environ.get('VIRTUAL_ENV'):
         candidates.append(os.environ['VIRTUAL_ENV'])
+    if os.environ.get('ARTI_VENV'):                 # env.bash의 arti venv 위치 (예: ~/arti/arti_venv)
+        candidates.append(os.environ['ARTI_VENV'])
 
     candidates.extend([
         os.path.expanduser('~/venvs/arti_venv'),

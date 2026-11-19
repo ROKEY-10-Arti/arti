@@ -1,0 +1,87 @@
+{
+  "artworks": [
+    {
+      "artwork_title": "Eaves in the Water",
+      "artist_name": "박찬의",
+      "theme": "nature",
+      "description": "경회루의 붉은 기둥이 잔물결을 따라 흔들려요.",
+      "image_path": "/static/art/seoul-01.png",
+      "image_alt": "분홍 꽃가지 아래 경회루의 기와지붕과 붉은 기둥이 연못에 비친 모습.",
+      "artwork_id": "001",
+      "location": "location1",
+      "x": -2.535,
+      "y": 1.235
+    },
+    {
+      "artwork_title": "A Needle for the Sunset",
+      "artist_name": "우민우",
+      "theme": "color",
+      "description": "노을 진 남산 위로 가느다란 탑이 솟아 있어요.",
+      "image_path": "/static/art/seoul-02.png",
+      "image_alt": "주황빛 노을을 배경으로 남산 숲 위에 솟은 N서울타워.",
+      "artwork_id": "002",
+      "location": "location2",
+      "x": 0.495,
+      "y": 3.255
+    },
+    {
+      "artwork_title": "A Fold in Silver",
+      "artist_name": "이준혁",
+      "theme": "abstract",
+      "description": "은빛 건물의 곡선을 따라가면 금빛 입구가 보여요.",
+      "image_path": "/static/art/seoul-03.png",
+      "image_alt": "짙은 파란 하늘 아래 은회색 패널로 덮인 동대문디자인플라자의 굽은 외벽과 밝은 입구.",
+      "artwork_id": "003",
+      "location": "location3",
+      "x": -1.265,
+      "y": 5.145
+    },
+    {
+      "artwork_title": "A Spectrum over the River",
+      "artist_name": "전유한",
+      "theme": "color",
+      "description": "반포대교에서 쏟아진 무지갯빛이 강물 위에서 일렁여요.",
+      "image_path": "/static/art/seoul-04.png",
+      "image_alt": "밤의 반포대교에서 무지갯빛 분수가 강으로 떨어지고 수면에 색색의 빛이 반사되는 모습.",
+      "artwork_id": "004",
+      "location": "location4",
+      "x": 0.245,
+      "y": 3.735
+    }
+  ],
+  "courses": [
+    {
+      "id": "A",
+      "name": "왼쪽부터 둘러보기",
+      "label": "추천 A 코스",
+      "description": "작품 1 → 작품 2 → 작품 3 · 왼쪽 통로에서 시작해요.",
+      "ids": [
+        "art-01",
+        "art-02",
+        "art-03"
+      ],
+      "minutes": 15,
+      "tag": "왼쪽부터",
+      "theme": "자연 · 색채 · 추상"
+    },
+    {
+      "id": "B",
+      "name": "오른쪽부터 둘러보기",
+      "label": "추천 B 코스",
+      "description": "작품 3 → 작품 2 → 작품 1 · 오른쪽 통로에서 시작해요.",
+      "ids": [
+        "art-03",
+        "art-02",
+        "art-01"
+      ],
+      "minutes": 15,
+      "tag": "오른쪽부터",
+      "theme": "추상 · 색채 · 자연"
+    }
+  ],
+  "version": "gallery-three-artworks-v1",
+  "artwork_version": "seoul-collection-v1",
+  "artwork_content_version": "simple-artwork-content-v1",
+  "artwork_artist_version": "seoul-artist-names-v1",
+  "artwork_location_version": "seoul-location-codes-v1"
+}

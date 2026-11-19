@@ -1,37 +1,54 @@
 """관람객 추종 주행 — 플로우차트(tracking_pc_ver3) '추적 모듈'의 움직임.
 
+파일 구성 (노드는 visitor_follower 하나. 기능별로 파일만 나눔, 클래스 하나가 셋을 상속)
+  visitor_follower.py  노드 본체: 파라미터, 구독·발행·액션 서버 등록, 입력 콜백, control/step(상태 분기), 진단, main
+  prepare_tour.py      ① 호출·등록 (prepare_tour): run_prepare, undock, localize, face_start, wait_visitor, registered_wait
+  start_tour.py        ② 관람 (start_tour): run_tour, follow, search, end_tour, 작품 설명 feedback
+  motion.py            주행·추정 공통: PersonKF(칼만 필터), face, obstacles·field·dwa, ramp, drive
+
 입력  target_person/point_map (PointStamped, frame_id map)  인식 모듈이 준 관람객 좌표
                                   → TF(map→odom)로 odom 좌표로 바꿔 씀 (localization 필요)
-      scan (LaserScan)            벽·기둥 등 장애물
-      oakd/stereo/image_raw/compressedDepth, oakd/stereo/camera_info   바닥에 떨어진 물체
+      scan (LaserScan)            벽·기둥 등 장애물 (OAK-D depth는 쓰지 않음, 2026-11-18 제거)
       tf, tf_static               좌표 변환
-      follow/enable (Bool)        false면 cmd_vel을 보내지 않음 (작품 설명 중, 도킹 등)
       dock_status (irobot_create_msgs/DockStatus)   도크에 붙어 있는지 (붙어 있을 때만 undock)
-      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만). 취소하면 관람 끝
-                                  feedback: state(MOVING/FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
+      arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
+                                  feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
+                                  result: success(등록 완료), message(실패 이유)
+      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
+                                  취소하면 관람 끝. feedback: state(FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
-      artwork_zone/explaining (String)   설명 중인 artwork_id ('' = 없음) → feedback EXPLAINING + artwork_id
-      artwork_zone/explained (String)    끝까지 설명한 artwork_id → feedback ARTWORK_COMPLETED 한 번
+      artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id
+      artwork_zone/explained (Int32)     끝까지 설명한 작품 번호 → feedback ARTWORK_COMPLETED 한 번
+                                  작품 ID는 int (artworks.yaml artwork_id = PC3 작품 DB 번호)
 출력  cmd_vel (TwistStamped), follow/state (String)
       undock (irobot_create_msgs/Undock, 액션 클라이언트)     Create 3 언독
+      dock (irobot_create_msgs/Dock, 액션 클라이언트)         관람이 끝나면 언독 지점으로 돌아와 Create 3 도킹
       initialpose (PoseWithCovarianceStamped)      AMCL 초기 위치 = init_pose.yaml의 출발 지점(undock)
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
       arti/tour_end (Empty)                        관람이 끝나면(취소·LOST·실패) 한 번 → 인식 모듈·artwork_zone이
                                                    그 관람객 데이터(re-ID 특징, 좌표 기록 등)를 지운다. 로봇 1대 = 관람객 1명
+      target_person/register_front (Empty)         WAIT_VISITOR에서 인식 모듈에 '바로 앞 사람을 등록' 요청 (클릭 없이 자동 등록)
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
-상태 (플로우차트 순서). 시작은 READY — arti/start_tour 액션이 와야 움직인다 (auto_start면 켜자마자)
+상태 (플로우차트 순서). 시작은 READY — arti/prepare_tour 액션이 와야 움직인다 (auto_start면 켜자마자 prepare+start)
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
-  UNDOCK      도크에 붙어 있으면 Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 도크 밖이면 건너뜀
-  LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다림
-  START_FACE  제자리 회전으로 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽을 봄.
-              face_zone이 없으면 출발 지점의 yaw_deg. 다 돌거나 face_timeout 지나면 WAIT_VISITOR
+  ── 여기부터 REGISTERED까지 = prepare_tour ──
+  UNDOCK      Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 관람은 항상 도크에서 시작 → 도크 밖이면 거절(not_docked)
+  LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 한 번 보내고 바로 START_FACE (AMCL 수렴은 안 기다림)
+  START_FACE  출발 지점에서 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽으로 돌 각도를 계산해
+              odom 기준으로 그만큼 제자리 회전 (map 위치 안 씀). 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
-              (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → FOLLOW.
+              (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → REGISTERED.
               확인하는 동안은 따라가지 않고 그 자리에서 바라본다. 끊기면 처음부터 다시 기다림
+              auto_register면 좌표가 안 오는 동안 register_period마다 target_person/register_front를 보내
+              인식 모듈이 로봇 바로 앞 사람을 대상으로 등록하게 한다 (첫 요청 + register_settle 전 좌표 = 예전 대상 → 버림)
+  REGISTERED  등록 완료 → prepare_tour 성공. start_tour를 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠).
+              ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
+  ── 여기부터 = start_tour ──
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
-  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 → 거기서 search_time 동안 한 바퀴 회전 탐색
+  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지(search_move_time 상한) 이동
+          → 거기서 2π/search_time 일정 속도로 odom 기준 한 바퀴(360°) 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
   LOST    wait_time 지남 → 정지, 액션 끝 (reason lost). 다시 시작하려면 액션을 새로 보냄
   SEARCH·WAIT 중 좌표가 다시 들어오면 FOLLOW
@@ -45,17 +62,14 @@
 """
 import math
 import os
-import re
 import signal
 import threading
 import time
 
-from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
-from arti_interfaces.action import StartTour
-import cv2
+from arti_interfaces.action import PrepareTour, StartTour
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
-from irobot_create_msgs.action import Undock
+from irobot_create_msgs.action import Dock, Undock
 from irobot_create_msgs.msg import DockStatus
 import numpy as np
 import rclpy
@@ -66,24 +80,38 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
-from std_msgs.msg import Bool, Empty, String
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Empty, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 import yaml
 
+from arti_follow.motion import apply, MotionMixin, PersonKF, yaw_of
+from arti_follow.prepare_tour import PrepareMixin
+from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
+
+LISTEN = ('WAIT_VISITOR', 'REGISTERED') + TRACKING   # 관람객 좌표를 받는 상태 (그 밖에는 버림)
+
 PARAMS = {
     'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
-    'auto_start': False,            # true면 액션 없이 켜자마자 관람 시작 (테스트용)
+    'auto_start': False,            # true면 액션 없이 켜자마자 prepare + start (테스트용)
+    'ready_timeout': 130.0,         # 등록 완료(REGISTERED) 뒤 start_tour를 이만큼 기다림. 넘으면 관람 끝 (not_started) [s]
+                                    #   키오스크는 120 s 뒤 처음 화면으로 → 로봇이 더 길어야 [관람 시작]이 끝난 관람에 오지 않음
     'undock': True,                 # 관람 시작 때 도크에 붙어 있으면 undock
     'undock_timeout': 60.0,         # undock 액션을 이만큼 기다림 [s]
+    'return_to_dock': True,         # 관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)
+    'return_timeout': 60.0,         # 언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]
+    'return_arrive': 0.15,          # 언독 지점에서 이 거리 안이면 도착 [m]
+    'dock_timeout': 90.0,           # Create 3 dock 액션을 이만큼 기다림 [s]
     'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
-    'localize_timeout': 10.0,       # map 위치가 출발 지점 근처로 잡히길 이만큼 기다림 [s]
-    'localize_tolerance': 0.3,      # initialpose 뒤 map 위치가 출발 지점에서 이 안이면 잡힌 것 [m]
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
+    'auto_register': True,          # WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)
+    'register_period': 1.0,         # 등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)
+    'register_settle': 0.5,         # 첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
+    'face_offset_deg': -15.0,       # 시작 때 바라볼 방향 보정 [deg] (+ = 왼쪽, - = 오른쪽). -15: 키오스크 중심보다 15° 덜 왼쪽으로 돎
     'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치
     'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
     'register_confirm_time': 1.0,   # 관람객이 이만큼 끊김 없이 보여야 등록 완료 (순간 오인식 방지) [s]
@@ -92,21 +120,29 @@ PARAMS = {
     'target_distance': 0.8,         # 유지 거리 [m]
     'distance_tolerance': 0.05,     # 이 안이면 전진 안 함 [m]
     'restart_margin': 0.15,         # 멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)
-    'lead_time': 0.5,               # 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐)
-    'kf_accel_std': 1.0,            # 칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2]
-    'kf_meas_std': 0.15,            # 칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m]
+    'lead_time': 0.3,               # 관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐)
+                                    #   0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)
+    'kf_accel_std': 2.0,            # 칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2] (1.0 → 2.0: 걷기 시작·멈춤에 빨리 반응)
+    'kf_meas_std': 0.2,             # 칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m] (0.15 → 0.2: 이상값으로 버리는 좌표 4.7 % → 3.2 %)
     'kf_gate': 9.21,                # 칼만: 예측과 이만큼(마할라노비스 거리^2, 2차원 99 %) 넘게 다르면 이상값으로 버림
     'kf_max_rejects': 5,            # 연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 필터를 새로 시작
     'max_person_speed': 1.5,        # 추정 속도 상한 [m/s]
     'face_deadband': 0.15,          # 가까이 서 있을 때 이 각도 안이면 돌지 않음 [rad] (약 9°)
-    'lost_timeout': 3.0,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s]
-    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 회전 탐색 시간 (플로우차트 10초) [s]
-    'search_move_time': 0.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s]
-    'wait_time': 10.0,              # 그다음 정지 대기 (플로우차트 10초) [s]
-    'search_spin': 0.6,             # 회전 탐색 최소 속도. 남은 시간에 한 바퀴가 안 되면 더 빨리 돎 [rad/s]
-    'max_linear': 0.3, 'max_angular': 1.5,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
-    'linear_accel': 0.5, 'angular_accel': 3.0,      # [m/s^2], [rad/s^2]
-    'linear_decel': 0.4,            # 멈출 때 감속 [m/s^2] (0.3 m/s → 0.75 s, 약 11 cm 더 감)
+    'lost_timeout': 1.5,            # 좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)
+    'search_time': 10.0,            # 최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 (플로우차트 10초) → 2π/10 = 0.63 rad/s [s]
+    'search_spin_extra': 3.0,       # 한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]
+    'search_move_time': 5.0,        # 최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s] (0 → 5: 사람이 그 자리에 서 있으면 영원히 못 도착)
+    'search_arrive': 0.35,          # 최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)
+    'wait_time': 10.0,              # 회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]
+    'search_spin': 0.3,             # 회전 탐색 최소 속도 [rad/s] (보통은 2π/search_time)
+    'turn_first_angle': 1.0,        # SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°)
+                                    #   DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤
+    'max_linear': 0.3, 'max_angular': 0.8,          # [m/s], [rad/s] (TurtleBot 4 최대 약 0.31 m/s)
+                                    #   max_angular 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24)
+    'linear_accel': 0.8, 'angular_accel': 1.5,      # [m/s^2], [rad/s^2] (0.5 → 0.8: 빨리 0.3 m/s까지, 3.0 → 1.5: 회전이 덜 들쑥날쑥)
+    'linear_decel': 0.8,            # 멈출 때 감속 [m/s^2] (0.4 → 0.8: 0.3 m/s에서 약 6 cm만 더 감, 너무 가까이 가는 것 줄임)
+    'min_spin_cmd': 0.1,            # 서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s]
+                                    #   Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림
     'control_period': 0.1, 'sim_time': 1.5,         # 제어 주기, 후보를 굴려 볼 시간 [s]
     'v_samples': 7, 'w_samples': 15,
     'robot_radius': 0.2, 'safety_margin': 0.05,     # [m]
@@ -115,26 +151,11 @@ PARAMS = {
     'w_turn': 0.02,                 # 비용: 회전 (같은 조건이면 직진)
     'scan_min_range': 0.2,          # 이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]
     'scan_timeout': 0.5,            # scan이 이보다 오래 안 오면 정지 [s]
-    'use_depth': True,              # 바닥 물체 회피 켜기
-    'depth_step': 8,                # depth 몇 픽셀마다 한 점
-    'depth_max_range': 1.2,         # 이보다 먼 depth는 잡음이 커서 안 씀 (실측: 1 m 너머 ±0.1~0.3 m) [m]
-    'floor_min_height': 0.05,       # 바닥 물체 높이 범위 (base_link 기준, 아래는 바닥 잡음) [m]
-    'floor_max_height': 0.3,        #   (위는 LiDAR가 봄)
-    'floor_min_points': 3,          # 10 cm 칸에 점이 이만큼 모여야 물체 (흩어진 잡음 제거)
-    'depth_keep': 1.0,              # depth 장애물을 이 시간 동안 기억 [s]
-    'start_enabled': True,          # 시작할 때 cmd_vel을 보낼지 (false면 follow/enable true가 올 때까지 계산만)
+    'start_enabled': True,          # false면 계산만 하고 cmd_vel을 보내지 않음 (follow_test.launch.py drive:=false)
     'diag': False,                  # 데이터 흐름 진단 로그 (끊김 원인 찾기)
     'diag_period': 2.0,             # 진단 요약을 내는 주기 [s]
     'diag_events': False,           # 끊김이 생긴 순간마다 바로 로그 (토픽 늦음, 제어 밀림, 정지 이유 바뀜)
 }
-
-
-def artwork_number(artwork_id):
-    """artwork_id 문자열 → 액션에서 쓰는 int 작품 ID.
-    받음: artwork_id  "art_02" (artworks.yaml 키)
-    돌려줌: 끝 숫자 2 (숫자가 없으면 0)"""
-    m = re.search(r'(\d+)$', artwork_id)
-    return int(m.group(1)) if m else 0
 
 
 class Diag:
@@ -159,92 +180,15 @@ class Diag:
         return s, span
 
 
-def wrap(a):
-    """각도를 -π ~ π 범위로 맞춘다 (350° → -10°). 회전할 때 짧은 쪽으로 돌게 하려고.
-    받음: a  각도 [rad] (숫자 또는 numpy 배열)
-    돌려줌: -π ~ π 각도 [rad]"""
-    return (a + np.pi) % (2 * np.pi) - np.pi
-
-
-def yaw_of(q):
-    """쿼터니언에서 바닥 위 방향(yaw)만 뽑는다. 로봇은 바닥에서만 움직이므로 기울기(roll, pitch)는 버린다.
-    받음: q  geometry_msgs/Quaternion (x, y, z, w)
-    돌려줌: yaw [rad] (0 = x축 방향, + = 왼쪽으로 돈 쪽)"""
-    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-
-
-def apply(f, pts):
-    """점들을 다른 좌표계로 옮긴다 (2D 회전 + 이동). 예: 라이다 좌표 → odom 좌표.
-    받음: f    변환 (x, y, yaw)  lookup()의 결과
-          pts  점들 (N, 2) numpy 배열
-    돌려줌: 옮긴 점들 (N, 2)"""
-    c, s = math.cos(f[2]), math.sin(f[2])
-    return np.stack([f[0] + c * pts[:, 0] - s * pts[:, 1], f[1] + s * pts[:, 0] + c * pts[:, 1]], 1)
-
-
-class PersonKF:
-    """관람객 위치 칼만 필터 (등속 모델: 사람이 같은 속도로 걷는다고 가정).
-    상태 x = [px, py, vx, vy] (odom 좌표, m · m/s). 튀는 인식 좌표를 매끄럽게 하고, 위치만 받아도 속도를 추정한다."""
-
-    def __init__(self, accel_std, meas_std, gate, max_rejects):
-        """필터 준비. 아직 사람 정보 없음 (x = None).
-        받음: accel_std    사람 가속도 잡음 [m/s²] (클수록 빨리 따라가고 덜 매끄러움)
-              meas_std     인식 좌표 잡음 [m] (클수록 매끄럽고 느림)
-              gate         이상값 기준 (예측과 이만큼 넘게 다르면 버림)
-              max_rejects  연속으로 이만큼 버리면 사람이 정말 옮긴 것으로 보고 새로 시작"""
-        self.q, self.r, self.gate, self.max_rejects = accel_std ** 2, meas_std ** 2, gate, max_rejects
-        self.x, self.P, self.t, self.rejects = None, None, None, 0
-
-    def reset(self, z, t):
-        """이 좌표로 필터를 새로 시작한다 (처음 보거나 오래 못 봤을 때). 속도는 모르니 0, 불확실도는 크게.
-        받음: z  좌표 (x, y) odom
-              t  시각 [s]
-        바뀜: x = [x, y, 0, 0], P, t"""
-        self.x = np.array([z[0], z[1], 0.0, 0.0])
-        self.P = np.diag([self.r, self.r, 1.0, 1.0])   # 속도는 모름 → 크게
-        self.t, self.rejects = t, 0
-
-    def predict(self, t):
-        """지난 위치 + 속도 × 지난 시간 → 지금쯤 위치를 예측한다 (불확실도도 시간만큼 커짐).
-        받음: t  예측할 시각 [s]
-        바뀜: x, P, t"""
-        dt = max(t - self.t, 0.0)
-        F = np.eye(4)
-        F[0, 2] = F[1, 3] = dt
-        g = np.array([[dt * dt / 2, 0], [0, dt * dt / 2], [dt, 0], [0, dt]])
-        self.x, self.P, self.t = F @ self.x, F @ self.P @ F.T + self.q * g @ g.T, t
-
-    def update(self, z, t):
-        """좌표 하나 반영 (reset 뒤에만): 예측 → 받은 좌표와 비교 → 너무 다르면 버림, 아니면 섞어서 보정.
-        받음: z  좌표 (x, y) odom
-              t  받은 시각 [s]
-        돌려줌: 반영했으면 True, 이상값으로 버렸으면 False (예측은 반영됨)
-              연속 max_rejects번 버리면 사람이 정말 옮긴 것으로 보고 reset"""
-        self.predict(t)
-        y = np.asarray(z, float) - self.x[:2]
-        S = self.P[:2, :2] + self.r * np.eye(2)
-        if y @ np.linalg.solve(S, y) > self.gate:
-            self.rejects += 1
-            if self.rejects < self.max_rejects:
-                return False
-            self.reset(z, t)                            # 계속 다른 곳 → 사람이 정말 옮김
-            return True
-        K = self.P[:, :2] @ np.linalg.inv(S)
-        self.x = self.x + K @ y
-        self.P = (np.eye(4) - K @ np.eye(2, 4)) @ self.P    # np.eye(2, 4) = H (상태에서 위치만 꺼냄)
-        self.rejects = 0
-        return True
-
-
-class VisitorFollower(Node):
+class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
 
     """관람객 추종 노드: 키오스크 액션(start_tour) 응대 + 상태 기계(step) + 주행(dwa)."""
     def __init__(self):
         """노드 준비: 파라미터·설정 파일 읽기, 구독·발행·액션 서버·타이머 등록. 상태 READY.
-        구독  tf, tf_static, target_person/point_map, scan, oakd camera_info·compressedDepth,
-              follow/enable, dock_status, artwork_zone/explaining·explained
+        구독  tf, tf_static, target_person/point_map, scan,
+              dock_status, artwork_zone/explaining·explained
         발행  cmd_vel, follow/state, initialpose, guide_message, arti/tour_end
-        액션  서버 arti/start_tour, 클라이언트 undock
+        액션  서버 arti/prepare_tour·arti/start_tour, 클라이언트 undock
         타이머 control_period(0.1 s)마다 control()"""
         super().__init__('visitor_follower')
         self.p = {q.name: q.value for q in self.declare_parameters('', list(PARAMS.items()))}
@@ -252,9 +196,8 @@ class VisitorFollower(Node):
         self.seen = -1e9                            # 관람객 좌표를 마지막으로 받은 시각
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
         self.lost_at, self.turn, self.spin_at, self.spin_speed, self.holding = 0.0, 1.0, None, 0.0, False
+        self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
-        self.floor_pts, self.floor_time = np.zeros((0, 2)), -1e9
-        self.cam_k = self.cam_tf = None
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
         self.diag = Diag() if self.p['diag'] else None
@@ -272,43 +215,47 @@ class VisitorFollower(Node):
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
         sub(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
-        sub(CameraInfo, 'oakd/stereo/camera_info',
-            lambda m: setattr(self, 'cam_k', (m.k[0], m.k[4], m.k[2], m.k[5])), 10)
-        if self.p['use_depth']:
-            sub(CompressedImage, 'oakd/stereo/image_raw/compressedDepth', self.on_depth, qos_profile_sensor_data)
-        sub(Bool, 'follow/enable', self.on_enable, 10)
-        sub(DockStatus, 'dock_status', lambda m: setattr(self, 'docked', m.is_docked), qos_profile_sensor_data)
-        sub(String, 'artwork_zone/explaining', self.on_explaining, latched)
-        sub(String, 'artwork_zone/explained', self.on_explained, 10)
+        sub(DockStatus, 'dock_status', self.on_dock_status, qos_profile_sensor_data)
+        sub(Int32, 'artwork_zone/explaining', self.on_explaining, latched)
+        sub(Int32, 'artwork_zone/explained', self.on_explained, 10)
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.state_pub = self.create_publisher(String, 'follow/state', latched)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
+        self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
+        self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
-        self.artwork_total = self.count_artworks()  # 작품 수 (새 StartTour feedback에는 total이 없어 지금은 로그·확인용)
 
-        # 관람 (start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
+        # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
         self.docked = None                          # dock_status (아직 못 받으면 None)
-        self.active, self.end_reason = False, ''    # 관람 중인지, 끝난 이유 (액션 result)
-        self.registered, self.explaining, self.visited = False, '', []   # 이번 관람: 인식됨, 설명 중 작품, 설명한 작품
+        self.docked_at = None                       # dock_status를 마지막으로 받은 시각 (undock 실패 로그용)
+        self.active, self.end_reason = False, ''    # 관람(준비 포함) 중인지, 끝난 이유 (액션 result)
+        self.ready_at = None                        # REGISTERED가 된 시각 (ready_timeout 기준)
+        self.explaining, self.visited = 0, []      # 이번 관람: 설명 중 작품 번호(0 = 없음), 설명한 작품
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
-        self.face_until = self.loc_at = self.pose_sent = None
+        self.face_until = self.loc_at = self.pose_sent = self.face_goal = self.face_log_at = self.loc_log_at = None
         group = ReentrantCallbackGroup()
         self.undock_client = ActionClient(self, Undock, 'undock', callback_group=group)
+        self.dock_client = ActionClient(self, Dock, 'dock', callback_group=group)
+        self.home = None                            # 언독이 끝난 곳 (x, y, yaw) odom = 돌아올 곳. 도크는 그 뒤쪽
+        self.final_state, self.ret_at, self.dock_future, self.dock_result = 'READY', None, None, None
+        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
+                     goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.set_state('READY')
         if self.p['auto_start']:
             def once():
                 timer.cancel()
-                self.run_tour(None)
+                if self.run_prepare(None).success:
+                    self.run_tour(None)
             timer = self.create_timer(1.0, once, callback_group=group)
         else:
-            self.get_logger().info(f'관람 시작 액션 기다림: {self.get_namespace().rstrip("/")}/arti/start_tour')
+            self.get_logger().info(f'호출 액션 기다림: {self.get_namespace().rstrip("/")}/arti/prepare_tour')
 
         self.create_timer(self.p['control_period'], self.control)
         if self.diag is not None:
@@ -356,7 +303,7 @@ class VisitorFollower(Node):
             with open(path, encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
             rows = [r for r in (data.get('guide_zones') or []) + (data.get('artworks') or [])
-                    if zid in (r.get('zone_id'), r.get('artwork_id'))]
+                    if zid in (r.get('zone_id'), str(r.get('artwork_id')))]   # 작품은 번호 문자열로 ('2')
             r = rows[0]
             if 'x' in r:
                 point = (float(r['x']), float(r['y']))
@@ -367,17 +314,6 @@ class VisitorFollower(Node):
             return None
         self.get_logger().info(f'시작 때 바라볼 곳: {zid} {point}')
         return point
-
-    def count_artworks(self):
-        """artworks.yaml의 작품 수를 센다 (feedback total).
-        받음: (파라미터) zones_file
-        돌려줌: 작품 수 (못 읽으면 0)"""
-        try:
-            with open(self.config_file('zones_file', 'artworks.yaml'), encoding='utf-8') as f:
-                return len((yaml.safe_load(f) or {}).get('artworks') or [])
-        except (OSError, PackageNotFoundError, yaml.YAMLError) as e:
-            self.get_logger().warn(f'작품 수를 못 읽음 ({e!r}) → total 0')
-            return 0
 
     # ---------- 입력 ----------
 
@@ -407,12 +343,16 @@ class VisitorFollower(Node):
 
     def on_person(self, msg):
         """[구독] target_person/point_map (PointStamped, map) — 관람객 좌표가 올 때마다.
-        받아도 되는 상태(WAIT_VISITOR, FOLLOW, SEARCH, WAIT)일 때만: map → odom 변환 → 칼만 필터.
+        받아도 되는 상태(WAIT_VISITOR, REGISTERED, FOLLOW, SEARCH, WAIT)일 때만: map → odom 변환 → 칼만 필터.
         받음: msg.header.frame_id, msg.header.stamp (그 시각 TF로 변환), msg.point.x, y
         바뀜: kf.x (위치·속도), seen (마지막으로 본 시각), seen_since (등록 확인: 계속 보이기 시작한 시각)
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
-        if self.state not in ('WAIT_VISITOR', 'FOLLOW', 'SEARCH', 'WAIT'):
+        if self.state not in LISTEN:
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
+        if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
+            stamp = Time.from_msg(msg.header.stamp).nanoseconds / 1e9
+            if self.reg_first is None or stamp < self.reg_first + self.p['register_settle']:
+                return                              # 등록 요청 전 좌표 = 예전 대상(또는 아무나)일 수 있음
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
@@ -436,6 +376,13 @@ class VisitorFollower(Node):
             vel *= self.p['max_person_speed'] / speed
         return pos, vel
 
+    def on_dock_status(self, msg):
+        """[구독] dock_status (DockStatus) — 도크에 붙어 있는지. 값이 바뀌면 로그 (undock 실패 원인 찾기).
+        바뀜: docked, docked_at (받은 시각)"""
+        if self.docked is not None and msg.is_docked != self.docked:
+            self.get_logger().info(f'dock_status 바뀜: is_docked {self.docked} → {msg.is_docked} (상태 {self.state})')
+        self.docked, self.docked_at = msg.is_docked, self.now()
+
     def on_scan(self, msg):
         """[구독] scan (LaserScan) — 라이다가 올 때마다.
         거리 → (x, y) 점, inf·nan·로봇 몸(0.2 m 안)·범위 밖은 버림 → 그 시각 TF로 odom 좌표.
@@ -449,63 +396,6 @@ class VisitorFollower(Node):
         ok = np.isfinite(r) & (r > self.p['scan_min_range']) & (r < msg.range_max)
         self.scan_pts = apply(f, np.stack([r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])], 1))
         self.scan_time = self.now()
-
-    def on_depth(self, msg):
-        """[구독] oakd/stereo/image_raw/compressedDepth — 깊이 영상이 올 때마다.
-        깊이 → 3D 점 → base_link 높이 floor_min~floor_max(5~30 cm)만 = 바닥 물체 → 10 cm 칸에 3점 이상만 → odom.
-        받음: msg.data (12바이트 헤더 + 16비트 PNG, mm), (cam_k: camera_info의 fx, fy, cx, cy)
-        바뀜: floor_pts (바닥 물체 점), floor_time"""
-        p = self.p
-        if self.cam_tf is None:
-            try:
-                tr = self.tf.lookup_transform(p['base_frame'], msg.header.frame_id, Time()).transform
-            except Exception:
-                return
-            x, y, z, w = tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w
-            rot = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
-            self.cam_tf = (rot, np.array([tr.translation.x, tr.translation.y, tr.translation.z]))
-        f = self.lookup(p['odom_frame'], p['base_frame'], Time.from_msg(msg.header.stamp))
-        # compressedDepth = 12바이트 헤더 + PNG(16비트, mm)
-        depth = cv2.imdecode(np.frombuffer(bytes(msg.data[12:]), np.uint8), cv2.IMREAD_UNCHANGED)
-        if self.cam_k is None or f is None or depth is None:
-            return
-        s, (fx, fy, cx, cy) = p['depth_step'], self.cam_k
-        z = depth[::s, ::s] / 1000.0
-        v, u = np.mgrid[0:depth.shape[0]:s, 0:depth.shape[1]:s]
-        ok = (z > 0.2) & (z < p['depth_max_range'])
-        cam = np.stack([(u[ok] - cx) * z[ok] / fx, (v[ok] - cy) * z[ok] / fy, z[ok]], 1)
-        base = cam @ self.cam_tf[0].T + self.cam_tf[1]
-        base = base[(base[:, 2] > p['floor_min_height']) & (base[:, 2] < p['floor_max_height'])]
-        if len(base):                               # 10 cm 칸에 floor_min_points개 이상 모인 점만
-            _, inv, cnt = np.unique(np.floor(base[:, :2] / 0.1).astype(int), axis=0,
-                                    return_inverse=True, return_counts=True)
-            base = base[cnt[inv.ravel()] >= p['floor_min_points']]
-        self.floor_pts, self.floor_time = apply(f, base[:, :2]), self.now()
-
-    def on_enable(self, msg):
-        """[구독] follow/enable (Bool) — false면 바로 정지하고 이후 cmd_vel을 보내지 않음 (다른 노드에 주행을 넘길 때).
-        받음: msg.data
-        바뀜: enabled"""
-        if not msg.data:
-            self.drive(0.0, 0.0)                    # 멈춘 뒤 cmd_vel을 넘겨줌
-        self.enabled = msg.data
-
-    def on_explaining(self, msg):
-        """[구독] artwork_zone/explaining (String) — 설명 중인 작품. 관람 중일 때만 저장.
-        받음: msg.data  "art_02" 또는 "" (설명 끝)
-        바뀜: explaining → send_feedback의 EXPLAINING"""
-        self.explaining = msg.data if self.active else ''
-
-    def on_explained(self, msg):
-        """[구독] artwork_zone/explained (String) — 끝까지 설명한 작품. 관람 중이고 처음일 때만 추가.
-        받음: msg.data  "art_02"
-        바뀜: visited → send_feedback이 ARTWORK_COMPLETED로 한 번씩 보고"""
-        if self.active and msg.data not in self.visited:
-            self.visited.append(msg.data)
-
-    # ---------- 상태 (플로우차트) ----------
 
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:
@@ -521,6 +411,7 @@ class VisitorFollower(Node):
         """0.1 s마다 한 번: 지금 상태를 위에서부터 차례로 확인하고, 처음 맞는 곳에서 행동한 뒤 return.
         순서가 중요하다 (안전 확인이 따라가기보다 먼저). if마다 [번호] 주석 = 무엇을 묻고 어디로 가는지.
         받음: (state, kf.x, seen, scan_time, TF odom→base_link)
+        단계별 함수: prepare_tour.py(localize·face_start·wait_visitor·registered_wait), start_tour.py(follow·search)
         내보냄: drive() → cmd_vel, set_state() → follow/state, 필요하면 end_tour()"""
         p, now = self.p, self.now()
         # [1] 지금 상태가 READY·UNDOCK·LOST인가? → 예: 아무것도 안 하고 끝 / 아니오: 아래로
@@ -530,7 +421,7 @@ class VisitorFollower(Node):
             self.dbg['reason'] = self.state.lower()
             return
         # [2] 지금 상태가 LOCALIZE인가? → 예: localize() / 아니오: 아래로
-        # 초기 위치 잡는 중: 아직 map 위치를 믿을 수 없어서 움직이지 않고 AMCL만 기다린다
+        # 초기 위치 알려 주기: initialpose 한 번 보내고 바로 START_FACE (기다리지 않음)
         if self.state == 'LOCALIZE':
             return self.localize(now)
         
@@ -542,6 +433,10 @@ class VisitorFollower(Node):
             return self.drive(0.0, 0.0)
         here = np.array(pose[:2])
 
+        # [3-1] 관람이 끝나 돌아가는 중인가? (RETURN·DOCK_FACE·DOCK) → 예: go_home() (start_tour.py) / 아니오: 아래로
+        # 언독 지점(odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
+        if self.state in RETURNING:
+            return self.go_home(now, pose)
         # [4] 지금 상태가 START_FACE인가? → 예: face_start() (키오스크 쪽으로 돌기) / 아니오: 아래로
         # 출발 직후: 관람객이 키오스크 쪽에서 오므로 그쪽을 먼저 바라본다 (카메라에 잡히게)
         if self.state == 'START_FACE':
@@ -550,34 +445,15 @@ class VisitorFollower(Node):
         # 등록 확인 중: 1 s 동안 계속 보여야 등록 (순간 오인식으로 엉뚱한 사람을 따라가지 않게). 확인 중에는 안 따라감
         if self.state == 'WAIT_VISITOR':
             return self.wait_visitor(now, pose, here)
+        # [5-1] 지금 상태가 REGISTERED인가? → 예: registered_wait() (start_tour 기다리며 정지) / 아니오: 아래로
+        # 등록은 끝났지만 키오스크가 아직 관람 시작(start_tour)을 안 보냄: 사람 때문에 움직이지 않고 서서 기다린다
+        if self.state == 'REGISTERED':
+            return self.registered_wait(now)
         # [6] 관람객 위치 수신 중인가? (kf.x가 있고 now - seen < 3 s) → 예: FOLLOW / 아니오: 아래로(놓침)
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
         if self.kf.x is not None and now - self.seen < p['lost_timeout']:
-            self.set_state('FOLLOW')
-            last, vel = self.person()
-            person = last + vel * (now - self.kf.t)     # 마지막 좌표 뒤 흐른 시간만큼 → 지금 위치
-            ahead = person + vel * p['lead_time']       # 0.5 s 뒤 위치: 인식·통신·가속이 늦는 만큼 미리 향함
-            to = ahead - here
-            d = np.linalg.norm(to)
-            stop = p['target_distance'] + p['distance_tolerance']
-            # [7] 사람까지 거리 d가 0.85 m 이하인가? → 예: holding = True (서기)
-            # [8] 아니면 0.95 m 넘나? → 예: holding = False (다시 출발) / 사이: 그대로
-            # 0.85 m 안이면 서기, 0.95 m 밖이면 다시 출발. 기준을 둘로 나눠
-            # 0.8 m 근처에서 좌표가 조금 흔들릴 때 섰다 갔다 덜덜 떨지 않게 한다 (사이 구간은 하던 대로)
-            if d <= stop:
-                self.holding = True
-            elif d > p['target_distance'] + p['restart_margin']:
-                self.holding = False
-            # [9] 서 있는 중이 아닌가? (holding == False) → 예: dwa로 따라가기 / 아니오: 아래 face()
-            # 멀면: 사람에서 로봇 쪽으로 0.8 m 돌아온 점을 목표로 장애물 피해서 이동 (사람 자체를 목표로 하면 부딪힘)
-            if not self.holding:
-                goal = ahead - to / d * p['target_distance']
-                self.dbg['reason'] = 'follow'
-                return self.drive(*self.dwa(pose, goal, ahead))
-            # 가까우면: 앞으로는 안 가고 사람 쪽으로 몸만 돌림 (작품 감상 중 등)
-            self.dbg['reason'] = 'hold'
-            return self.face(pose, here, person)
+            return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
         self.holding = False
         # [10] 사람 정보가 아예 없나? (kf.x == None) → 예: 정지 / 아니오: 아래로(탐색)
         # 사람을 한 번도 못 봤으면 탐색할 기준(마지막 위치)이 없다 → 그냥 정지
@@ -585,471 +461,16 @@ class VisitorFollower(Node):
             self.dbg['reason'] = 'idle'
             return self.drive(*self.ramp(0.0, 0.0))
 
-        # ---- 여기부터 = 사람을 놓침 (3 s 넘게 좌표가 안 옴) ----
-        last, vel = self.person()
-        # [11] 방금 놓쳤나? (직전 상태가 FOLLOW) → 예: 놓친 시각·회전 방향 기억 (한 번만) / 아니오: 건너뜀
-        # 방금 놓친 순간(직전까지 FOLLOW)에만 한 번: 놓친 시각과 사람이 가던 쪽(왼/오른)을 기억 → 나중에 그쪽으로 돈다
-        if self.state == 'FOLLOW': # 놓친 순간 1회 
-            self.lost_at, self.spin_at = now, None # lost-at은 언제 놓쳤나? spin_at은 회전 탐색은 아직 안 시작함
-            d = last + vel - here
-            self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
-        # [12] 아직 회전 탐색 전인가? (spin_at == None) → 예: 마지막 위치로 이동 또는 회전 준비 / 아니오: 아래로
-        # 1) 아직 회전 탐색 전: 마지막으로 본 곳까지 먼저 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다)
-        if self.spin_at is None:
-            cap = p['search_move_time']             # 0이면 시간 제한 없음
-            # [12-1] 마지막 위치까지 0.5 m 넘게 남았나? (시간 제한 안인가?) → 예: 그쪽으로 이동 / 아니오: 도착 → 회전 시작 시각 기록
-            # 아직 0.5 m 넘게 남았고 (시간 제한이 있으면) 그 안이면 계속 이동
-            if np.linalg.norm(last - here) > 0.5 and (cap <= 0 or now - self.lost_at < cap):
-                self.set_state('SEARCH')
-                self.dbg['reason'] = 'search_move'
-                return self.drive(*self.dwa(pose, last, last))
-            self.spin_at = now                      # 도착 → 여기서부터 search_time 동안 한 바퀴 (가속분 5 % 여유)
-            self.spin_speed = float(np.clip(1.05 * 2 * math.pi / max(p['search_time'], 1e-3),
-                                            p['search_spin'], p['max_angular']))
-        t = now - self.spin_at
-        # [13] 회전 탐색 10 s가 안 지났나? (t = now - spin_at < search_time) → 예: 제자리 회전 / 아니오(10 s 이상): 아래로
-        # 2) 도착 뒤 10 s 동안 제자리 한 바퀴: 카메라 화각(88°) 밖으로 나간 사람을 다시 화면에 넣으려고.
-        #    사람이 가던 쪽부터 돈다 (그쪽에 있을 가능성이 크다)
-        if t < p['search_time']:
-            self.set_state('SEARCH') # SEARCH 상태로 바꿈 
-            self.dbg['reason'] = 'search_spin'
-            return self.drive(*self.ramp(0.0, self.turn * self.spin_speed))
-        # [14] 회전 10 s + 대기 10 s가 다 지났나? (t >= search_time + wait_time) → 예: 관람 끝 LOST / 아니오: 아래 WAIT
-        # 4) 회전 10 s + 대기 10 s 다 지남 → 더 기다려도 못 찾는다고 보고 관람 끝 (키오스크에 result lost)
-        if t >= p['search_time'] + p['wait_time']:
-            return self.end_tour('LOST', 'lost')
-        # 3) 회전으로도 못 찾음 → 멈춰서 기다림 (관람객이 로봇 쪽으로 와 주길). 좌표가 다시 오면 위 FOLLOW로 돌아감
-        self.set_state('WAIT')
-        self.dbg['reason'] = 'wait'
-        self.drive(*self.ramp(0.0, 0.0))
+        # [11]~[14] 사람을 놓침 (3 s 넘게 좌표가 안 옴) → start_tour.py search(): 마지막 위치로 이동 → 회전 탐색 → 대기 → LOST
+        return self.search(now, pose, here)
 
-    def face(self, pose, here, person):
-        """제자리에서 감속해 서서 사람 쪽으로 몸만 돌린다 (face_deadband 9° 안이면 안 돎 → 꿈틀거림 방지).
-        받음: pose    로봇 (x, y, yaw) odom
-              here    로봇 (x, y)
-              person  사람 (x, y)
-        내보냄: drive(ramp(0, w)) → cmd_vel (전진 0, 회전 w)"""
-        turn = wrap(math.atan2(*(person - here)[::-1]) - pose[2])
-        w = float(np.clip(1.5 * turn, -self.p['max_angular'], self.p['max_angular']))
-        if abs(turn) < self.p['face_deadband']:
-            w = 0.0
-        return self.drive(*self.ramp(0.0, w))
-
-    def wait_visitor(self, now, pose, here):
-        """[WAIT_VISITOR] 관람객이 register_confirm_time(1 s) 동안 끊김 없이(register_gap 0.5 s 안) 보이면 등록 → FOLLOW.
-        확인하는 동안은 따라가지 않고 바라보기만 한다 (등록 안 된 사람을 따라가지 않게). 끊기면 처음부터 다시.
-        받음: now, pose (x, y, yaw), here (x, y), (kf.x, seen, seen_since)
-        내보냄: 끊김 → 정지 / 확인 중 → face() / 1 s 채움 → on_registered(), state FOLLOW"""
-        p = self.p
-        if self.kf.x is None or now - self.seen > p['register_gap']:
-            if self.kf.x is not None:
-                self.get_logger().info('등록 확인 중 끊김 → 다시 기다림')
-            self.kf.x, self.seen_since = None, None
-            self.dbg['reason'] = 'wait_visitor'
-            return self.drive(*self.ramp(0.0, 0.0))
-        if now - self.seen_since < p['register_confirm_time']:
-            self.dbg['reason'] = 'register_confirm'
-            last, vel = self.person()
-            return self.face(pose, here, last + vel * (now - self.kf.t))
-        self.on_registered(now - self.seen_since)
-        self.set_state('FOLLOW')                    # 다음 주기부터 추종
-        return self.drive(*self.ramp(0.0, 0.0))
-
-    def on_registered(self, confirmed):
-        """등록 완료 순간에 할 일 (한곳에). 나중에 인식 모듈이 등록 신호를 주면 부르는 조건만 바꾼다.
-        받음: confirmed  끊김 없이 보인 시간 [s] (로그용)
-        바뀜: registered = True (키오스크 보고는 prepare_tour로 옮길 예정)
-        내보냄: guide_message recognized_guide("recognized") → 음성 '인식되었습니다'"""
-        self.registered = True                      # 등록 완료 표시 (prepare_tour 구현 때 키오스크 보고에 씀)
-        self.get_logger().info(f'관람객 등록 완료 ({confirmed:.1f} s 끊김 없이 보임)')
-        if self.p['recognized_guide']:
-            self.guide_pub.publish(String(data=self.p['recognized_guide']))   # "인식되었습니다"
-
-    def face_start(self, now):
-        """[START_FACE] 제자리 회전으로 face_zone(키오스크) 쪽을 본다. 관람객이 키오스크에서 오므로 카메라에 잡히게.
-        map 좌표 필요 (그래서 LOCALIZE 뒤). face_timeout(15 s) 안에 못 돌면 포기하고 WAIT_VISITOR.
-        받음: now, (face_point, start, TF map→base_link)
-        내보냄: drive(ramp(0, w)), 다 돌면 state WAIT_VISITOR"""
-        p = self.p
-        if self.face_point is None and self.start is None:   # 바라볼 곳을 모름 → 돌지 않음
-            return self.set_state('WAIT_VISITOR')
-        if self.face_until is None:
-            self.face_until = now + p['face_timeout']
-        pose = self.lookup(p['map_frame'], p['base_frame'])
-        if pose is None or now > self.face_until:
-            if now > self.face_until:
-                self.get_logger().warn(f'시작 회전 {p["face_timeout"]} s 안에 못 끝냄'
-                                       + (' (map TF 없음: localization 확인)' if pose is None else '')
-                                       + ' → WAIT_VISITOR')
-                self.set_state('WAIT_VISITOR')
-            self.dbg['reason'] = 'start_face_wait'
-            return self.drive(*self.ramp(0.0, 0.0))
-        x, y, yaw = pose
-        if self.face_point is not None:             # 바라볼 곳(키오스크 등) 쪽
-            want = math.atan2(self.face_point[1] - y, self.face_point[0] - x)
-        else:                                       # 없으면 출발 지점의 방향
-            want = self.start[2]
-        err = float(wrap(want - yaw))
-        self.dbg['reason'] = 'start_face'
-        if abs(err) < p['face_tolerance'] and abs(self.cmd[1]) < 0.2:
-            self.get_logger().info(f'시작 회전 끝 (오차 {math.degrees(err):.0f}°) → 관람객 인식 기다림')
-            self.set_state('WAIT_VISITOR')
-            return self.drive(*self.ramp(0.0, 0.0))
-        w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
-        return self.drive(*self.ramp(0.0, w))
-
-    def localize(self, now):
-        """[LOCALIZE] AMCL에 initialpose(출발 지점)를 보내고 map 위치가 그 근처로 잡힐 때까지 기다린다.
-        로봇을 움직이지 않는다 (지도에 '여기 있다' 핀만 꽂음). 로봇이 이미 출발 지점(도크 앞)에 있다는 전제.
-        받음: now, (start, TF map→base_link)
-        내보냄: initialpose 한 번 → 잡히면 state START_FACE, 위치를 아예 못 잡으면 end_tour(no_localization)"""
-        p = self.p
-        if self.start is None or not p['set_initial_pose']:
-            return self.set_state('START_FACE')     # 초기 위치를 안 보냄 → 지금 AMCL 위치 그대로
-        if self.loc_at is None:
-            self.loc_at = now
-        x, y, yaw = self.start
-        if self.pose_sent is None:
-            if self.pose_pub.get_subscription_count() == 0:     # AMCL이 아직 initialpose를 구독하지 않음
-                self.dbg['reason'] = 'localize_wait_amcl'
-                if now - self.loc_at > p['localize_timeout']:
-                    self.end_tour('READY', 'no_localization')
-                return
-            msg = PoseWithCovarianceStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = p['map_frame']
-            msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
-            msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-            cov = [0.0] * 36
-            cov[0] = cov[7] = 0.05                  # x, y 분산 [m^2]
-            cov[35] = 0.05                          # yaw 분산 [rad^2]
-            msg.pose.covariance = cov
-            self.pose_pub.publish(msg)
-            self.pose_sent = now
-            self.get_logger().info(f'초기 위치 보냄 (map {x:.2f}, {y:.2f}, {math.degrees(yaw):.0f}°)')
-        self.dbg['reason'] = 'localize'
-        pose = self.lookup(p['map_frame'], p['base_frame'])
-        near = pose is not None and math.hypot(pose[0] - x, pose[1] - y) < p['localize_tolerance']
-        if near and now - self.pose_sent > 1.0:     # AMCL이 새 위치로 map→odom을 낼 시간
-            self.get_logger().info('초기 위치 잡힘 → 그 자리에서 바라볼 곳(face_zone) 쪽으로 회전')
-            return self.set_state('START_FACE')
-        if now - self.loc_at > p['localize_timeout']:
-            if pose is None:
-                return self.end_tour('READY', 'no_localization')
-            self.get_logger().warn(f'map 위치가 출발 지점에서 {math.hypot(pose[0] - x, pose[1] - y):.2f} m '
-                                   '떨어져 있음 (AMCL 확인) → 그래도 바라볼 곳 쪽으로 회전')
-            self.set_state('START_FACE')
-
-    # ---------- 관람 시작 (start_tour 액션) ----------
+    # ---------- 액션 (호출·등록 = prepare_tour.py, 관람 = start_tour.py) ----------
 
     def on_goal(self, _goal):
-        """[액션] start_tour goal이 오면 일단 다 받는다.
-        여기서 거절하면 키오스크가 이유를 모르므로, 검사는 run_tour에서 하고 이유(message)와 함께 끝낸다.
+        """[액션] prepare_tour·start_tour goal이 오면 일단 다 받는다.
+        여기서 거절하면 키오스크가 이유를 모르므로, 검사는 run_prepare·run_tour에서 하고 이유(message)와 함께 끝낸다.
         돌려줌: GoalResponse.ACCEPT"""
         return GoalResponse.ACCEPT                  # 받을 수 없는 goal은 run_tour에서 이유(message)와 함께 끝냄
-
-    def goal_problem(self, goal):
-        """이 goal로 관람을 시작할 수 없으면 이유를 돌려준다 (검사만 하고 아무것도 안 바꿈). lock 안에서 부른다.
-        받음: goal (goal.request.artwork_ids), (active)
-        돌려줌: '' (문제 없음) / 'busy' (이미 관람 중) / 'unsupported_mode' (artwork_ids가 있음 = 코스관람, robot4 몫)"""
-        if self.active:
-            return 'busy'
-        if goal is not None and len(goal.request.artwork_ids) > 0:
-            return 'unsupported_mode'
-        return ''
-
-    def begin_tour(self):
-        """관람 시작 준비: 지난 관람객 데이터(위치, 등록, 본 작품)를 지우고 active = True, 첫 상태로.
-        바뀜: kf.x, seen, holding, 단계 타이머, registered, explaining, visited, seen_since, active, end_reason
-              state → UNDOCK (undock 파라미터 false면 LOCALIZE)"""
-        self.kf.x, self.seen, self.holding = None, -1e9, False
-        self.face_until = self.loc_at = self.pose_sent = None
-        self.active, self.end_reason = True, ''
-        self.registered, self.explaining, self.visited = False, '', []
-        self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
-        self.seen_since = None
-        self.get_logger().info('관람 시작 (FREE)')
-        self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')
-
-    def end_tour(self, state, reason):
-        """관람 끝: 정지 → 관람객 데이터 삭제 → arti/tour_end 발행(다른 노드도 삭제) → state.
-        받음: state   다음 상태 'READY' (취소·실패) 또는 'LOST' (분실)
-              reason  끝난 이유 → 액션 result.message ('canceled', 'lost', 'undock_failed' ...)
-        바뀜: active = False → run_tour 루프가 끝나 result를 보냄
-        내보냄: cmd_vel 0, arti/tour_end, follow/state"""
-        self.active, self.end_reason = False, reason
-        self.drive(0.0, 0.0)
-        self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
-        self.tour_end_pub.publish(Empty())
-        self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
-        self.set_state(state)
-
-    def run_tour(self, goal):
-        """[액션 실행, 관람 내내] start_tour goal 하나를 처음부터 끝까지 맡는다 (goal None = auto_start).
-        검사(goal_problem) → begin_tour → undock → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
-        움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
-        받음: goal (mode, artwork_ids, is_cancel_requested)
-        돌려줌: StartTour.Result(success = 취소로 끝남, message = 끝난 이유)"""
-        with self.lock:
-            problem = self.goal_problem(goal)
-            if not problem:
-                self.begin_tour()
-        if problem:
-            ids = list(goal.request.artwork_ids) if goal is not None else []
-            self.get_logger().warn(f'관람 시작 거절 ({problem}, artwork_ids {ids}) — 이 로봇은 자유관람만, 한 번에 한 관람')
-            if goal is not None:
-                goal.abort()
-            return StartTour.Result(success=False, message=problem)
-        if self.state == 'UNDOCK':
-            self.send_feedback(goal)
-            why = self.undock(goal)
-            with self.lock:
-                if why:
-                    self.end_tour('READY', why)
-                elif self.active:
-                    self.set_state('LOCALIZE')
-        while self.active:
-            if goal is not None and goal.is_cancel_requested:
-                with self.lock:
-                    self.end_tour('READY', 'canceled')
-                break
-            self.send_feedback(goal)
-            time.sleep(0.2)
-        reason = self.end_reason
-        result = StartTour.Result(success=reason == 'canceled', message=reason)
-        with self.lock:
-            visited, self.visited = self.visited, []   # 관람 기록은 로그로 남기고 지운다 (관람객 데이터 남기지 않음)
-        self.get_logger().info(f'관람 결과: success={result.success}, message={reason}, '
-                               f'설명 완료 {[artwork_number(a) for a in visited]}')
-        if goal is not None:
-            goal.canceled() if reason == 'canceled' else goal.abort()
-        return result
-
-    def send_feedback(self, goal):
-        """내부 상태 → 키오스크용 feedback (StartTour.action, docs/common/ros2_interfaces.md).
-        새로 끝까지 설명한 작품이 있으면 → ARTWORK_COMPLETED + 그 작품 번호 (작품마다 한 번)
-        설명 중 → EXPLAINING, FOLLOW·SEARCH·WAIT·LOST → FOLLOW, 그 밖(READY·UNDOCK·LOCALIZE·START_FACE·WAIT_VISITOR) → MOVING.
-        (관람객 등록 보고는 prepare_tour 몫으로 바뀔 예정 — 지금은 WAIT_VISITOR도 MOVING)
-        받음: goal, (state, explaining, visited, reported)
-        내보냄: feedback (state, artwork_id)"""
-        if goal is None:
-            return
-        if self.reported < len(self.visited):
-            done = self.visited[self.reported]
-            self.reported += 1
-            goal.publish_feedback(StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=artwork_number(done)))
-            return
-        explaining = self.explaining if self.state in ('FOLLOW', 'SEARCH', 'WAIT') else ''
-        if explaining:
-            state = 'EXPLAINING'
-        elif self.state in ('FOLLOW', 'SEARCH', 'WAIT', 'LOST'):
-            state = 'FOLLOW'
-        else:                                       # READY·UNDOCK·LOCALIZE·START_FACE·WAIT_VISITOR
-            state = 'MOVING'
-        goal.publish_feedback(StartTour.Feedback(
-            state=state, artwork_id=artwork_number(explaining) if explaining else 0))
-
-    def wait_future(self, future, timeout, goal):
-        """future(서비스·액션 응답)가 끝날 때까지 기다린다 (다른 스레드가 채움).
-        받음: future, timeout [s], goal (취소되면 그만 기다림)
-        돌려줌: 끝났으면 True, 시간 초과·취소면 False"""
-        end = time.monotonic() + timeout
-        while not future.done():
-            if time.monotonic() > end or (goal is not None and goal.is_cancel_requested):
-                return False
-            time.sleep(0.1)
-        return True
-
-    def undock(self, goal):
-        """도크에 붙어 있으면 Create 3에 undock 액션을 보내고 끝날 때까지 기다린다 (로봇이 스스로 움직임).
-        받음: goal (취소 확인용), (docked: dock_status)
-        돌려줌: '' (성공 또는 이미 도크 밖) / 'no_undock_server' / 'undock_failed' / 'canceled'"""
-        if self.docked is False:
-            self.get_logger().info('이미 도크 밖 → undock 건너뜀')
-            return ''
-        if not self.undock_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().error(f'undock 액션 서버 없음 ({self.get_namespace().rstrip("/")}/undock)')
-            return 'no_undock_server'
-        self.get_logger().info('undock 시작')
-        sent = self.undock_client.send_goal_async(Undock.Goal())
-        if not self.wait_future(sent, 5.0, goal) or not sent.result().accepted:
-            return 'canceled' if goal is not None and goal.is_cancel_requested else 'undock_failed'
-        handle = sent.result()
-        done = handle.get_result_async()
-        if not self.wait_future(done, self.p['undock_timeout'], goal):
-            handle.cancel_goal_async()
-            return 'canceled' if goal is not None and goal.is_cancel_requested else 'undock_failed'
-        res = done.result()
-        ok = (not res.result.is_docked) if res.status == GoalStatus.STATUS_SUCCEEDED else self.docked is False
-        self.get_logger().info('undock 끝' if ok else f'undock 실패 (status {res.status})')
-        return '' if ok else 'undock_failed'
-
-    # ---------- 주행 ----------
-
-    def obstacles(self):
-        """지금 피해야 할 장애물 점 = 라이다 점 + depth_keep(1 s) 안의 바닥 물체 점.
-        받음: (scan_pts, floor_pts, floor_time)
-        돌려줌: 장애물 점 (N, 2) odom"""
-        # depth(바닥 물체)는 초당 약 3번만 와서, 마지막으로 받은 걸 depth_keep(1 s) 동안 기억해서 쓴다.
-        # 1 s 넘게 안 왔으면 오래된 점이라 버린다 (이미 치운 물체를 계속 피하지 않게).
-        fresh = self.now() - self.floor_time < self.p['depth_keep']
-        # 라이다 점(벽·기둥) + (최근이면) 바닥 물체 점을 한 배열로 합친다 → dwa·field가 장애물로 씀
-        return np.concatenate([self.scan_pts] + ([self.floor_pts] if fresh else []))
-
-    def dwa(self, pose, goal, face):
-        """(v, w) 후보를 굴려 보고, 안 부딪히면서 목표까지 '돌아가는 거리'가 가장 줄어드는 것을 고른다 (DWA).
-        ① 후보 105개 ② 1.5 s 굴려 봄 ③ 위험한 후보 버림 ④ 벌점 최소 — 단계별 입출력은 본문 주석.
-        받음: pose (x, y, yaw) odom, goal 목표 (x, y), face 바라볼 곳 (x, y), (self.cmd: 지난 명령 = 지금 속도로 가정)
-        돌려줌: (v [m/s], w [rad/s]). 모든 후보가 막혔으면 (0, face 쪽 회전)"""
-        # ── 입력 풀기 ──────────────────────────────────────────────────────────────
-        # pose      → x0, y0 [m], th0 [rad]   로봇 위치·방향 (odom)            예) 1.0, 0.0, 0.0
-        # self.cmd  → v0 [m/s], w0 [rad/s]    지난번 보낸 명령 = 지금 속도로 가정  예) 0.20, 0.0
-        p, (x0, y0, th0), (v0, w0) = self.p, pose, self.cmd
-        dt = p['control_period']
-        # ── ① 후보 만들기 ──────────────────────────────────────────────────────────
-        # 입력: v0, w0, 가속 한계(linear_accel 0.5, angular_accel 3.0), 최대 속도(0.3, 1.5)
-        # 출력: vs (7,)  0.1 s 안에 낼 수 있는 전진 속도 7개   예) 0.15 ~ 0.25
-        #       ws (15,) 0.1 s 안에 낼 수 있는 회전 속도 15개  예) -0.3 ~ 0.3
-        vs = np.linspace(max(0.0, v0 - p['linear_accel'] * dt),
-                         min(p['max_linear'], v0 + p['linear_accel'] * dt), p['v_samples'])
-        ws = np.linspace(max(-p['max_angular'], w0 - p['angular_accel'] * dt),
-                         min(p['max_angular'], w0 + p['angular_accel'] * dt), p['w_samples'])
-        # 출력: V, W (105,)  모든 조합을 한 줄로 편 것. 후보 i = (V[i], W[i])
-        V, W = (g.ravel() for g in np.meshgrid(vs, ws))
-        # ── ② 굴려 보기 (sim_time 1.5 s를 0.1 s씩 15칸) ─────────────────────────────
-        # 입력: V, W, x0, y0, th0
-        # 출력: th (105, 15)  후보별·시간별 방향 [rad]
-        #       xs, ys (105, 15)  후보별·시간별 위치 [m]   행 = 후보, 열 = 0.1 ~ 1.5 s
-        th = th0 + W[:, None] * np.arange(1, int(p['sim_time'] / 0.1) + 1) * 0.1
-        xs = x0 + np.cumsum(V[:, None] * np.cos(th) * 0.1, 1)
-        ys = y0 + np.cumsum(V[:, None] * np.sin(th) * 0.1, 1)
-
-        # ── ③ 위험한 후보 버리기 ────────────────────────────────────────────────────
-        # 입력: obstacles() → obs (N, 2)  라이다 + 바닥 물체 점 (odom)
-        # 출력: near (M, 2)  로봇에서 1.05 m(0.3 × 1.5 + 0.6) 안의 점만 (먼 점은 궤적과 상관없어 계산 줄임)
-        obs = self.obstacles()
-        near = obs[np.hypot(obs[:, 0] - x0, obs[:, 1] - y0) < p['max_linear'] * p['sim_time'] + 0.6]
-        # 출력: clear (105,)   후보별로 궤적 15점 중 장애물에 가장 가까이 간 거리 [m] (장애물 없으면 inf)
-        #       here_clear     지금 로봇 위치에서 가장 가까운 장애물 거리 [m]
-        clear, here_clear = np.full(V.size, np.inf), np.inf
-        if len(near):
-            clear = np.hypot(xs[..., None] - near[:, 0], ys[..., None] - near[:, 1]).min((1, 2))
-            here_clear = np.hypot(near[:, 0] - x0, near[:, 1] - y0).min()
-        # 여유를 지키는 경로, 또는 이미 붙어 있을 때 더 가까워지지 않는 경로(빠져나오기). 로봇 반지름 안은 금지
-        # 출력: safe (105,) True/False  통과 조건 둘 중 하나
-        #   - clear > 0.25 (로봇 반지름 0.2 + 여유 0.05): 여유 있게 지나감
-        #   - 이미 벽에 붙어 있을 때: 몸(0.2)이 닿지 않고 지금보다 안 가까워짐 → 빠져나가는 길 (없으면 꼼짝 못 함)
-        r = p['robot_radius']
-        safe = (clear > r + p['safety_margin']) | ((clear > r) & (clear >= here_clear - 0.005))
-        # 전부 위험 → 앞으로 안 가고 face(사람) 쪽으로 제자리 회전만. 출력: (0.0, w)  w = 1.5 × 어긋난 각도 (최대 ±1.5)
-        if not safe.any():                          # 막힘 → 제자리에서 대상 쪽으로
-            self.dbg['blocked'] = True
-            turn = wrap(math.atan2(face[1] - y0, face[0] - x0) - th0)
-            return 0.0, float(np.clip(1.5 * turn, -p['max_angular'], p['max_angular']))
-
-        # ── ④ 점수(벌점) 매기고 고르기 — 작을수록 좋음 ─────────────────────────────
-        # 입력: goal, 로봇 위치, obs
-        # 출력: field (n, n)  칸마다 goal까지 장애물을 돌아가는 거리 [m],  origin 격자 원점 (x, y)
-        t0 = time.monotonic()
-        field, origin = self.field(np.asarray(goal, float), np.array([x0, y0]), obs)
-        self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
-        # 출력: ex, ey, eth (105,)  후보별 1.5 s 뒤 도착 위치·방향 (② 결과의 마지막 열)
-        ex, ey, eth = xs[:, -1], ys[:, -1], th[:, -1]
-        # 출력: cost (105,)  후보별 벌점 =
-        #   sample(field, 도착점)               도착점에서 goal까지 돌아가는 거리 [m]   (가장 중요)
-        #   + 1.0  × max(0.4 - clear, 0)        장애물에 0.4 m 안으로 붙은 만큼
-        #   + 0.02 × |W|                        회전 (비슷하면 직진)
-        #   + (goal 0.3 m 안이면) 0.3 × |사람 쪽과 어긋난 각도|  사람을 바라보며 서게
-        cost = self.sample(field, origin, ex, ey) \
-            + p['w_clearance'] * np.clip(p['clearance_zone'] - clear, 0, None) \
-            + p['w_turn'] * np.abs(W)                       # 비용이 같으면 덜 도는 쪽
-        if math.hypot(goal[0] - x0, goal[1] - y0) < 0.3:   # 거의 도착 → 관람객 쪽을 바라봄
-            cost += p['w_heading'] * np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))
-        cost[~safe] = np.inf
-        # 출력: i  벌점이 가장 작은 후보 번호 (0 ~ 104). 위험한 후보는 cost = inf라 절대 안 뽑힘
-        # 결과: (v [m/s], w [rad/s])  예) (0.25, 0.3) → drive()가 cmd_vel로 보냄. 다음 0.1 s만 쓰고 다시 계산
-        i = int(np.argmin(cost))
-        return float(V[i]), float(W[i])
-
-    def field(self, goal, here, obs):
-        """격자 칸마다 goal까지 장애물을 돌아가는 거리 [m] (dwa의 벌점용).
-        10 cm 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 BFS로 퍼져 나가며 거리 채움.
-        받음: goal (x, y), here 로봇 (x, y), obs 장애물 점 (N, 2)
-        돌려줌: (거리 지도 n×n, 지도 원점 (x, y)). 못 가는 칸은 50"""
-        p = self.p
-        res = p['grid_resolution']
-        size = max(6.0, np.linalg.norm(goal - here) + 3.0)
-        n, origin = int(size / res), (goal + here) / 2 - size / 2
-        grid = np.zeros((n, n), np.uint8)
-        c = np.floor((obs - origin) / res).astype(int)
-        c = c[((c >= 0) & (c < n)).all(1)]
-        grid[c[:, 1], c[:, 0]] = 1
-        k = int(math.ceil((p['robot_radius'] + p['safety_margin']) / res))
-        raw, grid = grid, cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
-        gx, gy = np.floor((goal - origin) / res).astype(int)
-        rx, ry = np.floor((here - origin) / res).astype(int)
-        grid[max(gy - 1, 0):gy + 2, max(gx - 1, 0):gx + 2] = 0      # 목표 자리는 열어 둔다
-        win = np.s_[max(ry - k, 0):ry + k + 1, max(rx - k, 0):rx + k + 1]
-        grid[win] = raw[win]                        # 로봇 주변은 실제 장애물 칸만 막음 (붙어 있어도 출발 가능)
-        dist = np.full((n, n), np.inf)
-        dist[gy, gx] = 0.0
-        steps = [(dy, dx, math.hypot(dy, dx)) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
-        frontier = [(gy, gx)]
-        while frontier:                             # 목표에서부터 넓혀 가며 거리 채우기
-            nxt = []
-            for y, x in frontier:
-                for dy, dx, w in steps:
-                    yy, xx = y + dy, x + dx
-                    if 0 <= yy < n and 0 <= xx < n and not grid[yy, xx] and dist[y, x] + w < dist[yy, xx]:
-                        dist[yy, xx] = dist[y, x] + w
-                        nxt.append((yy, xx))
-            frontier = nxt
-        dist *= res
-        dist[~np.isfinite(dist)] = 50.0
-        return dist, origin
-
-    def sample(self, field, origin, x, y):
-        """거리 지도에서 점들의 값을 읽는다. 칸 사이는 주변 4칸을 섞어서(bilinear) → 후보끼리 점수가 같아지지 않게.
-        받음: field 거리 지도, origin 지도 원점, x, y 점들 (배열)
-        돌려줌: 점마다 거리 [m]"""
-        n = field.shape[0]
-        g = (np.stack([x, y], 1) - origin) / self.p['grid_resolution'] - 0.5
-        i = np.clip(np.floor(g).astype(int), 0, n - 2)
-        t = np.clip(g - i, 0.0, 1.0)
-        f = [field[i[:, 1] + dy, i[:, 0] + dx] for dy in (0, 1) for dx in (0, 1)]
-        return (f[0] * (1 - t[:, 0]) + f[1] * t[:, 0]) * (1 - t[:, 1]) + (f[2] * (1 - t[:, 0]) + f[3] * t[:, 0]) * t[:, 1]
-
-    def ramp(self, v, w):
-        """속도를 한 번에 바꾸지 않고 0.1 s에 바꿀 수 있는 만큼만 바꾼다 (덜컹 방지).
-        감속 linear_decel, 가속 linear_accel, 회전 angular_accel 한도.
-        받음: v, w  원하는 속도, (self.cmd: 지난 명령)
-        돌려줌: (v, w)  이번에 보낼 속도"""
-        #속도를 한번에 확 바꾸지 않고 조금씩 바꿔 주는 함
-        p, (v0, w0) = self.p, self.cmd
-        dt = p['control_period']
-        dv = p['linear_decel'] if abs(v) < abs(v0) else p['linear_accel']
-        v = v0 + float(np.clip(v - v0, -dv * dt, dv * dt))
-        w = w0 + float(np.clip(w - w0, -p['angular_accel'] * dt, p['angular_accel'] * dt))
-        return v, w
-
-    def drive(self, v, w):
-        """속도 명령을 로봇에 보낸다. enabled가 false면 보내지 않음. 보낸 값을 self.cmd에 기억 (ramp·dwa가 '지금 속도'로 씀).
-        받음: v  전진 속도 [m/s], w  회전 속도 [rad/s] (+ 왼쪽)
-        내보냄: cmd_vel (TwistStamped: twist.linear.x = v, twist.angular.z = w)"""
-        self.cmd = (v, w)
-        if not self.enabled:
-            self.cmd = (0.0, 0.0)
-            return
-        msg = TwistStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.p['base_frame']
-        msg.twist.linear.x, msg.twist.angular.z = v, w
-        self.cmd_pub.publish(msg)
-        if self.diag is not None:
-            t = time.monotonic()
-            if self.last_cmd is not None:
-                self.diag.add('cmd_vel.gap', t - self.last_cmd)
-            self.last_cmd = t
 
     # ---------- 진단 (끊김 원인 찾기) ----------
 
@@ -1130,8 +551,6 @@ class VisitorFollower(Node):
                     self.say(True, f'[시간] {name}: 최소 지연 {lat_min * 1000:.0f} ms → {ahead}. '
                                    f'PC·로봇 시간 동기화(chrony/NTP) 확인')
         expected = ['scan', 'target_person/point_map', 'tf']
-        if self.p['use_depth']:
-            expected.append('oakd/stereo/image_raw/compressedDepth')
         for name in [t for t in expected if t not in topics]:
             log.warn(f'[입력] {name}: {span:.1f} s 동안 한 번도 안 옴')
         n, _, gap = stat('control.gap')
@@ -1162,7 +581,7 @@ class VisitorFollower(Node):
 
     def set_state(self, state):
         """상태를 바꾼다. 바뀔 때만 로그를 남기고 follow/state를 발행 (같은 상태로 또 불러도 아무것도 안 함).
-        받음: state  'READY' / 'UNDOCK' / 'LOCALIZE' / 'START_FACE' / 'WAIT_VISITOR' / 'FOLLOW' / 'SEARCH' / 'WAIT' / 'LOST'
+        받음: state  'READY' / 'UNDOCK' / 'LOCALIZE' / 'START_FACE' / 'WAIT_VISITOR' / 'REGISTERED' / 'FOLLOW' / 'SEARCH' / 'WAIT' / 'LOST'
         내보냄: follow/state (latched) → artwork_zone 등"""
         if state != self.state:
             self.get_logger().info(f'상태 {self.state} → {state}')
@@ -1183,7 +602,7 @@ def main():
     except KeyboardInterrupt:
         signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
     finally:
-        node.active = False                         # 관람 액션 대기 루프 끝냄
+        node.active = False                         # 준비·관람 액션 대기 루프 끝냄
         executor.shutdown(timeout_sec=1.0)
         node.drive(0.0, 0.0)
         node.destroy_node()

@@ -20,15 +20,15 @@ PC 사이 기능은 아래 이름·방식으로만 주고받는다. 이름·방�
 
 | 기능 | ROS 2 인터페이스 이름 | 방식 | 요청 방향 | 담당 |
 | --- | --- | --- | --- | --- |
-| Robot1 호출·등록 | `/robot1/arti/prepare_tour` | Action | PC3 → PC1 | arti_follow (구현 예정) |
+| Robot1 호출·등록 | `/robot1/arti/prepare_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (PrepareTour) |
 | Robot4 호출·등록 | `/robot4/arti/prepare_tour` | Action | PC3 → PC2 | 코스주행 |
 | Robot1 자유관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (StartTour) |
 | Robot4 코스관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 | 코스주행 |
-| 작품 설명 조회 | `/arti/description` | Service | PC1·PC2 → PC3 | 클라이언트: arti_audio `guide_audio_node` (시험용 서버 `fake_description_server`) |
+| 작품 설명 조회 | `/arti/description` | Service | PC1·PC2 → PC3 | 클라이언트: arti_audio `guide_audio_node` |
 
 - `/arti/description`은 네임스페이스 없는 전역 이름 (PC3 서버 하나를 두 로봇이 같이 씀).
-- 작품 설명 문장은 PC3(DB)가 원본이다. PC3가 응답하지 않으면 설명하지 않고 실패(`no_description`). arti_audio의 `artworks_sample.yaml`은 `fake_description_server`(PC3 없이 시험)용.
-- 타입 정의(.action/.srv)는 `arti_interfaces`에만 둔다 (`PrepareTour`, `StartTour`, `Description` = 팀 명세서 그대로). 작품 번호는 int32 (`art_02` → 2).
+- **작품 설명 문장은 PC3(DB)에서 서비스로 받는다 (로봇 PC에 두지 않음). 안내 문구는 로봇의 `arti_audio/config/guide_lines.yaml`.** PC3가 응답하지 않으면 설명하지 않고 실패(`no_description`) + 실패 안내 음성(`explain_failed`, guide_lines.yaml).
+- 타입 정의(.action/.srv)는 `arti_interfaces`에만 둔다 (`PrepareTour`, `StartTour`, `Description` = 팀 명세서 그대로). 작품 ID는 로봇 PC 안(`artworks.yaml`, `ExplainArtwork`, `artwork_zone/explaining`·`explained` Int32)까지 모두 int 번호 (= PC3 DB 번호).
 - 전체 명세: `docs/common/ros2_interfaces.md`.
 
 ## 저장소 폴더 구조 (유지, 2026-11-18 정리)
@@ -77,10 +77,10 @@ arti/
 |---|---|---|---|---|
 | common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | PC 간: `PrepareTour`·`StartTour` action, `Description` srv. 로봇 PC 안: `ExplainArtwork` action, `VisitorDetection` msg |
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | `localization.launch.py`(AMCL 시작 위치 = `arti_common/config/init_pose.yaml` undock 자동) |
-| common | arti_common | ament_python | 공용 좌표 config, 유틸 | `config/artworks.yaml` (작품 4·출구·키오스크 반원 구역) |
-| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피, 한 파일), `artwork_zone`(작품 반원 구역 5초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`(인식 노드만 빼려면 `tracker:=camera`), 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
+| common | arti_common | ament_python | 공용 좌표 config, 유틸 | `config/artworks.yaml`(작품 4·키오스크 반원 = robot4 실측값, 출구 직사각형 = robot1 값, 두 로봇 공통), `config/init_pose.yaml`(로봇별 도크·출발 위치 — 로봇마다 다른 것은 여기뿐), `zones.py`(구역 읽기·안/밖 판정 `load_zones`, 두 로봇 공통) |
+| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피. 노드 하나에 파일 넷: 본체 `visitor_follower.py`, ① 호출·등록 `prepare_tour.py`, ② 관람 `start_tour.py`, 주행 공통 `motion.py`), `artwork_zone`(작품 반원 구역 5초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`(인식 노드만 빼려면 `tracker:=camera`), 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
 | (src 바로 아래) | person_tracker | ament_python | 사람 인식: 탑캠 YOLO 추적·재식별 + LiDAR → `target_person/point_map` (jsbzzz/turtlebot_project에서 가져옴) | `multi_tracker_node`, `camera_pub`, `top_cam_tf` 등 |
-| (src 바로 아래) | arti_audio | ament_python | 작품 설명·안내 음성 (T35). 작품 설명(PC3 `/arti/description` 서비스, 작품 번호 int32)과 안내 문구(`config/guide_lines.yaml`)를 실행 중에 edge-tts로 합성(캐시 `~/.cache/arti_audio/tts`) → 스피커(`pw-play`) 재생 | `guide_audio_node` (`explain_artwork` 액션, `guide_message` 토픽, `/arti/description` 클라이언트), 시험용 `fake_description_server`(`config/artworks_sample.yaml`) |
+| (src 바로 아래) | arti_audio | ament_python | 작품 설명·안내 음성 (T35). 작품 설명(PC3 `/arti/description`, 작품 번호 int32)과 안내 문구(`config/guide_lines.yaml`)를 실행 중에 edge-tts로 합성(캐시 `~/.cache/arti_audio/tts`) → 스피커(`pw-play`) 재생 | `guide_audio_node` (`explain_artwork` 액션, `guide_message` 토픽, `/arti/description` 클라이언트) |
 
 예정 역할 폴더 (필요해지면 추가): `course/`(코스주행, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).
 역할 패키지끼리 직접 import하지 않는다.

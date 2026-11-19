@@ -1,10 +1,8 @@
-"""읽을 문장 준비: 안내 문구(guide_lines.yaml)와 작품 설명(PC3 /arti/description 서비스).
+"""읽을 문장 준비: 안내 문구(guide_lines.yaml, 로봇이 가짐)와 작품 목록(arti_common artworks.yaml).
 
-작품 설명의 원본은 PC3(키오스크/관제)의 SQLite DB다 (docs/common/ros2_interfaces.md).
-config/artworks_sample.yaml은 PC3 없이 시험할 때 fake_description_server가 읽는 샘플이다.
+작품 설명 문장은 로봇 PC에 두지 않고 PC3(키오스크/관제)의 SQLite DB에 요청해서 받는다
+(/arti/description, docs/common/ros2_interfaces.md).
 """
-
-import re
 
 import yaml
 
@@ -25,23 +23,7 @@ class GuideLines:
         self.guides = {str(k): str(v).strip() for k, v in (data.get('guides') or {}).items()}
 
 
-def artwork_number(artwork_id):
-    """'art_02' → 2. ROS 통신(Description.srv, StartTour)의 작품 번호는 int32로 통일. 숫자가 없으면 None."""
-    m = re.search(r'(\d+)$', str(artwork_id).strip())
-    return int(m.group(1)) if m else None
-
-
 def artwork_ids(path):
-    """arti_common artworks.yaml의 작품 ID 목록 ('art_01' ...) — 시작할 때 미리 합성할 대상."""
-    return [str(r['artwork_id']) for r in (load_yaml(path).get('artworks') or []) if r.get('artwork_id')]
-
-
-def sample_descriptions(path):
-    """artworks_sample.yaml → {작품 번호: description} (fake_description_server용)."""
-    out = {}
-    for r in load_yaml(path).get('artworks') or []:
-        num = artwork_number(r.get('artwork_id', ''))
-        text = str(r.get('description') or '').strip()
-        if num is not None and text:
-            out[num] = text
-    return out
+    """arti_common artworks.yaml의 작품 번호 목록 [1, 2, ...] — 시작할 때 미리 합성할 대상.
+    작품 ID는 ROS 통신에서 int32로 통일 (ExplainArtwork, Description, StartTour)."""
+    return [int(r['artwork_id']) for r in (load_yaml(path).get('artworks') or []) if r.get('artwork_id')]
