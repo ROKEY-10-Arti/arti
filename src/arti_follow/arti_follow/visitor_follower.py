@@ -27,6 +27,7 @@
       guide_message (String)                       관람객을 인식하면 recognized_guide 키 → arti_audio가 말함
       arti/tour_end (Empty)                        관람이 끝나면(취소·LOST·실패) 한 번 → 인식 모듈·artwork_zone이
                                                    그 관람객 데이터(re-ID 특징, 좌표 기록 등)를 지운다. 로봇 1대 = 관람객 1명
+      target_person/register_front (Empty)         WAIT_VISITOR에서 인식 모듈에 '바로 앞 사람을 등록' 요청 (클릭 없이 자동 등록)
 진단  diag일 때 diag_period마다 토픽별 수신 주기·지연·콜백 시간, 제어 주기·계산 시간, 정지 이유를 로그로 낸다.
       (화면 로그만. 테스트 기록은 follow_test.launch.py의 ros2 bag)
 
@@ -40,6 +41,8 @@
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
               (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → REGISTERED.
               확인하는 동안은 따라가지 않고 그 자리에서 바라본다. 끊기면 처음부터 다시 기다림
+              auto_register면 좌표가 안 오는 동안 register_period마다 target_person/register_front를 보내
+              인식 모듈이 로봇 바로 앞 사람을 대상으로 등록하게 한다 (첫 요청 + register_settle 전 좌표 = 예전 대상 → 버림)
   REGISTERED  등록 완료 → prepare_tour 성공. start_tour를 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠).
               ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
   ── 여기부터 = start_tour ──
@@ -102,6 +105,9 @@ PARAMS = {
     'dock_timeout': 90.0,           # Create 3 dock 액션을 이만큼 기다림 [s]
     'set_initial_pose': True,       # undock 뒤 AMCL initialpose를 출발 지점으로 보냄
     'recognized_guide': 'recognized',   # 관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)
+    'auto_register': True,          # WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)
+    'register_period': 1.0,         # 등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)
+    'register_settle': 0.5,         # 첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]
     'start_pose_file': '',          # '' = arti_common/config/init_pose.yaml
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
@@ -217,6 +223,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
+        self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
+        self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
         self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
@@ -341,6 +349,10 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
         if self.state not in LISTEN:
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
+        if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
+            stamp = Time.from_msg(msg.header.stamp).nanoseconds / 1e9
+            if self.reg_first is None or stamp < self.reg_first + self.p['register_settle']:
+                return                              # 등록 요청 전 좌표 = 예전 대상(또는 아무나)일 수 있음
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return

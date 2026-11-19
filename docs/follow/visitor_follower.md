@@ -61,6 +61,10 @@ START_FACE    언독 지점 → 키오스크 방향으로 돌 각도를 계산�
 WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버림
   │             좌표가 1 s 동안 끊김 없이(간격 0.5 s 이하) 들어오면 → 등록 완료
   │             확인 중에는 따라가지 않고 바라보기만. 끊기면 처음부터 다시
+  │             등록 방식 = 인식 노드 (launch tracker 인자, 둘 다 person_tracker BaseTrackerNode 상속)
+  │               gesture(기본) gesture_test_node: 로봇 앞에서 주먹 → 손바닥 펴기 (auto_register 끔)
+  │               front         front_tracker_node: 좌표가 안 오는 동안 1 s마다 target_person/register_front
+  │                             → 로봇 정면 ±30°, 2.5 m 안 가장 가까운 사람 자동 등록 (인식 창 클릭도 됨)
   ▼ on_registered(): registered=true, guide_message "recognized" ("인식되었습니다")
 REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 기다림 (돌지도 따라가지도 않음) ┘ prepare_tour
   │             130 s(ready_timeout, 키오스크 120 s보다 길게) 안에 start_tour가 안 오면 → 관람 끝 (not_started)

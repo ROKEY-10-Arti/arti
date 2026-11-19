@@ -12,7 +12,7 @@ from arti_interfaces.action import PrepareTour
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from irobot_create_msgs.action import Undock
 import numpy as np
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 from arti_follow.motion import wrap
 from arti_follow.start_tour import RETURNING
@@ -32,6 +32,7 @@ class PrepareMixin:
         self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
+        self.reg_first = self.reg_last = None       # 앞 사람 등록 요청 (WAIT_VISITOR)
         self.get_logger().info('호출 → 관람 준비 시작 (undock → 위치 → 키오스크 → 등록)')
         self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')
 
@@ -294,6 +295,7 @@ class PrepareMixin:
                 self.get_logger().info('등록 확인 중 끊김 → 다시 기다림')
             self.kf.x, self.seen_since = None, None
             self.dbg['reason'] = 'wait_visitor'
+            self.request_register(now)              # 클릭 없이: 인식 모듈에 바로 앞 사람 등록 요청
             return self.drive(*self.ramp(0.0, 0.0))
         if now - self.seen_since < p['register_confirm_time']:
             self.dbg['reason'] = 'register_confirm'
@@ -303,6 +305,23 @@ class PrepareMixin:
         self.ready_at = now
         self.set_state('REGISTERED')                # prepare_tour 성공 → start_tour 기다림
         return self.drive(*self.ramp(0.0, 0.0))
+
+    def request_register(self, now):
+        """[WAIT_VISITOR] 인식 모듈에 '바로 앞 사람을 등록' 요청 (target_person/register_front, Empty).
+        좌표가 안 오는 동안 register_period(1 s)마다 다시 보낸다 (앞에 아무도 없으면 계속).
+        인식 모듈(multi_tracker_node)이 정면 ±30°, 2.5 m 안 가장 가까운 사람을 타겟으로 잡고 좌표를 보내기 시작한다.
+        받음: now, (auto_register, reg_first, reg_last)
+        내보냄: target_person/register_front"""
+        p = self.p
+        if not p['auto_register']:
+            return
+        if self.reg_last is not None and now - self.reg_last < p['register_period']:
+            return
+        if self.reg_first is None:
+            self.reg_first = now
+            self.get_logger().info('바로 앞 사람 등록 요청 (target_person/register_front) → 로봇 앞에 서 주세요')
+        self.reg_last = now
+        self.register_pub.publish(Empty())
 
     def registered_wait(self, now):
         """[REGISTERED] 등록 완료 뒤 start_tour(키오스크 '관람 시작')를 그 자리에 서서 기다린다.

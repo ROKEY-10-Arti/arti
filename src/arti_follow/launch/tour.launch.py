@@ -10,7 +10,7 @@
     (ros2 launch 명령줄 인자는 include된 launch까지 전달됨. 목록: ros2 launch arti_follow tour.launch.py --show-args)
     audio:=false             음성 노드는 따로 띄울 때 (구역 판정만)
     zones_file:=<경로>       구역 파일 (기본 arti_common/config/artworks.yaml)
-    follow_test.launch.py    namespace, auto_start, drive, test(bag 녹화), bag_dir, tracker(all|camera|none)
+    follow_test.launch.py    namespace, auto_start, drive, test(bag 녹화), bag_dir, tracker(gesture|front|all|camera|none, 기본 gesture)
     guide_audio.launch.py    player_cmd:="pw-play --volume 0.6"   재생 명령 (출력 장치·음량)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
