@@ -2,17 +2,19 @@
 # 로봇마다 다른 것은 이 파일(도크·출발 위치)뿐이다.
 # 측정: 2026-11-17, 사용자가 RViz로 확인한 값.
 #
-#   dock   : 도크에 붙어 있을 때 로봇 위치 (충전). 방향은 안 잼 (오른쪽 벽의 도크를 봄)
+#   dock   : 도크에 붙어 있을 때 로봇 위치 (충전). 오른쪽 벽의 도크를 봄 → yaw_deg 0 (+x)
+#            arti_bringup localization.launch.py가 AMCL 시작 위치로 씀 (localization은 보통 도크 위에서 띄우므로)
 #   undock : 언독 직후 위치 (관람 시작·복귀 목표). Create 3 언독은 뒤로 나온 뒤 180° 돌아서 끝남
 #            → yaw_deg 180 (map 기준, 0° = +x 오른쪽, 180° = 방 안쪽)
 #
 # 참고: 두 위치 모두 출구(종료) 구역(artworks.yaml exit, 직사각형 y 1.36~1.91) 밖이다.
-#       visitor_follower·arti_bringup localization.launch.py는 undock을 AMCL 초기 위치로 쓴다.
+#       AMCL 초기 위치 = dock: arti_bringup localization.launch.py(띄울 때), visitor_follower(start_point, 언독 직전).
+#       undock = visitor_follower 시작 회전 기준(face_from_point)·관람 끝 복귀 목표.
 #       시작 때 바라보는 곳은 여기가 아니라 artworks.yaml의 키오스크 (visitor_follower face_zone).
 
 robots:
   /robot1:
-    dock:   {x: -0.04, y: 0.7}
+    dock:   {x: -0.04, y: 0.7, yaw_deg: 0}
     undock: {x: -0.5,  y: 0.7, yaw_deg: 180}
   /robot4:   # 2026-11-19 arti_pc2_nav a_course.yaml dock 값을 옮김 (robot4 실측)
     dock:   {x: 0.304, y: -0.0957}                 # 충전 스테이션

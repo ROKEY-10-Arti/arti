@@ -38,7 +38,7 @@
   ├ start = false     → 바로 끝냄: success=false, message=not_requested
   └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
                          등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
-                         실패: not_docked (도크 밖) / undock_failed / no_undock_server / no_localization / canceled
+                         실패: dock_failed (도크 밖인데 도킹 못 함) / undock_failed / no_undock_server / dock_status_unavailable / canceled
 
 ② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만 옴)
   └ 바로 추종 시작. 관람 끝까지 feedback, 끝나면 result (artwork_ids는 보지 않음)
@@ -51,9 +51,9 @@ READY
   │ prepare_tour                                       ┐
   ▼                                                    │
 UNDOCK        Create 3 undock 액션 (로봇이 스스로 움직임). 관람은 항상 도크에서 시작
-  │             도크 밖이면 거절 (not_docked), 실패 → 관람 끝 (undock_failed / no_undock_server)
+  │             도크 밖이면 먼저 Create 3 dock으로 올린 뒤 undock (dock_first), 실패 → 관람 끝 (dock_failed / undock_failed)
   ▼
-LOCALIZE      AMCL에 initialpose(출발 지점 = 언독 지점)를 한 번 보내고 바로 다음 (AMCL 수렴은 안 기다림)
+LOCALIZE      바로 다음 (initialpose = dock은 UNDOCK 직전 도크 위에서 이미 보냄, AMCL 수렴은 안 기다림)
   ▼
 START_FACE    언독 지점 → 키오스크 방향으로 돌 각도를 계산해 odom 기준으로 그만큼 제자리 회전
               (map 위치 안 씀, face_offset_deg로 보정, 15 s 안에 못 돌면 그냥 넘어감)

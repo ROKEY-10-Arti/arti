@@ -13,7 +13,7 @@ pb
 # ===== 1. robot1 주행 띄우기 (터미널 3개, 순서대로) =====
 
 # [터미널 1] localization — "Creating bond timer..." 나오면 다음
-ros2 launch arti_bringup localization.launch.py namespace:=/robot1   # 시작 위치는 init_pose.yaml undock (자동)
+ros2 launch arti_bringup localization.launch.py namespace:=/robot1   # 시작 위치는 init_pose.yaml dock (자동, 도크 위에서 띄우기)
 
 # [터미널 2] rviz — 위치가 어긋났을 때만 상단 "2D Pose Estimate"로 다시 찍기
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot1
@@ -56,7 +56,7 @@ ros2 topic echo /robot1/follow/state
 # 통합 실행: ros2 launch arti_follow tour.launch.py   (localization이 떠 있어야 함)
 # 순서: ① prepare_tour 성공(registered) → ② 130 s 안에 start_tour. 끝내기 = send_goal 터미널에서 Ctrl+C (취소)
 
-# 0) 도크 위인지 먼저 확인 (is_docked: true 여야 함, 아니면 undock_failed / not_docked)
+# 0) 도크 상태 확인 (도크 밖이면 prepare_tour가 먼저 Create 3 dock → undock. 도크가 IR로 보이는 1 m 안에 두기)
 ros2 topic echo /robot1/dock_status --once
 
 # ① 호출·등록 (undock → 위치 잡기 → 키오스크 쪽 회전 → 관람객 등록)

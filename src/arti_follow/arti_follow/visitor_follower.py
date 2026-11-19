@@ -34,9 +34,9 @@
 상태 (플로우차트 순서). 시작은 READY — arti/prepare_tour 액션이 와야 움직인다 (auto_start면 켜자마자 prepare+start)
   READY       액션 기다림. cmd_vel을 보내지 않음 (텔레옵 등 다른 노드와 안 겹침)
   ── 여기부터 REGISTERED까지 = prepare_tour ──
-  UNDOCK      Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 관람은 항상 도크에서 시작 → 도크 밖이면 거절(not_docked)
-  LOCALIZE    AMCL에 initialpose(출발 지점 x, y, yaw_deg)를 한 번 보내고 바로 START_FACE (AMCL 수렴은 안 기다림)
-  START_FACE  출발 지점에서 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽으로 돌 각도를 계산해
+  UNDOCK      Create 3 undock 액션 (로봇이 스스로 움직임 → cmd_vel 안 보냄). 관람은 항상 도크에서 시작 → 도크 밖이면 먼저 Create 3 dock으로 올린 뒤 undock
+  LOCALIZE    (initialpose = start_point(dock)는 언독 직전 도크 위에서 이미 보냄) 바로 START_FACE (AMCL 수렴 안 기다림)
+  START_FACE  언독 지점(face_from_point)에서 face_zone(기본 키오스크, arti_common artworks.yaml) 중심 쪽으로 돌 각도를 계산해
               odom 기준으로 그만큼 제자리 회전 (map 위치 안 씀). 다 돌거나 face_timeout 지나면 WAIT_VISITOR
   WAIT_VISITOR 관람객 인식 기다림 (이 전까지 들어온 좌표는 버림). 좌표가 register_confirm_time 동안 끊김 없이
               (register_gap 안) 들어오면 등록 완료(on_registered: registered=True, "인식되었습니다") → REGISTERED.
@@ -112,7 +112,8 @@ PARAMS = {
     'zones_file': '',               # '' = arti_common/config/artworks.yaml (face_zone을 찾는 곳)
     'face_zone': 'kiosk',           # 시작 때 바라볼 곳 = artworks.yaml 구역(zone_id·artwork_id)의 중심 ('' = 출발 지점 yaw_deg)
     'face_offset_deg': -15.0,       # 시작 때 바라볼 방향 보정 [deg] (+ = 왼쪽, - = 오른쪽). -15: 키오스크 중심보다 15° 덜 왼쪽으로 돎
-    'start_point': 'undock',        # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치
+    'start_point': 'dock',          # init_pose.yaml robots.<네임스페이스>.<이것> = AMCL 초기 위치 (도크 위, 언독 직전에 보냄)
+    'face_from_point': 'undock',    # init_pose.yaml 언독이 끝난 자리·방향 = 시작 회전(키오스크 쪽) 각도 계산 기준
     'face_tolerance': 0.1,          # 이 각도 안이면 다 돈 것 [rad] (약 6°)
     'register_confirm_time': 1.0,   # 관람객이 이만큼 끊김 없이 보여야 등록 완료 (순간 오인식 방지) [s]
     'register_gap': 0.5,            # 등록 확인 중 좌표 간격이 이보다 길면 끊긴 것 → 다시 기다림 [s]
@@ -225,7 +226,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
         self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
         self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
-        self.start = self.load_start_point()        # 초기 위치 (x, y, yaw) map
+        self.start = self.load_start_point(self.p['start_point'])          # AMCL 초기 위치 = 도크 (x, y, yaw) map
+        self.face_from = self.load_start_point(self.p['face_from_point'])  # 언독 끝 자리 = 시작 회전 기준
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
@@ -268,26 +270,26 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         돌려줌: 파일 경로"""
         return self.p[param] or os.path.join(get_package_share_directory('arti_common'), 'config', name)
 
-    def load_start_point(self):
-        """init_pose.yaml에서 이 로봇의 출발 지점을 읽는다 (LOCALIZE에서 AMCL에 알려 줄 위치).
+    def load_start_point(self, key):
+        """init_pose.yaml에서 이 로봇의 위치 하나(key: dock / undock)를 읽는다.
         yaw_deg가 없으면 dock → 출발 지점 방향, dock도 없으면 0.
-        받음: (파라미터) start_pose_file, start_point, 노드 네임스페이스
+        받음: key, (파라미터) start_pose_file, 노드 네임스페이스
         돌려줌: (x, y, yaw) map 좌표, 못 읽으면 None (초기 위치 안 보냄)"""
         path = self.p['start_pose_file']
         try:
             path = self.config_file('start_pose_file', 'init_pose.yaml')
             with open(path, encoding='utf-8') as f:
                 robot = (yaml.safe_load(f) or {}).get('robots', {}).get(self.get_namespace(), {})
-            target = robot[self.p['start_point']]
+            target = robot[key]
         except (OSError, KeyError, PackageNotFoundError, yaml.YAMLError) as e:
-            self.get_logger().warn(f'출발 지점을 못 읽음 ({path}, {self.get_namespace()}: {e!r}) → 초기 위치 안 보냄')
+            self.get_logger().warn(f'{key} 위치를 못 읽음 ({path}, {self.get_namespace()}: {e!r})')
             return None
         x, y, dock = float(target['x']), float(target['y']), robot.get('dock')
         if 'yaw_deg' in target:
             yaw = math.radians(float(target['yaw_deg']))
         else:
             yaw = math.atan2(y - float(dock['y']), x - float(dock['x'])) if dock else 0.0
-        self.get_logger().info(f'출발 지점 {self.p["start_point"]} ({x}, {y}, {math.degrees(yaw):.0f}°)')
+        self.get_logger().info(f'{key} 위치 ({x}, {y}, {math.degrees(yaw):.0f}°)')
         return x, y, yaw
 
     def load_face_point(self):
