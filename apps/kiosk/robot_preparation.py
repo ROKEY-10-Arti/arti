@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 
 from flask import Response, abort, jsonify, request
 
+from ros_events import feedback_activity
+
 
 class PreparationError(RuntimeError):
-    
     pass
 
 
@@ -27,6 +28,8 @@ class Preparation:
     dev_mode: bool = False
     manual_registration: bool = False
     tour_started: bool = False
+    preparation_state: str = ''
+    ready_at: float = 0.0
     tour_state: str = ""
     artwork_id: int = 0
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -51,11 +54,12 @@ class Preparation:
 
 class RosPreparationTransport:
     """All ROS futures run on one executor. Workers only wait; they never spin its node."""
-    def __init__(self, description, record_event, discovery_timeout=8, action_timeout=270):
+    def __init__(self, description, record_event, discovery_timeout=8, action_timeout=60, server_loss_timeout=3):
         self.description = description
         self.record_event = record_event
         self.discovery_timeout = discovery_timeout
         self.action_timeout = action_timeout
+        self.server_loss_timeout = server_loss_timeout
         self.started = threading.Event()
         self.stopping = threading.Event()
         self.error = None
@@ -87,10 +91,6 @@ class RosPreparationTransport:
                 description = self.description(request.artwork_id)
                 response.success = description is not None
                 response.description = description or ''
-                self.record_event(
-                    'kiosk', f'/arti/description request artwork_id={request.artwork_id}; '
-                    f'response success={response.success} description_chars={len(response.description)}',
-                )
                 return response
 
             self.service = node.create_service(Description, '/arti/description', describe)
@@ -117,23 +117,35 @@ class RosPreparationTransport:
             raise PreparationError('ROS 연결을 준비하지 못했어요. 인터페이스 빌드와 서버 실행 상태를 확인해 주세요.')
 
     def action(self, job, kind, feedback):
-        from action_msgs.msg import GoalStatus
-
-        self._ensure()
-        action_type = self.types[kind]
         name = job.robot_namespace + '/arti/' + kind
+
         def log(message):
             self.record_event(job.robot_id, f'{name} {message}')
 
-        with self.clients_lock:
-            client = self.clients.get(name)
-            if client is None:
-                client = self.action_client_type(self.node, action_type, name)
-                self.clients[name] = client
+        try:
+            self._ensure()
+        except PreparationError:
+            log('goal not sent: ros initialization failed')
+            raise
+
+        try:
+            from action_msgs.msg import GoalStatus
+
+            action_type = self.types[kind]
+            with self.clients_lock:
+                client = self.clients.get(name)
+                if client is None:
+                    client = self.action_client_type(self.node, action_type, name)
+                    self.clients[name] = client
+        except Exception:
+            log('goal not sent: action client unavailable')
+            raise
         deadline = time.monotonic() + self.discovery_timeout
         while not client.wait_for_server(timeout_sec=0.2):
-            if job.cancel.is_set() or time.monotonic() >= deadline:
-                log('goal not sent: cancelled or server unavailable')
+            cancelled = job.cancel.is_set()
+            if cancelled or time.monotonic() >= deadline:
+                reason = 'cancelled' if cancelled else 'server unavailable'
+                log(f'goal not sent: {reason}')
                 raise PreparationError('로봇 액션 서버에 연결하지 못했어요.')
         goal = action_type.Goal()
         if kind == 'prepare_tour':
@@ -144,9 +156,12 @@ class RosPreparationTransport:
                 if job.session['mode'] == 'course' else []
             )
         with job.lock:
-            if job.cancel.is_set():
-                raise PreparationError('호출을 취소했어요.')
-            job.motion_pending = True
+            cancelled = job.cancel.is_set()
+            if not cancelled:
+                job.motion_pending = True
+        if cancelled:
+            log('goal not sent: cancelled')
+            raise PreparationError('호출을 취소했어요.')
         holder = {}
         terminal = threading.Event()
         cancel_lock = threading.Lock()
@@ -163,11 +178,21 @@ class RosPreparationTransport:
 
         def request_cancel(handle):
             with cancel_lock:
-                if not handle or not handle.accepted or holder.get('cancel_sent'):
+                if not handle or not handle.accepted or holder.get('cancel_attempted'):
                     return
-                handle.cancel_goal_async()
-                holder['cancel_sent'] = True
-                log('cancel requested')
+                holder['cancel_attempted'] = True
+                try:
+                    handle.cancel_goal_async()
+                except Exception:
+                    log('cancel request failed')
+                else:
+                    log('cancel requested')
+
+        def fail_unconfirmed(event, message):
+            job.cancel.set()  # A late goal response still receives a cancellation request.
+            log(event)
+            request_cancel(holder.get('handle'))
+            raise PreparationError(message)
 
         def result_done(future):
             try:
@@ -176,8 +201,11 @@ class RosPreparationTransport:
             except Exception as error:
                 holder['error'] = error
             else:
-                with job.lock:
-                    job.motion_pending = False
+                if result.status in {GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED}:
+                    with job.lock:
+                        job.motion_pending = False
+                else:
+                    holder['error'] = PreparationError('로봇 작업의 최종 상태를 확인하지 못했어요.')
             finally:
                 terminal.set()
 
@@ -206,20 +234,44 @@ class RosPreparationTransport:
         except Exception:
             with job.lock:
                 job.motion_pending = False  # No goal was submitted.
+            log('goal not sent: transmission failed')
             raise
         future.add_done_callback(goal_done)
-        deadline = time.monotonic() + self.action_timeout if kind == 'prepare_tour' else None
+        sent_at = time.monotonic()
+        response_deadline = sent_at + self.discovery_timeout
+        result_deadline = sent_at + self.action_timeout if kind == 'prepare_tour' else None
+        next_server_check = sent_at
+        server_missing_since = None
+        connection_error = '로봇 액션 연결이 끊겼어요. 정지 상태를 확인해 주세요.'
         while not terminal.wait(0.05):
+            now = time.monotonic()
+            if self.error or self.stopping.is_set():
+                fail_unconfirmed('action transport stopped', connection_error)
+
+            if now >= next_server_check:
+                next_server_check = now + 0.5
+                try:
+                    server_ready = client.server_is_ready()
+                except Exception:
+                    fail_unconfirmed('action connection check failed', connection_error)
+                if terminal.is_set():
+                    break
+                if server_ready:
+                    server_missing_since = None
+                elif server_missing_since is None:
+                    server_missing_since = now
+                elif now - server_missing_since >= self.server_loss_timeout:
+                    fail_unconfirmed('action server unavailable after send', connection_error)
+
             handle = holder.get('handle')
+            if handle is None and now >= response_deadline:
+                fail_unconfirmed('goal response timeout', '로봇이 요청을 받았는지 확인하지 못했어요. 정지 상태를 확인해 주세요.')
             if job.cancel.is_set():
                 request_cancel(handle)
-            if deadline is not None and time.monotonic() >= deadline:
-                job.cancel.set()  # A late goal response also receives cancellation.
-                request_cancel(handle)
-                log('result timeout')
-                raise PreparationError('로봇 작업 시간이 초과됐어요. 취소 후 정지 확인이 필요해요.')
+            if result_deadline is not None and now >= result_deadline and not terminal.is_set():
+                fail_unconfirmed('result timeout', '로봇 작업 시간이 초과됐어요. 취소 후 정지 확인이 필요해요.')
         if 'error' in holder:
-            raise PreparationError('로봇 액션 연결이 끊겼어요. 정지 상태를 확인해 주세요.')
+            fail_unconfirmed('action response failed', '로봇 액션 응답을 처리하지 못했어요. 정지 상태를 확인해 주세요.')
         handle = holder.get('handle')
         if not handle or not handle.accepted:
             raise PreparationError('로봇이 작업 요청을 거절했어요.')
@@ -241,6 +293,7 @@ class PreparationManager:
         self.transport, self.persist = transport, persist
         self.finish, self.record_artwork = finish, record_artwork
         self.jobs = {}
+        self.robot_jobs = {}
         self.lock = threading.Lock()
 
     def start(self, session):
@@ -261,6 +314,7 @@ class PreparationManager:
                         ):
                             raise PreparationError('이 관람을 담당하는 아티가 사용 중이에요.')
                 self.persist(job)
+                self.robot_jobs[job.robot_namespace] = job
             self.jobs[session['id']] = job
         if not manual:
             threading.Thread(target=self._prepare, args=(job,), daemon=True).start()
@@ -269,6 +323,25 @@ class PreparationManager:
     def get(self, session_id):
         with self.lock:
             return self.jobs.get(session_id)
+
+    def activity(self, namespace):
+        with self.lock:
+            job = self.robot_jobs.get(namespace)
+        if job is None:
+            return None
+        with job.lock:
+            if job.phase == 'cancelling':
+                return '취소 및 정지 확인 중'
+            if job.phase == 'error' and job.motion_pending:
+                return '로봇 작업 종료 미확인'
+            if job.phase == 'touring':
+                return (feedback_activity('start_tour', job.tour_state, job.artwork_id)
+                        or '관람 진행 중 · 세부 상태 미수신')
+            if job.phase == 'ready' and time.monotonic() - job.ready_at < 120:
+                return '관람 준비 완료 · 관람 시작 대기 중'
+            if job.phase in {'calling', 'moving', 'arrived', 'registering'}:
+                return feedback_activity('prepare_tour', job.preparation_state) or '관람 준비 응답 대기 중'
+            return None
 
     def dev_ready(self, session):
         """완료된 오류 작업을 로컬 화면 테스트용 준비 완료 작업으로 교체합니다."""
@@ -309,14 +382,19 @@ class PreparationManager:
 
         def feedback(message):
             if message.state in phases:
-                job.update(*phases[message.state])
+                with job.lock:
+                    if job.update(*phases[message.state]):
+                        job.preparation_state = message.state
 
         try:
             result = self.transport.action(job, 'prepare_tour', feedback)
-            job.update('ready', result.message or '관람을 시작할 준비가 됐어요.', 1.0)
+            with job.lock:
+                if job.update('ready', result.message or '관람을 시작할 준비가 됐어요.', 1.0):
+                    job.ready_at = time.monotonic()
         except Exception as error:
-            if not job.cancel.is_set() or job.motion_pending:
-                self._error(job, error)
+            with job.lock:
+                if job.phase != 'cancelling' or job.motion_pending:
+                    self._error(job, error)
 
     def register(self, job):
         with job.lock:
@@ -348,9 +426,10 @@ class PreparationManager:
         try:
             result = self.transport.action(job, 'start_tour', feedback)
         except Exception as error:
-            if job.motion_pending:
-                self._error(job, error)
-                return
+            with job.lock:
+                if job.motion_pending:
+                    self._error(job, error)
+                    return
             self.finish(job, 'cancelled')
             with job.lock:
                 if job.cancel.is_set():
@@ -361,7 +440,8 @@ class PreparationManager:
             self.finish(job, 'completed')
             with job.lock:
                 job.phase, job.message, job.progress = 'completed', result.message, 1.0
-        job.tour_done.set()
+        finally:
+            job.tour_done.set()
 
     def cancel_job(self, job, timeout=6):
         with job.lock:
@@ -372,17 +452,21 @@ class PreparationManager:
         deadline = time.monotonic() + timeout
         while True:
             with job.lock:
-                if job.tour_started and job.tour_done.is_set():
-                    if job.phase == 'completed':
-                        raise PreparationError('이미 종료된 관람이에요.')
-                    job.phase, job.message = 'cancelled', '로봇 작업을 취소했어요.'
+                if job.phase == 'completed':
+                    raise PreparationError('이미 종료된 관람이에요.')
+                if job.phase == 'cancelled':
                     return
-                if not job.tour_started and not job.motion_pending:
-                    job.phase, job.message = 'cancelled', '로봇 작업을 취소했어요.'
-                    return
+                tour_started = job.tour_started
+                if not job.motion_pending and (not tour_started or job.tour_done.is_set()):
+                    break
             if time.monotonic() >= deadline:
                 raise PreparationError('아직 로봇 작업의 종료를 확인하지 못했어요. 잠시 후 다시 취소해 주세요.')
             time.sleep(0.05)
+
+        if tour_started:
+            self.finish(job, 'cancelled')
+        with job.lock:
+            job.phase, job.message = 'cancelled', '로봇 작업을 취소했어요.'
 
     def stop(self):
         with self.lock:

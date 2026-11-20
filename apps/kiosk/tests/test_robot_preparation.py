@@ -1,12 +1,16 @@
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace as Msg
+from unittest.mock import Mock, patch
 
 from app import create_app
 from robot_preparation import Preparation, PreparationError, PreparationManager, RosPreparationTransport
+from ros_events import operator_log
 from tests.auth_helpers import login_admin
 
 
@@ -98,6 +102,72 @@ class PreparationTest(unittest.TestCase):
             transport.action(job, 'prepare_tour', lambda _: None)
         self.assertEqual(records, [('robot1', '/robot1/arti/prepare_tour goal not sent: ros initialization failed')])
         self.assertFalse(job.motion_pending)
+
+
+class ActionResponseTest(unittest.TestCase):
+    def setUp(self):
+        self.goal_status = Msg(STATUS_SUCCEEDED=4, STATUS_CANCELED=5, STATUS_ABORTED=6)
+        self.enterContext(patch.dict(sys.modules, {'action_msgs.msg': Msg(GoalStatus=self.goal_status)}))
+        self.result = Future()
+        self.goal_response = Future()
+        self.handle = Mock(accepted=True)
+        self.handle.get_result_async.return_value = self.result
+        self.client = Mock()
+        self.client.wait_for_server.return_value = True
+        self.client.server_is_ready.return_value = True
+        self.client.send_goal_async.return_value = self.goal_response
+        self.logs = []
+        self.transport = RosPreparationTransport(lambda _: None, self.record, discovery_timeout=0.1,
+                                                 server_loss_timeout=0.1)
+        self.transport.types = {'start_tour': Msg(Goal=Msg)}
+        self.transport.clients['/robot1/arti/start_tour'] = self.client
+        self.transport.started.set()
+        self.job = Preparation(dict(id='free', mode='free', artworkIds=['art-01']), phase='touring',
+                               robot_id='robot1', robot_namespace='/robot1', tour_started=True)
+
+    def record(self, robot_id, message):
+        self.logs.append({'robot_id': robot_id, 'message': message})
+
+    def test_lost_server_keeps_job_blocked_until_late_terminal_result(self):
+        finish = Mock()
+        manager = PreparationManager(self.transport, Mock(), finish, Mock())
+        manager.jobs[self.job.session['id']] = self.job
+        self.goal_response.set_result(self.handle)
+        self.client.server_is_ready.return_value = False
+        manager._tour(self.job)
+
+        self.assertEqual(self.job.phase, 'error')
+        self.assertTrue(self.job.motion_pending)
+        self.handle.cancel_goal_async.assert_called_once()
+        failure = next(entry for entry in self.logs if entry['message'].endswith('action server unavailable after send'))
+        self.assertIn('서버 연결이 끊겼습니다', operator_log(failure)['description'])
+        with self.assertRaises(PreparationError):
+            manager.start(dict(id='next', mode='free'))
+        with self.assertRaises(PreparationError):
+            manager.cancel_job(self.job, timeout=0)
+        finish.assert_not_called()
+
+        self.result.set_result(Msg(status=self.goal_status.STATUS_CANCELED, result=Msg(success=False, message='canceled')))
+        manager.cancel_job(self.job, timeout=0)
+        self.assertFalse(self.job.motion_pending)
+        self.assertEqual(self.job.phase, 'cancelled')
+        finish.assert_called_once_with(self.job, 'cancelled')
+
+    def test_missing_goal_response_times_out_and_late_acceptance_requests_cancel(self):
+        with self.assertRaisesRegex(PreparationError, '요청을 받았는지 확인하지 못했어요'):
+            self.transport.action(self.job, 'start_tour', Mock())
+        self.assertEqual(self.logs[-1]['message'], '/robot1/arti/start_tour goal response timeout')
+        self.assertTrue(self.job.motion_pending)
+        self.goal_response.set_result(self.handle)
+        self.handle.cancel_goal_async.assert_called_once()
+
+    def test_unknown_result_status_keeps_motion_unconfirmed(self):
+        self.goal_response.set_result(self.handle)
+        self.result.set_result(Msg(status=0, result=Msg(success=False, message='')))
+        with self.assertRaisesRegex(PreparationError, '액션 응답을 처리하지 못했어요'):
+            self.transport.action(self.job, 'start_tour', Mock())
+        self.assertTrue(self.job.motion_pending)
+        self.assertTrue(any(entry['message'].endswith('action response failed') for entry in self.logs))
 
 
 class PreparationApiTest(unittest.TestCase):

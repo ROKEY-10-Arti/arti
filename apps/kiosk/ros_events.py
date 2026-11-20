@@ -121,17 +121,23 @@ def describe_action(robot, action, event):
         else:
             description = '키오스크가 작품 목록 없이 코스관람 시작을 요청하려고 했습니다.'
         return True, '요청', description
-    unsent = {
+    communication_issues = {
         'goal not sent: cancelled': '요청이 취소돼 로봇에 보내지 않았습니다.',
         'goal not sent: ros initialization failed': '키오스크가 ROS 연결을 준비하지 못해 요청을 보내지 못했습니다.',
         'goal not sent: action client unavailable': '키오스크가 관람 요청을 보낼 통신 채널을 열지 못했습니다.',
         'goal not sent: transmission failed': '키오스크에서 로봇에 요청을 보내는 중 오류가 발생했습니다.',
         'goal not sent: server unavailable': '로봇의 액션 서버에 연결하지 못해 요청을 보내지 못했습니다.',
         'goal not sent: cancelled or server unavailable': '요청이 취소됐거나 로봇의 액션 서버에 연결하지 못해 요청을 보내지 못했습니다.',
+        'goal response timeout': '로봇으로부터 요청 수락 여부를 받지 못했습니다. 작업 종료를 확인해야 합니다.',
+        'action server unavailable after send': '요청을 보낸 뒤 로봇 액션 서버 연결이 끊겼습니다. 작업 종료를 확인해야 합니다.',
+        'action transport stopped': '요청을 보낸 뒤 키오스크의 ROS 연결이 중단됐습니다. 작업 종료를 확인해야 합니다.',
+        'action connection check failed': '요청을 보낸 뒤 로봇과의 연결 상태를 확인하지 못했습니다.',
+        'action response failed': '로봇 응답에서 작업 종료를 확인하지 못했습니다.',
+        'cancel request failed': '로봇에 취소 요청을 보내지 못했습니다. 작업 종료를 확인해야 합니다.',
         'result timeout': '제한 시간 안에 로봇의 작업 결과를 받지 못했습니다.',
     }
-    if event in unsent:
-        return True, '통신 기록', f'{task} 중 {unsent[event]}'
+    if event in communication_issues:
+        return True, '통신 기록', f'{task} 중 {communication_issues[event]}'
     if event in {'goal accepted=True', 'goal accepted=False'}:
         verb = '수락했습니다' if event.endswith('True') else '거절했습니다'
         return False, '요청 응답', f'로봇이 {request_name} 요청을 {verb}.'
