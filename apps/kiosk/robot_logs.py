@@ -44,7 +44,7 @@ def sent_time(value):
 def register_robot_logs(app, get_db, json_body):
     @app.get('/api/logs')
     def list_robot_logs():
-        return jsonify(log_page(get_db(), request.args))
+        return jsonify(log_page(get_db(), request.args, operator_view=request.args.get('view') == 'operator'))
 
     @app.post('/api/logs')
     def receive_robot_log():

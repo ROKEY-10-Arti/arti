@@ -9,6 +9,7 @@ from flask import Response, abort, jsonify, request
 
 
 class PreparationError(RuntimeError):
+    
     pass
 
 

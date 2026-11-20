@@ -98,7 +98,7 @@ class RobotAvailability:
             executor.add_node(node)
             with self._lock:
                 self._ros_ready = False
-            logger.info("로봇 상태 구독 시작: battery_state, dock_status")
+            logger.info("로봇 상태 구독 시작: battery_state, dock_status, odom")
             while not self._stop.is_set() and context.ok():
                 executor.spin_once(timeout_sec=0.2)
         except Exception:
@@ -131,7 +131,22 @@ def register_robot_availability(app):
     def fleet_status():
         if not app.extensions["admin_auth"]["current_admin"]():
             abort(401)
-        return jsonify(monitor.fleet.snapshot())
+        activity_source = app.config.get('SIGNAL_SIMULATOR') or app.extensions['robot_preparation']
+        fleet = monitor.fleet.snapshot()
+        for name, row in fleet.items():
+            moving = row.pop('moving', None)
+            activity = activity_source.activity(monitor.fleet.names[name])
+            if not activity:
+                if moving is True:
+                    activity = '이동 중'
+                elif row.get('dock') is True:
+                    activity = '도크에 정차 중'
+                elif moving is False:
+                    activity = '정지 중'
+                else:
+                    activity = '활동 상태 미수신'
+            row['activity'] = activity
+        return jsonify(fleet)
 
     @app.post("/api/dev/availability")
     def developer_availability():

@@ -13,6 +13,8 @@ p { line-height: 1.8; color: #60695f; }
 .stats div { background: #e9ede3; padding: 24px; border-radius: 12px; min-width: 180px; }
 .stats b { font-size: 32px; margin-right: 8px; }
 section { margin-top: 40px; }
+.fleet-table-wrap { overflow-x: auto; }
+.fleet-table td:nth-child(2) { min-width: 150px; white-space: normal; }
 small { font-size: 14px; font-weight: 400; color: #68705f; }
 .table-wrap { overflow-x: auto; border: 1px solid #d9ddd2; border-radius: 12px; background: #fff; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
@@ -99,5 +101,13 @@ button.danger-button { color: #9a4839; background: #fbefea; border: 1px solid #d
 #log-reset-dialog p { font-size: 14px; }
 #log-reset-message { min-height: 24px; color: #9a4839; }
 
-.robot-log-table td:last-child { white-space: pre-wrap; overflow-wrap: anywhere; width: 55%; min-width: 260px; }
-.robot-log-table td:nth-child(1) { width: 100px; font-variant-numeric: tabular-nums; }
+.robot-log-table td { vertical-align: top; }
+.robot-log-table td:last-child { white-space: normal; overflow-wrap: anywhere; width: 55%; min-width: 220px; }
+.robot-log-table td:first-child { font-variant-numeric: tabular-nums; }
+.log-description { margin: 0; color: inherit; font-size: 13px; line-height: 1.5; }
+.log-entry-details { margin: 5px 0 0; padding: 0; border: 0; color: #53664d; }
+.log-entry-details summary { width: fit-content; padding: 2px 0; }
+.log-entry-details dl { display: grid; grid-template-columns: minmax(110px, auto) minmax(0, 1fr); gap: 5px 12px; margin: 8px 0 0; padding: 10px; border-radius: 6px; background: #f3f5ef; color: #283b30; }
+.log-entry-details dt { font-weight: 600; }
+.log-entry-details dd { margin: 0; }
+.log-payload { white-space: pre-wrap; }

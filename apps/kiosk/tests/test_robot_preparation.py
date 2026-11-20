@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace as Msg
 
 from app import create_app
-from robot_preparation import Preparation, PreparationError, PreparationManager
+from robot_preparation import Preparation, PreparationError, PreparationManager, RosPreparationTransport
 from tests.auth_helpers import login_admin
 
 
@@ -26,6 +26,8 @@ class FakeTransport:
         self.prepare_release.set()
         self.tour_release = threading.Event()
         self.tour_release.set()
+        self.explanation_release = threading.Event()
+        self.explanation_release.set()
         self.allow_stop = threading.Event()
         self.allow_stop.set()
 
@@ -45,6 +47,9 @@ class FakeTransport:
                 feedback(Msg(state='REGISTERING'))
                 feedback(Msg(state='REGISTERED'))
             else:
+                feedback(Msg(state='MOVING', artwork_id=1))
+                self.explanation_release.wait(2)
+                feedback(Msg(state='EXPLAINING', artwork_id=1))
                 self.tour_release.wait(2)
                 feedback(Msg(state='ARTWORK_COMPLETED', artwork_id=1))
             self.allow_stop.wait(2)
@@ -85,6 +90,15 @@ class PreparationTest(unittest.TestCase):
         self.manager.cancel_job(job)
         self.assertEqual(job.phase, 'cancelled')
 
+    def test_ros_initialization_failure_is_logged_as_an_unsent_action(self):
+        records = []
+        transport = RosPreparationTransport(lambda _: None, lambda *event: records.append(event), discovery_timeout=0)
+        job = Preparation(session={}, robot_id='robot1', robot_namespace='/robot1')
+        with self.assertRaises(PreparationError):
+            transport.action(job, 'prepare_tour', lambda _: None)
+        self.assertEqual(records, [('robot1', '/robot1/arti/prepare_tour goal not sent: ros initialization failed')])
+        self.assertFalse(job.motion_pending)
+
 
 class PreparationApiTest(unittest.TestCase):
     def setUp(self):
@@ -123,6 +137,26 @@ class PreparationApiTest(unittest.TestCase):
         self.assertEqual(record['status'], 'completed')
         self.assertEqual(record['visitedIds'], ['art-01'])
         self.assertEqual(self.transport.calls, ['prepare_tour', 'start_tour'])
+
+    def test_fleet_activity_follows_action_feedback_and_clears_after_result(self):
+        admin = login_admin(self.app.test_client())
+        self.transport.explanation_release.clear()
+        self.transport.tour_release.clear()
+        self.addCleanup(self.transport.explanation_release.set)
+        self.addCleanup(self.transport.tour_release.set)
+        self.client.post(self.url + '/preparation', json={})
+        job = self.manager.get(self.session['id'])
+        until(lambda: job.phase == 'ready')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '관람 준비 완료 · 관람 시작 대기 중')
+        self.client.patch(self.url, json={'status':'active'})
+        until(lambda: job.tour_state == 'MOVING')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '1번 작품으로 이동 중')
+        self.transport.explanation_release.set()
+        until(lambda: job.tour_state == 'EXPLAINING')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '1번 작품 설명 중')
+        self.transport.tour_release.set()
+        until(lambda: job.phase == 'completed')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '활동 상태 미수신')
 
     def test_cancel_route_then_record_cancel(self):
         self.client.post(self.url+'/preparation', json={})

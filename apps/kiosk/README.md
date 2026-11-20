@@ -131,10 +131,10 @@ ros2 action list
 | --- | --- |
 | 작품 설명 및 메타데이터 | SQLite `Art`, 관리자 화면 `/data` |
 | 관람 시작·종료 시각, 상태, 방문 작품 | SQLite `TourSession`, 세션 API `/api/sessions` |
-| 키오스크 ROS 통신 로그와 HTTP로 수신한 로봇 로그 | SQLite `Log`, 관리자 화면 `/data`, 로그 API `/api/logs` |
-| 실시간 배터리·도킹 | 관리자 화면 `/data`의 실시간 로봇 상태 |
+| 키오스크 관람 액션 로그와 HTTP로 수신한 로봇 로그 | SQLite `Log`, 관리자 화면 `/data`, 로그 API `/api/logs` |
+| 현재 활동과 배터리·도킹 | 관리자 화면 `/data`의 실시간 로봇 상태 |
 
-운영 DB는 `instance/arti.sqlite3`, 시뮬레이터 DB는 `instance/simulator/arti.sqlite3`입니다. 키오스크는 액션 Goal 전송·수락·피드백 변경·취소 요청·결과를 `Log`에 저장합니다. 작품 설명 서비스는 요청 ID, 응답 성공 여부와 설명 길이를 한 건으로 저장합니다.
+운영 DB는 `instance/arti.sqlite3`, 시뮬레이터 DB는 `instance/simulator/arti.sqlite3`입니다. 키오스크는 관람 액션의 Goal 전송·수락·피드백 변경·취소 요청·결과를 `Log`에 저장합니다. 대시보드의 현재 활동은 관람 액션 피드백으로 갱신합니다. 작품 설명 조회는 서비스 응답으로 처리하고, 설명 진행과 완료는 관람 액션 피드백으로 기록합니다.
 
 ```bash
 sqlite3 -readonly -header -column instance/arti.sqlite3

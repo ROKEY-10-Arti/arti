@@ -125,16 +125,15 @@ def main():
             assert goals == {'robot1': [], 'robot4': [1, 3, 4]}
             with sqlite3.connect(app.config['DATABASE']) as db:
                 messages = [message for message, in db.execute('SELECT message FROM Log')]
+            assert all(not message.startswith('/arti/description ') for message in messages), messages
             for fragment in (
-                'request artwork_id=1; response success=True',
-                'request artwork_id=999; response success=False',
                 'prepare_tour sending goal start=true',
                 'start_tour feedback state=ARTWORK_COMPLETED artwork_id=3',
                 'start_tour result status=4 success=True',
                 'start_tour cancel requested',
             ):
                 assert any(fragment in message for message in messages), fragment
-            print('ROS integration passed: both robots, description lookup, feedback, completion, cancellation.')
+            print('ROS integration passed: description replies, action-only ROS logs, and both robots’ feedback, completion and cancellation.')
     finally:
         if manager:
             manager.stop()
