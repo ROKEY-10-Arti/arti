@@ -32,7 +32,7 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 
 | 상황 | 동작 |
 |---|---|
-| 관람객이 `far_distance`(2.5 m)보다 멀어짐 / `lost_timeout`(3 s) 넘게 안 보임, 이 상태가 `far_hold`(1 s) 계속 | Nav2 goal 취소(정지) + guide `course_come_here`(저를 따라오세요, `come_here_interval` 8 s에 한 번까지) (feedback은 MOVING 유지) |
+| 관람객이 `far_distance`(2.5 m)보다 멀어짐 / `lost_timeout`(3 s) 넘게 안 보임, 이 상태가 `far_hold`(1 s) 계속 | Nav2 goal 취소(정지) + guide `course_come_here`(뒤쪽 카메라 앞으로 와 주세요, `come_here_interval` 8 s에 한 번까지) (feedback은 MOVING 유지) |
 | 다시 `resume_distance`(1.8 m) 안으로 옴, `near_hold`(0.5 s) 계속 | 같은 목표를 Nav2에 다시 보내 이어서 이동 |
 
 거리는 최근 `distance_window`(1 s) 동안 받은 관람객 좌표의 **중앙값**으로 잰다. 인식 위치가 가끔 튀어도(카메라 추정·LiDAR 매칭이 번갈아 나옴) 멈춤·출발이 반복되지 않게 하려는 것.
@@ -81,6 +81,25 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 
 안내 키(`guide_message`)는 `arti_audio/config/guide_lines.yaml`에 있어야 소리가 난다:
 robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_come_here`(follow 팀 문장과 따로) + 공용 `tour_end`, `register_failed` (키 이름은 파라미터로 바꿀 수 있음).
+
+## 초기 대비 바뀐 점 (코스 관람, 2026-11-20)
+
+11/19 첫 실주행 뒤 고친 것. 코드에는 같은 번호로 `[코스 관람 변경 ③]`처럼 표시해 두었다 → `grep -rn "코스 관람 변경 ③" src/`.
+
+| # | 바뀐 것 | 왜 (전에 생긴 문제) | 어디를 보면 되나 |
+|---|---|---|---|
+| ① | launch 하나로 localization + Nav2 + 코스 노드 | 터미널 3개를 순서대로, RViz 2D Pose를 손으로 | `launch/a_course.launch.py` `_localization_and_nav2` |
+| ② | AMCL 시작 = `init_pose.yaml` undock, 언독 직후 `initialpose` 발행 | 도킹 중엔 LiDAR가 꺼져 2D Pose Estimate가 안 먹음 | `a_course_node.py` `_send_initial_pose`, `_load_init_poses` / `guided_tour_plan.py` `load_start_pose` / `arti_common/config/init_pose.yaml` |
+| ③ | 호출 점검 두 단계 (도킹 중엔 도크 복귀 가능 여부만, 언독 뒤 scan·AMCL·TF·Nav2) | 도킹 중에 전부 확인해서 호출이 항상 거절됨 | `a_course_node.py` `_check_ready(before_undock)`, `_tick` (3) |
+| ④ | 언독 후 60 s 안에 준비 안 되거나 취소되면 그 자리 재도킹 | 실패로 그 자리 정지 → 사람이 도크에 올려야 함 | `course_engine.py` `redock` / `a_course_node.py` `_tick` (3), `_update_prepare` |
+| ⑤ | Nav2 `autostart=false`, 언독 뒤 scan·TF가 오면 STARTUP | 도킹 중 map TF가 없어 Nav2가 `Aborting bringup` | `a_course_node.py` `_activate_nav2` / launch `_nav2_actions` |
+| ⑥ | launch 노드 super client 끄기, `bond_timeout` 30 s (localization 4 s, Nav2 10 s였음) | 서버 경유 discovery가 느려 bringup 포기 | launch `super_client`, localization `SetParameter` / `config/nav2_real.yaml` |
+| ⑦ | 키오스크 정지 후 등(웹캠)이 키오스크를 보게 spin, `kiosk.goal_pose.yaw` 반대로 | 키오스크를 보고 서서 뒤쪽 웹캠이 반대쪽을 봄. 고정 각도로 돌렸다가 반만 돎 | `course_engine.py` `FACE_KIOSK`, `_kiosk_turn` / `a_course_node.py` `_start_spin` / `a_course.yaml` kiosk |
+| ⑧ | 해설 중 반원 밖 0.15 m·3 s까지 봐줌 | 호 바로 안쪽에 서서 AMCL이 한 번 튀면 0.7 s 만에 실패 | `course_engine.py` `_explain_ok`, `tick` (5), `explanation_result` |
+| ⑨ | 도킹 접근 원에서 정면이 도크를 보게 spin 후 Dock | 도크를 안 보고 Dock → Create 3가 앞 벽에 부딪혀 실패 | `course_engine.py` `FACE_DOCK`, `_dock_turn` / `a_course.yaml` dock |
+| ⑩ | 인식 노드가 웹캠 직접 열기, `camera_pub` 안 띄움 (`direct_camera`) | 영상이 토픽을 거치고, 같은 웹캠을 두 번 엶 | launch `_tracker` (인식 노드에 `video_source`를 넘기고 `phone_camera.launch.py` `publish_camera:=false`. person_tracker 코드는 안 고침) |
+
+그 밖에: 로봇 OAK-D 끔 (robot4는 웹캠 사용, 로봇 `standard.launch.py`에서 주석 처리 — 저장소 밖).
 
 ## 실행
 
@@ -162,6 +181,9 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `minimum_battery_percent` | 30.0 | 이 미만이면 출발 거부 [%] |
 | `undock_timeout` / `dock_timeout` | 25.0 / 90.0 | [s] |
 | `activate_nav2` / `nav2_lifecycle_manager` / `nav2_startup_retry` | true / `lifecycle_manager_navigation` / 10.0 | 언독 후 scan·TF가 들어오면 Nav2 STARTUP 요청, 실패하면 이 간격 뒤 RESET → STARTUP [s] |
+| `dock_face` | true | 도킹 접근 원에서 멈춘 뒤 정면이 충전 스테이션(`dock.station`)을 보게 Nav2 spin → Dock. 도크를 안 보고 Dock하면 Create 3가 찾다가 앞 벽에 부딪혀 실패 (2026-11-20). 허용 각도·시간은 `face_tolerance`·`face_timeout` |
+| `explain_zone_margin` / `explain_lost_grace` | 0.15 / 3.0 | 해설 중 반원 밖 0.15 m까지는 안으로 보고, 밖·위치 끊김이 3 s 넘게 계속될 때만 실패 (호 바로 안쪽에 멈춰 AMCL 흔들림으로 바로 실패하던 문제) [m, s] |
+| `kiosk_face` / `face_tolerance` / `face_timeout` | true / 0.35 / 20.0 | 키오스크 반원에서 멈춘 뒤 등(웹캠이 뒤를 봄)이 키오스크(반원 중심)를 보게 Nav2 spin 제자리 회전 → 등록 시작. 차이가 0.35 rad 이하면 안 돎, 20 s 넘거나 실패하면 그대로 등록 [rad, s] |
 | `set_initial_pose` / `start_pose_file` / `start_point` | true / `''`(= arti_common `init_pose.yaml`) / `undock` | 언독 직후 initialpose로 보낼 위치 |
 | `post_undock_sensor_timeout` / `post_undock_settle_time` | 60.0 / 3.0 | 언독 후 scan·AMCL·TF·Nav2 준비 대기 / 연속 유지 [s]. 넘으면 재도킹 |
 | `visitor_topic` | `target_person/point_map` | person_tracker 출력 |

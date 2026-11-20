@@ -24,6 +24,7 @@
   NAV_ARTWORK       현재 작품(index)으로 Nav2 이동 중
   CANCELING         반원 진입 -> Nav2 goal 취소 결과 대기
   VERIFY_STOP       반원 안에서 완전 정지 확인 중
+  FACE_KIOSK        [코스 관람 변경 ⑦] 키오스크 정지 후 등(웹캠)이 키오스크를 보게 제자리 회전 (prepare_tour)
   REGISTERING       키오스크 앞 정지 후 관람객 인식 기다림 (prepare_tour)
   WAIT_START        등록 완료, 키오스크 앞에서 start_tour 기다림 (prepare_tour 성공)
   WAIT_VISITOR      관람 중 이동하다 관람객이 멀어져 멈춤, 가까이 오길 기다림 (start_tour)
@@ -36,6 +37,7 @@
   CANCELING_HOME    접근점 0.30m 진입 -> 취소 결과 대기
   VERIFY_HOME_STOP  접근점에서 정지 확인 중
   DOCKING           Dock 액션 실행 중
+  FACE_DOCK         [코스 관람 변경 ⑨] 도킹 접근 원에서 정지 후 정면이 충전 스테이션을 보게 제자리 회전 → Dock
   WAIT_DOCK_CONFIRM Dock 성공 후 dock_status.is_docked 확인 대기
   WAIT_RECOVERY     Nav2 이동 실패 (노드가 보고 바로 도킹 복귀 또는 ERROR로 바꿈)
   DONE / ERROR      종료
@@ -58,8 +60,9 @@ class Event:
       guide    -> 안내 키 문자열  : guide_message 토픽 발행 (arti_audio guide_lines.yaml의 키)
       explain  -> 작품 번호(int)  : explain_artwork 액션으로 작품 해설 요청
       dock     -> None           : Dock 액션 실행
+      spin     -> float          : 제자리 회전 [rad, +면 반시계] (Nav2 spin). 결과는 spin_result()
     """
-    kind: str  # status | navigate | cancel | guide | explain | dock
+    kind: str  # status | navigate | cancel | guide | explain | dock | spin
     value: object
 
 
@@ -82,7 +85,10 @@ class TourMachine:
                  visitor_give_up: float = 10.0,
                  start_guide: str = 'start', come_here_guide: str = 'come_here',
                  distance_window: float = 1.0, far_hold: float = 1.0,
-                 near_hold: float = 0.5, come_here_interval: float = 8.0):
+                 near_hold: float = 0.5, come_here_interval: float = 8.0,
+                 kiosk_face: bool = True, face_tolerance: float = 0.35, face_timeout: float = 20.0,
+                 dock_face: bool = True,
+                 explain_zone_margin: float = 0.15, explain_lost_grace: float = 3.0):
         # --- 설정값 (단위: 초 / m) ---
         self.base_plan = plan                      # YAML 원본 계획
         self.plan = plan                           # 이번 관람에 쓰는 계획(start_tour 작품 선택 반영)
@@ -97,6 +103,25 @@ class TourMachine:
         self.simulated_duration = simulated_duration
         self.exit_position_tolerance = exit_position_tolerance  # 출구 도착 허용 반경
         self.farewell_duration = farewell_duration  # 출구 인사 후 출발까지 대기 시간
+        # --- [코스 관람 변경 ⑦] 키오스크 도착 후 방향 맞추기 (prepare_tour) ---
+        # 반원에 들어서자마자 멈추므로 로봇은 키오스크 쪽(진행 방향)을 보고 선다. robot4 웹캠은 뒤를 보므로
+        # 등이 키오스크(반원 중심)를 보게 제자리 회전한 뒤 등록을 시작한다.
+        self.kiosk_face = kiosk_face               # False면 회전 없이 바로 등록
+        self.face_tolerance = face_tolerance       # 목표 방향과 이 이하 차이면 회전 생략 [rad]
+        self.face_timeout = face_timeout           # 회전 결과가 이 안에 안 오면 그대로 다음 단계(등록/Dock) [s]
+        # --- [코스 관람 변경 ⑨] 도킹 접근 원에서 Dock 전에 방향 맞추기 ---
+        # 왜: 접근 원(반경 home_position_tolerance 0.30 m)에 들어서자마자 멈추므로, 출구(북쪽)에서 내려오면
+        #     로봇이 남쪽·비스듬히 서서 도크가 정면에 없다. Create 3 Dock은 앞쪽 IR로 도크 신호를 보며 다가가는데,
+        #     정면에 없으면 찾다가 앞 벽에 범퍼가 닿아 2.7 s 만에 Dock 실패 → 그 자리 정지 (2026-11-20 실주행).
+        # 해결: 정면이 충전 스테이션(a_course.yaml dock.station)을 보게 Nav2 spin으로 돈 뒤 Dock (키오스크 회전과 같은 방식).
+        #       허용 각도·시간은 키오스크와 같은 face_tolerance / face_timeout. 회전 실패·시간 초과여도 Dock은 시도.
+        self.dock_face = dock_face
+        # --- [코스 관람 변경 ⑧] 해설 중 위치 감시 여유 ---
+        # 반원에 들어서자마자 멈추므로 로봇은 호 바로 안쪽에 선다. 서 있어도 AMCL 위치가 몇 cm 흔들려서
+        # 한 번만 밖으로 튀어도 실패하던 문제 (2026-11-20 작품 1에서 해설 0.7 s 만에 실패) → 여유를 둔다.
+        self.explain_zone_margin = explain_zone_margin  # 반원 밖 이 거리까지는 안으로 봄 [m]
+        self.explain_lost_grace = explain_lost_grace    # 밖이거나 위치가 끊긴 상태가 이만큼 계속돼야 실패 [s]
+        self.explain_bad_since = None                   # 해설 중 '밖/끊김'이 시작된 시각
         # --- 관람객 등록 (prepare_tour) ---
         self.register_confirm_time = register_confirm_time  # 이만큼 끊김 없이 보여야 등록
         self.register_gap = register_gap           # 인식이 이보다 오래 끊기면 확인을 처음부터
@@ -214,6 +239,15 @@ class TourMachine:
     def _fresh_inside(self, now: float) -> bool:
         """신선한 위치가 현재 반원 안인지."""
         return self._fresh_pose(now) and self._zone().contains(self.last_pose)
+
+    def _explain_ok(self, now: float) -> bool:
+        """[코스 관람 변경 ⑧] [해설 중] 위치가 신선하고 현재 작품 반원(+ explain_zone_margin) 안인지."""
+        if not self._fresh_pose(now):
+            return False
+        z, m = self._zone(), self.explain_zone_margin
+        dx, dy = self.last_pose.x - z.cx, self.last_pose.y - z.cy
+        return (math.hypot(dx, dy) <= z.radius + m
+                and dx * math.cos(z.direction) + dy * math.sin(z.direction) >= -m)
 
     def _entry_inside(self, now: float) -> bool:
         """반원 진입 판정 (진입 시 Nav2 goal을 취소함).
@@ -358,23 +392,42 @@ class TourMachine:
                 return [self._event('EXIT_ARRIVED', self.plan.farewell_text),
                         Event('guide', self.plan.farewell_text)]
             if self.state == 'VERIFY_HOME_STOP':
-                # 도킹 접근점 -> Dock 액션
-                self.state = 'DOCKING'
-                self.state_since = now
-                return [self._event('HOME_ARRIVED', '충전 스테이션 접근 위치 도착; Dock 액션 실행'),
-                        Event('dock', None)]
+                # 도킹 접근점 -> (정면을 도크로 회전) -> Dock 액션
+                turn = self._dock_turn()
+                if turn is not None:
+                    self.state = 'FACE_DOCK'
+                    self.state_since = now
+                    return [self._event('HOME_ARRIVED', f'충전 스테이션 접근 위치 도착; 도크 쪽으로 '
+                                                        f'{math.degrees(turn):.0f}° 회전 후 Dock'),
+                            Event('spin', turn)]
+                return [self._event('HOME_ARRIVED', '충전 스테이션 접근 위치 도착; Dock 액션 실행')] + \
+                    self._start_docking(now)
             if self.index < 0:
-                # [prepare_tour] 키오스크 도착 -> 관람객 등록 기다림
-                self.state = 'REGISTERING'
-                self.state_since = now
-                self.visitor_since, self.visitor_last = None, float('-inf')   # 도착 전 인식은 안 셈
-                return [self._event('KIOSK_STOPPED', '관람객 등록 시작'),
-                        Event('guide', self.register_guide)]
+                # [prepare_tour] 키오스크 도착 -> (방향 맞추기) -> 관람객 등록 기다림
+                turn = self._kiosk_turn()
+                if turn is not None:
+                    self.state = 'FACE_KIOSK'
+                    self.state_since = now
+                    return [self._event('KIOSK_FACING', f'{math.degrees(turn):.0f}° 회전 (웹캠을 키오스크 쪽으로)'),
+                            Event('spin', turn)]
+                return self._start_registering(now, '관람객 등록 시작')
             # 작품 -> 해설(TTS) 시작
             self.state = 'EXPLAINING'
+            self.explain_bad_since = None
             self.state_since = now
             art = self.plan.artworks[self.index]
             return [self._event('ARTWORK_STOPPED', str(art.artwork_id)), Event('explain', art.artwork_id)]
+
+        # (4-0) [코스 관람 변경 ⑦] 키오스크에서 회전 중: 결과는 spin_result(). 너무 오래 걸리면 그대로 등록
+        elif self.state == 'FACE_KIOSK':
+            if now-self.state_since >= self.face_timeout:
+                return self._start_registering(now, f'회전 {self.face_timeout:.0f}초 초과; 그대로 등록 시작')
+
+        # (4-0') [코스 관람 변경 ⑨] 도킹 접근점에서 도크 쪽으로 회전 중: 결과는 spin_result(). 너무 오래 걸리면 그대로 Dock
+        elif self.state == 'FACE_DOCK':
+            if now-self.state_since >= self.face_timeout:
+                return ([self._event('DOCK_FACE_TIMEOUT', f'회전 {self.face_timeout:.0f}초 초과; 그대로 Dock')]
+                        + self._start_docking(now))
 
         # (4-1) [prepare_tour] 관람객 등록: register_confirm_time 동안 끊김 없이 보이면 등록
         elif self.state == 'REGISTERING':
@@ -421,9 +474,15 @@ class TourMachine:
                         + self._go_home(now, '관람객 분실; 충전 스테이션으로 복귀'))
 
         # (5) 해설 중: 반원 이탈 감시, 결과는 explanation_result()로 들어옴
+        #     [코스 관람 변경 ⑧] 전: 한 번이라도 밖이면 즉시 실패 → 지금: 밖 0.15 m까지 봐주고, 3 s 넘게 계속돼야 실패
         elif self.state == 'EXPLAINING':
-            if not self._fresh_inside(now):
-                return self.fail('해설 중 현재 작품 반원 이탈 또는 위치 정보 소실')
+            if self._explain_ok(now):
+                self.explain_bad_since = None
+            elif self.explain_bad_since is None:
+                self.explain_bad_since = now                   # 잠깐 튄 것일 수 있음 → explain_lost_grace 동안 지켜봄
+            elif now-self.explain_bad_since >= self.explain_lost_grace:
+                why = '위치 정보 소실' if not self._fresh_pose(now) else '현재 작품 반원 이탈'
+                return self.fail(f'해설 중 {why} ({self.explain_lost_grace:.0f}초 넘게 계속)')
             if self.simulate_explanation and now-self.state_since >= self.simulated_duration:
                 # simulation_mode: TTS 없이 2초 후 완료 처리
                 return self.explanation_result(self.plan.artworks[self.index].artwork_id, True, now)
@@ -442,6 +501,57 @@ class TourMachine:
     # ------------------------------------------------------------------
     # 외부 결과 콜백 (ROS 노드가 호출)
     # ------------------------------------------------------------------
+
+    def _kiosk_turn(self) -> Optional[float]:
+        """[코스 관람 변경 ⑦] 등(웹캠)이 키오스크(반원 중심)를 보게 돌 각도 [rad, -π~π]. 필요 없거나 끔/위치 모름이면 None.
+        목표 방향 = 키오스크 → 로봇 방향 (멈춘 자리 기준이라 어느 쪽에서 들어와도 맞음).
+        2026-11-20: 고정 goal_pose.yaw(91°)로 돌았더니 반원 옆에서 멈춘 경우 -85°만 돌아 등이 벽을 봄.
+        로봇이 중심에 거의 붙어 있으면(0.05 m 안) 방향을 못 정하므로 goal_pose.yaw."""
+        if not self.kiosk_face or self.last_pose is None:
+            return None
+        z, pose = self.plan.kiosk_zone, self.last_pose
+        if math.hypot(pose.x - z.cx, pose.y - z.cy) > 0.05:
+            target = math.atan2(pose.y - z.cy, pose.x - z.cx)
+        else:
+            target = self.plan.kiosk_goal.yaw
+        d = target - pose.yaw
+        d = math.atan2(math.sin(d), math.cos(d))
+        return d if abs(d) > self.face_tolerance else None
+
+    def _start_registering(self, now: float, detail: str) -> list[Event]:
+        """키오스크에서 관람객 등록 시작 (손바닥 안내 음성)."""
+        self.state = 'REGISTERING'
+        self.state_since = now
+        self.visitor_since, self.visitor_last = None, float('-inf')   # 도착 전 인식은 안 셈
+        return [self._event('KIOSK_STOPPED', detail), Event('guide', self.register_guide)]
+
+    def _dock_turn(self) -> Optional[float]:
+        """[코스 관람 변경 ⑨] 정면이 충전 스테이션(dock.station)을 보게 돌 각도 [rad, -π~π].
+        필요 없거나(face_tolerance 이하) 끔/위치·스테이션 모름이면 None."""
+        st, pose = self.plan.dock_station, self.last_pose
+        if not self.dock_face or st is None or pose is None:
+            return None
+        if math.hypot(st.x - pose.x, st.y - pose.y) < 0.05:
+            return None
+        d = math.atan2(st.y - pose.y, st.x - pose.x) - pose.yaw
+        d = math.atan2(math.sin(d), math.cos(d))
+        return d if abs(d) > self.face_tolerance else None
+
+    def _start_docking(self, now: float) -> list[Event]:
+        """Create 3 Dock 액션 시작 (Nav2 없이 IR로 도크를 찾아 붙음)."""
+        self.state = 'DOCKING'
+        self.state_since = now
+        return [Event('dock', None)]
+
+    def spin_result(self, ok: bool, now: float) -> list[Event]:
+        """Nav2 spin 결과. 실패해도 다음 단계는 진행한다 (방향만 덜 맞을 뿐).
+        FACE_KIOSK → 관람객 등록 시작 / FACE_DOCK → Dock 액션."""
+        if self.state == 'FACE_KIOSK':
+            return self._start_registering(now, '관람객 등록 시작' if ok else '회전 실패; 그대로 등록 시작')
+        if self.state == 'FACE_DOCK':
+            note = [] if ok else [self._event('DOCK_FACE_FAILED', '회전 실패; 그대로 Dock')]
+            return note + self._start_docking(now)
+        return []            # 그 사이 취소·복귀로 상태가 바뀜
 
     def nav_result(self, result: str, now: float) -> list[Event]:
         """Nav2 NavigateToPose 결과 처리.
@@ -500,7 +610,9 @@ class TourMachine:
         active = self.plan.artworks[self.index].artwork_id
         if artwork_id != active:
             return self.fail(f'잘못된 작품 해설 응답: {artwork_id} != {active}')
-        if not self._fresh_inside(now):
+        # [코스 관람 변경 ⑧] 완료 순간에 잠깐 튄 것은 봐주고, '밖/끊김'이 explain_lost_grace 넘게 계속된 경우만 실패
+        if (not self._explain_ok(now) and self.explain_bad_since is not None
+                and now-self.explain_bad_since >= self.explain_lost_grace):
             return self.fail('해설 완료 시점에 현재 작품 반원 밖 또는 위치 정보 만료')
         if not success:
             return self.fail(f'작품 {active} 해설 실패')
@@ -632,10 +744,12 @@ class TourMachine:
                 Event('guide', self.start_guide), Event('navigate', (first.artwork_id, first.goal))]
 
     # 복귀 중(또는 이미 끝난) 상태: abort_to_home은 이유만 남기고 하던 복귀를 계속함
-    RETURN_STATES = ('NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'DOCKING', 'WAIT_DOCK_CONFIRM')
+    RETURN_STATES = ('NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'FACE_DOCK', 'DOCKING', 'WAIT_DOCK_CONFIRM')
 
     def redock(self, reason: str, now: float) -> list[Event]:
-        """[prepare_tour] 언독 직후, 키오스크로 출발하기 전에 그만둘 때: Nav2 없이 그 자리에서 Dock 액션으로 다시 도킹.
+        """[코스 관람 변경 ④] [prepare_tour] 언독 직후, 키오스크로 출발하기 전에 그만둘 때: Nav2 없이 그 자리에서 Dock 액션으로 다시 도킹.
+        전: 언독 후 센서 대기 시간 초과 → fail로 그 자리 정지 (사람이 손으로 도크에 올려야 했음).
+        지금: 도크가 바로 앞이므로 Create 3 Dock만으로 돌아간다 (Nav2·AMCL이 준비 안 돼도 됨).
         (언독 후 Nav2·AMCL이 준비되지 않았거나 그 사이 취소됨. 도크가 바로 앞이라 Create3 Dock만으로 돌아갈 수 있다)
         reason은 end_reason에 남는다."""
         if self.state != 'NAV_KIOSK':

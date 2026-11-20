@@ -22,7 +22,19 @@
         explain_artwork(arti_interfaces/ExplainArtwork, 작품 번호 int) -> arti_audio guide_audio_node
 
 map 좌표 목표는 항상 실측 설정 파일에서 읽고, 절대 임의로 만들지 않습니다.
-cmd_vel은 절대 발행하지 않습니다. 이동은 Nav2 컨트롤러만 담당합니다.
+cmd_vel은 절대 발행하지 않습니다. 이동은 Nav2 컨트롤러만 담당합니다 (제자리 회전도 Nav2 spin).
+
+[코스 관람 변경] 11/19 첫 실주행 이후 바꾼 것 (번호로 코드에서 찾기: grep -rn "코스 관람 변경 ③" src/)
+  ① 한 터미널 실행      launch 하나로 localization + Nav2 + 코스 노드 (전: 터미널 3개, RViz 2D Pose 손으로)
+  ② 시작 위치 자동      AMCL 시작 = init_pose.yaml undock, 언독 직후 initialpose 발행 (전: 매번 RViz 2D Pose Estimate)
+  ③ 점검 두 단계        도킹 중엔 "도크로 돌아올 수 있나"만, 언독 뒤 scan·AMCL·TF·Nav2 확인 (전: 도킹 중 전부 확인 → LiDAR 꺼져 항상 실패)
+  ④ 준비 안 되면 재도킹  언독 후 60 s 안에 준비 안 되거나 취소되면 Nav2 없이 그 자리 Dock (전: 실패로 그 자리 정지)
+  ⑤ Nav2 언독 뒤 켜기    autostart=false, scan·TF가 오면 STARTUP (전: launch 때 켜서 도킹 중 "Aborting bringup")
+  ⑥ 느린 discovery 대응  launch 노드 super client 끄기, bond_timeout 4·10 → 30 s
+  ⑦ 키오스크 회전       정지 후 등(뒤쪽 웹캠)이 키오스크를 보게 Nav2 spin (전: 키오스크를 보고 서서 웹캠이 반대쪽)
+  ⑧ 해설 중 위치 여유    반원 밖 0.15 m·3 s까지 봐줌 (전: AMCL이 한 번 튀면 0.7 s 만에 실패)
+  ⑨ 도킹 전 회전        접근 원에서 정면이 도크를 보게 spin 후 Dock (전: 도크를 안 보고 Dock → 앞 벽에 부딪혀 실패)
+  ⑩ 웹캠 직접 받기      인식 노드가 웹캠을 직접 엶, camera_pub 안 띄움 (전: 영상 토픽 경유, 같은 웹캠 두 번 열기)
 """
 from __future__ import annotations
 import collections
@@ -39,7 +51,7 @@ from rclpy.time import Time
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, Spin
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -62,7 +74,7 @@ PREPARE_STATES = ('UNDOCKING', 'MOVING', 'ARRIVED', 'REGISTERING', 'REGISTERED')
 # 엔진 상태 -> start_tour feedback state (팀 명세서 3.2). 그 밖의 상태는 feedback 안 바꿈
 TOUR_MOVING = ('NAV_ARTWORK', 'CANCELING', 'VERIFY_STOP', 'WAIT_VISITOR',
                'NAV_EXIT', 'CANCELING_EXIT', 'VERIFY_EXIT_STOP')
-TOUR_RETURNING = ('FAREWELL', 'NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'DOCKING', 'WAIT_DOCK_CONFIRM')
+TOUR_RETURNING = ('FAREWELL', 'NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'FACE_DOCK', 'DOCKING', 'WAIT_DOCK_CONFIRM')
 
 try:
     from irobot_create_msgs.action import Undock, Dock  # TurtleBot4(Create3) 도킹 액션
@@ -94,19 +106,20 @@ class ACourseNode(Node):
         self.declare_parameter('require_tf', True)             # map->base_link TF 필수 여부
         # [실물 로봇] TurtleBot4 power_saver가 도킹 중 LiDAR를 꺼서
         # scan/AMCL/TF가 언도킹 전까지 오래된 값임. 언도킹 후 다시 들어올 때까지 대기.
+        # [코스 관람 변경 ③④] 30 → 60 s: 언독 후 scan·AMCL·TF에 더해 Nav2 켜기(⑤, 10~20 s)까지 기다림. 넘으면 재도킹(④)
         self.declare_parameter('post_undock_sensor_timeout', 60.0)   # 언독 후 scan·AMCL·TF·Nav2 준비 대기 [s]. 넘으면 바로 재도킹
         self._await_sensors_since = None   # 언도킹 후 센서 대기 시작 시각 (None = 대기 아님)
         self._sensors_ok_since = None      # 센서가 모두 신선해진 시각 (안정화 시간 계산용)
         # LiDAR 재시작 후 Nav2가 새 map->odom TF를 쓰려면 몇 초 필요.
         # 너무 빨리 목표를 보내면 'Initial robot pose is not available'로 ABORT됨.
         self.declare_parameter('post_undock_settle_time', 3.0)
-        # [언독 직후 AMCL 초기 위치] follow 팀(visitor_follower LOCALIZE)과 같다: RViz 2D Pose Estimate 대신
+        # [코스 관람 변경 ②] 언독 직후 AMCL 초기 위치. follow 팀(visitor_follower LOCALIZE)과 같은 방식: RViz 2D Pose Estimate 대신
         # 언독이 끝나면 init_pose.yaml robots.<ns>.<start_point>를 initialpose로 한 번 보낸다.
         # (로봇은 항상 도크에서 출발 → 언독 끝 위치는 매번 거의 같다. 도킹 중엔 LiDAR가 꺼져 AMCL이 위치를 못 잡음)
         self.declare_parameter('set_initial_pose', True)
         self.declare_parameter('start_pose_file', '')          # '' = arti_common/config/init_pose.yaml
         self.declare_parameter('start_point', 'undock')        # init_pose.yaml에서 쓸 위치 이름
-        # [Nav2 활성화] Nav2 global_costmap은 map→base_link TF가 있어야 활성화된다. 도킹 중엔 LiDAR가 꺼져 AMCL이
+        # [코스 관람 변경 ⑤] Nav2 활성화. Nav2 global_costmap은 map→base_link TF가 있어야 활성화된다. 도킹 중엔 LiDAR가 꺼져 AMCL이
         # map→odom TF를 안 내서 launch 때 켜면 "Aborting bringup"으로 멈춘다 (2026-11-20).
         # → launch는 Nav2를 autostart=false로 띄우고, 이 노드가 scan·TF가 신선해지면(= 언독 후) STARTUP을 요청한다.
         self.declare_parameter('activate_nav2', True)
@@ -122,6 +135,17 @@ class ACourseNode(Node):
         self.declare_parameter('register_guide', 'course_register')     # guide_lines.yaml 키: 주먹→손바닥 안내 (robot4 전용)
         self.declare_parameter('recognized_guide', 'course_recognized') # 인식 완료 (robot4 전용)
         self.declare_parameter('register_failed_guide', 'register_failed')  # 등록 실패 / 관람객 분실
+        # [코스 관람 변경 ⑦] 키오스크 정지 후 등(웹캠)이 키오스크를 보게 제자리 회전 (Nav2 spin, course_engine FACE_KIOSK).
+        # 반원에 들어서자마자 멈춰서 로봇이 키오스크를 보고 서는데, robot4 웹캠은 뒤를 보므로 등을 키오스크로 돌린다.
+        self.declare_parameter('kiosk_face', True)
+        self.declare_parameter('face_tolerance', 0.35)         # 목표 방향과 이 이하 차이면 안 돎 [rad] (약 20°)
+        self.declare_parameter('face_timeout', 20.0)           # 회전 결과 대기 제한 → 넘으면 그대로 다음 단계 [s]
+        # [코스 관람 변경 ⑨] 도킹 접근 원에서 정지 후 정면이 충전 스테이션을 보게 회전하고 Dock (course_engine FACE_DOCK 주석 참고).
+        # 2026-11-20: 도크를 안 보고 선 채 Dock → Create 3가 찾다가 앞 벽에 부딪혀 Dock 실패.
+        self.declare_parameter('dock_face', True)
+        # [코스 관람 변경 ⑧] 해설 중 위치 감시 여유: 호 바로 안쪽에 멈춰 AMCL이 몇 cm만 튀어도 실패하던 문제 (2026-11-20)
+        self.declare_parameter('explain_zone_margin', 0.15)    # 반원 밖 이 거리까지는 안으로 봄 [m]
+        self.declare_parameter('explain_lost_grace', 3.0)      # 밖/위치 끊김이 이만큼 계속돼야 실패 [s]
         # [start_tour] 관람 중 관람객 거리 감시 (판단 값은 arti_follow와 같게. 주행은 Nav2라 주행 값은 안 씀)
         self.declare_parameter('watch_visitor', True)          # false면 감시 안 함
         self.declare_parameter('far_distance', 2.5)            # 이보다 멀면 Nav2 goal 취소(정지) + come_here [m] (2026-11-19 실주행: 1.5는 너무 자주 멈춤)
@@ -133,7 +157,7 @@ class ACourseNode(Node):
         self.declare_parameter('lost_timeout', 3.0)            # 인식이 이만큼 끊기면 안 보이는 것 [s] (arti_follow)
         self.declare_parameter('visitor_give_up', 10.0)        # 멈춘 뒤 이만큼 안 오면 관람 끝 -> 도킹 복귀 [s]
         self.declare_parameter('start_guide', 'course_start')  # guide_lines.yaml 키: 관람 시작 '저를 따라오세요' (robot4 전용)
-        self.declare_parameter('come_here_guide', 'course_come_here')  # 관람객이 멀어짐 → '저를 따라오세요' (robot4 전용)
+        self.declare_parameter('come_here_guide', 'course_come_here')  # 관람객이 멀어짐 → '뒤쪽 카메라 앞으로 와 주세요' (robot4 전용)
 
         # Nav2/AMCL lifecycle 상태 확인용 클라이언트
         # _lifecycle[name] = [GetState 클라이언트, 진행 중 future, active 여부]
@@ -142,7 +166,7 @@ class ACourseNode(Node):
         self._lifecycle_sent = {}          # name -> 요청 보낸 시각 (재요청 판단용)
         self._lifecycle = {name: [self.create_client(GetState, name+'/get_state'), None, False]
                            for name in ('amcl','map_server','bt_navigator','controller_server','planner_server')}
-        # Nav2 켜기: lifecycle_manager_navigation/manage_nodes (STARTUP, 실패하면 다음엔 RESET 후 STARTUP)
+        # [코스 관람 변경 ⑤] Nav2 켜기: lifecycle_manager_navigation/manage_nodes (STARTUP, 실패하면 다음엔 RESET 후 STARTUP)
         from nav2_msgs.srv import ManageLifecycleNodes
         self._manage_type = ManageLifecycleNodes
         self._nav2_manage = self.create_client(
@@ -213,7 +237,13 @@ class ACourseNode(Node):
                 near_hold=float(self.get_parameter('near_hold').value),
                 come_here_interval=float(self.get_parameter('come_here_interval').value),
                 start_guide=str(self.get_parameter('start_guide').value),
-                come_here_guide=str(self.get_parameter('come_here_guide').value))
+                come_here_guide=str(self.get_parameter('come_here_guide').value),
+                kiosk_face=bool(self.get_parameter('kiosk_face').value),
+                face_tolerance=float(self.get_parameter('face_tolerance').value),
+                face_timeout=float(self.get_parameter('face_timeout').value),
+                dock_face=bool(self.get_parameter('dock_face').value),
+                explain_zone_margin=float(self.get_parameter('explain_zone_margin').value),
+                explain_lost_grace=float(self.get_parameter('explain_lost_grace').value))
         except Exception as exc:
             self._config_error = str(exc)
             self.get_logger().error(f'좌표 설정 오류. 이동 차단: {self._config_error}')
@@ -223,6 +253,8 @@ class ACourseNode(Node):
         # 액션 클라이언트 / 퍼블리셔 / 구독
         # ------------------------------------------------------------
         self._nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._spin_client = ActionClient(self, Spin, 'spin')     # [코스 관람 변경 ⑦⑨] Nav2 behavior_server 제자리 회전 (키오스크·도크)
+        self._spin_goal = None
         self._undock_client = ActionClient(self, Undock, 'undock') if Undock else None
         self._dock_client = ActionClient(self, Dock, 'dock') if Dock else None
         self._explain_client = ActionClient(self, ExplainArtwork, 'explain_artwork')
@@ -230,7 +262,7 @@ class ACourseNode(Node):
         self._status_pub = self.create_publisher(String, '/arti/course_status', 10)
         self._guide_pub = self.create_publisher(String, 'guide_message', 10)
         self._tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)   # person_tracker 대상 지우기
-        self._initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)  # 언독 직후 AMCL 초기 위치
+        self._initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)  # [코스 관람 변경 ②] 언독 직후 AMCL 초기 위치
         # [실물 로봇] AMCL은 amcl_pose를 reliable + transient_local 로 발행하므로 QoS를 맞춤
         # (기본 QoS로는 마지막 위치를 받지 못함)
         amcl_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -271,7 +303,7 @@ class ACourseNode(Node):
     # ------------------------------------------------------------
 
     def _load_init_poses(self):
-        """init_pose.yaml → (언독 지점 = initialpose로 보낼 위치, 도크 = 도킹 중 AMCL 위치가 없을 때 출발 위치). 없으면 None."""
+        """[코스 관람 변경 ②] init_pose.yaml → (언독 지점 = initialpose로 보낼 위치, 도크 = 도킹 중 AMCL 위치가 없을 때 출발 위치). 없으면 None."""
         path = self.get_parameter('start_pose_file').value
         point = self.get_parameter('start_point').value
         ns = self.get_namespace()
@@ -289,7 +321,7 @@ class ACourseNode(Node):
         return start, dock
 
     def _send_initial_pose(self):
-        """[언독 직후] AMCL에 initialpose(언독 지점)를 한 번 보낸다 = RViz 2D Pose Estimate를 코드가 대신.
+        """[코스 관람 변경 ②] [언독 직후] AMCL에 initialpose(언독 지점)를 한 번 보낸다 = RViz 2D Pose Estimate를 코드가 대신.
         형식·공분산은 arti_follow prepare_tour.localize와 같다. AMCL 수렴은 _tick (3)에서 기다린다."""
         start = self._start_pose
         if start is None or not self.get_parameter('set_initial_pose').value:
@@ -366,7 +398,7 @@ class ACourseNode(Node):
         return all(self._lifecycle[n][2] for n in ('bt_navigator', 'controller_server', 'planner_server'))
 
     def _activate_nav2(self, now):
-        """[_tick] Nav2가 active가 아니고 scan·map→base_link TF가 신선하면(= LiDAR 켜짐, 언독 후) STARTUP 요청.
+        """[코스 관람 변경 ⑤] [_tick] Nav2가 active가 아니고 scan·map→base_link TF가 신선하면(= LiDAR 켜짐, 언독 후) STARTUP 요청.
         도킹 중(LiDAR 꺼짐)에는 요청하지 않는다 → 켜 봐야 global_costmap이 TF를 기다리다 실패하므로.
         STARTUP은 모든 Nav2 노드가 active가 될 때 응답이 온다 (10~20 s). 실패하면 nav2_startup_retry 뒤 RESET → STARTUP."""
         if not self.get_parameter('activate_nav2').value:
@@ -410,6 +442,9 @@ class ACourseNode(Node):
 
     def _check_ready(self, before_undock=False):
         """출발 전 안전 점검. 문제가 있으면 이유 문자열, 모두 OK면 None.
+
+        [코스 관람 변경 ③] 전에는 도킹 중에도 Nav2·AMCL·scan·TF까지 전부 확인했는데, 도킹 중엔 절전으로 LiDAR가
+        꺼져 있어 호출이 항상 거절됐다 (2026-11-20). 그래서 확인을 두 단계로 나눴다.
 
         before_undock=True (prepare_tour, 도크에 붙어 있음): 도크로 다시 돌아올 수 있는지만 본다
         (도크·Dock 서버·배터리·odom·음성). Nav2·AMCL·scan·TF는 언독 후 _tick에서 기다렸다 확인
@@ -487,7 +522,7 @@ class ACourseNode(Node):
         try:
             # 언도킹 '전'의 정확한 도킹 위치를 먼저 기록.
             # Nav2 복귀 목표는 언도킹 '후' 충돌 없는 위치로 갱신됨.
-            origin = self._pose or self._dock_pose or self._start_pose   # 도킹 중 AMCL 위치가 없으면 init_pose.yaml dock
+            origin = self._pose or self._dock_pose or self._start_pose   # [코스 관람 변경 ③] 도킹 중 AMCL 위치가 없으면 init_pose.yaml dock
             if origin is None:
                 return 'AMCL map 위치 정보 없음, init_pose.yaml에 dock·undock도 없음 (RViz 2D Pose Estimate 필요)'
             events = self._machine.start(request_id, self._now(), origin)
@@ -594,7 +629,7 @@ class ACourseNode(Node):
             prep['feedback'] = 'UNDOCKING'
         elif m.state in ('NAV_KIOSK', 'CANCELING'):
             prep['feedback'] = 'MOVING'
-        elif m.state == 'VERIFY_STOP':
+        elif m.state in ('VERIFY_STOP', 'FACE_KIOSK'):
             prep['feedback'] = 'ARRIVED'
         elif m.state == 'REGISTERING':
             prep['feedback'] = 'REGISTERING'
@@ -605,7 +640,7 @@ class ACourseNode(Node):
             prep['outcome'] = ('fail', m.fail_reason or 'error')
         elif m.end_reason:
             # 등록 실패·Nav2 실패 등으로 도킹 복귀 시작
-            # (언독 직후 취소 → redock('canceled')도 여기로 옴: PC3에는 canceled로 알림)
+            # [코스 관람 변경 ④] 언독 직후 취소 → redock('canceled')도 여기로 옴: PC3에는 fail이 아니라 canceled로 알림
             self._tour_end_pub.publish(Empty())
             kind = 'canceled' if (prep['cancel'] and m.end_reason == 'canceled') else 'fail'
             prep['outcome'] = (kind, m.end_reason)
@@ -620,6 +655,7 @@ class ACourseNode(Node):
         if self._explain_goal is not None:
             self._explain_goal.cancel_goal_async()
             self._explain_goal = None
+        self._cancel_spin()
         self._dispatch(self._machine.abort_to_home(reason, now))
         self._tour_end_pub.publish(Empty())
 
@@ -786,12 +822,61 @@ class ACourseNode(Node):
                 self._guide_pub.publish(String(data=str(event.value)))  # 안내 문구(TTS 노드가 재생)
             elif event.kind == 'dock':
                 self._start_docking()                           # Dock 액션
+            elif event.kind == 'spin':
+                self._start_spin(float(event.value))            # Nav2 spin (키오스크에서 방향 맞추기)
             elif event.kind == 'explain':
                 self._emit({'request_id': self._machine.request_id,
                             'state': 'EXPLANATION_REQUESTED',
                             'detail': str(event.value), 'completed': list(self._machine.completed)})
                 if not self.get_parameter('simulation_mode').value:
                     self._start_explanation(int(event.value))   # 작품 번호로 해설 요청
+
+    # ------------------------------------------------------------
+    # [코스 관람 변경 ⑦⑨] Nav2 Spin (키오스크·도크 앞에서 제자리 회전)
+    #   cmd_vel을 직접 내지 않고 Nav2 behavior_server spin을 쓴다 → 회전 중에도 costmap으로 충돌 확인
+    # ------------------------------------------------------------
+
+    def _start_spin(self, angle):
+        """Nav2 behavior_server spin으로 angle[rad]만큼 제자리 회전 (장애물 확인 포함). 결과 → TourMachine.spin_result."""
+        session = self._session
+        if not self._spin_client.server_is_ready():
+            self.get_logger().warn('Nav2 spin 액션 미준비 → 회전 없이 등록')
+            self._dispatch(self._machine.spin_result(False, self._now()))
+            return
+        goal = Spin.Goal()
+        goal.target_yaw = float(angle)
+        goal.time_allowance.sec = int(self.get_parameter('face_timeout').value)
+        self.get_logger().info(f'키오스크 방향 맞추기: {math.degrees(angle):.0f}° 회전 (Nav2 spin)')
+
+        def accepted(future):
+            try:
+                gh = future.result()
+            except Exception:
+                gh = None
+            if session != self._session or gh is None or not gh.accepted:
+                if session == self._session:
+                    self._dispatch(self._machine.spin_result(False, self._now()))
+                return
+            self._spin_goal = gh
+            gh.get_result_async().add_done_callback(finished)
+
+        def finished(future):
+            self._spin_goal = None
+            if session != self._session:
+                return
+            try:
+                ok = future.result().status == GoalStatus.STATUS_SUCCEEDED
+            except Exception:
+                ok = False
+            self._dispatch(self._machine.spin_result(ok, self._now()))
+
+        self._spin_client.send_goal_async(goal).add_done_callback(accepted)
+
+    def _cancel_spin(self):
+        """진행 중인 spin 취소 (복귀·취소할 때)."""
+        if self._spin_goal is not None:
+            self._spin_goal.cancel_goal_async()
+            self._spin_goal = None
 
     # ------------------------------------------------------------
     # Nav2 NavigateToPose
@@ -988,10 +1073,10 @@ class ACourseNode(Node):
         except Exception:
             pass
 
-        # (2-1) Nav2 켜기: 언독 후 scan·TF가 들어오면 (도킹 중엔 안 켬)
+        # (2-1) [코스 관람 변경 ⑤] Nav2 켜기: 언독 후 scan·TF가 들어오면 (도킹 중엔 안 켬)
         self._activate_nav2(now)
 
-        # (3) [실물 로봇] 언도킹 후 준비 대기 (LiDAR가 이제 켜짐)
+        # (3) [코스 관람 변경 ③④] 언도킹 후 준비 대기 (LiDAR가 이제 켜짐)
         #     pose/scan/TF 신선 + Nav2(navigate_to_pose, lifecycle active)가 settle_time(3초) 연속 유지되면 키오스크로 출발.
         #     post_undock_sensor_timeout(60초) 안에 안 되거나 그 사이 취소되면 Nav2 없이 바로 재도킹.
         if self._await_sensors_since is not None:
@@ -1037,6 +1122,7 @@ class ACourseNode(Node):
                                    'CANCELING_HOME', 'CANCELING_EXIT',
                                    'VERIFY_STOP', 'VERIFY_HOME_STOP', 'VERIFY_EXIT_STOP',
                                    'FAREWELL', 'EXPLAINING', 'REGISTERING', 'WAIT_START', 'WAIT_VISITOR',
+                                   'FACE_KIOSK', 'FACE_DOCK',     # [코스 관람 변경 ⑦⑨] 회전 시간 초과(face_timeout) 감시용
                                    'DOCKING', 'WAIT_DOCK_CONFIRM'):
             pose_age = now - self._pose_stamp if self._pose else float('inf')
             odom_age = now - self._odom_stamp

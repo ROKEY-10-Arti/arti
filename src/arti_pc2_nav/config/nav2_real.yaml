@@ -333,4 +333,4 @@ docking_server:
 
 lifecycle_manager_navigation:
   ros__parameters:
-    bond_timeout: 30.0   # 기본 10 s. 서버 PC 경유 discovery가 느려 controller_server bond가 10 s 안에 안 와서 Nav2 bringup이 중간에 멈춘 적 있음 (2026-11-19)
+    bond_timeout: 30.0   # [코스 관람 변경 ⑥] 기본 10 s. 서버 PC 경유 discovery가 느려 controller_server bond가 10 s 안에 안 와서 Nav2 bringup이 중간에 멈춘 적 있음 (2026-11-19)

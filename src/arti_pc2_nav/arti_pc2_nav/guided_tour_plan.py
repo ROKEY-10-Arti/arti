@@ -213,7 +213,7 @@ def load_course_config(path: str | Path, zones_file: Optional[str] = None) -> Co
 
 
 def load_start_pose(path: str | Path, namespace: str, point: str) -> Optional[Pose2D]:
-    """arti_common init_pose.yaml의 robots.<namespace>.<point> → Pose2D (yaw = yaw_deg를 라디안으로).
+    """[코스 관람 변경 ②] arti_common init_pose.yaml의 robots.<namespace>.<point> → Pose2D (yaw = yaw_deg를 라디안으로).
     follow 팀(visitor_follower, arti_bringup localization.launch.py)과 같은 파일·같은 키를 읽는다.
     yaw_deg가 없으면 dock → 그 지점 방향, dock도 없으면 0. 그 로봇·지점이 없으면 None."""
     with open(path, encoding='utf-8') as f:
