@@ -81,7 +81,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
@@ -167,7 +167,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         def sub(kind, topic, fn, qos):               # 진단 켜면 수신 간격·지연·콜백 시간을 잰다
             return self.create_subscription(kind, topic, self.timed(topic, fn), qos)
         # tf는 네임스페이스 안(/robot1/tf)에 있으므로 상대 이름으로 받아 Buffer에 넣는다
-        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], 100)
+        # tf(약 37 Hz)는 BEST_EFFORT: Wi-Fi에서 잃은 조각을 재전송하느라 뒤 메시지까지 밀리지 않게 (곧 새 값이 옴).
+        # RELIABLE이던 2026-11-20 진단에서 [늦음] tf 204번(최대 3 s). 팀원 브랜치 fix/follow-stability-perf와 같은 설정.
+        # tf_static은 한 번만 오므로 아래처럼 RELIABLE + TRANSIENT_LOCAL 그대로
+        tf_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT)
+        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], tf_qos)
         sub(TFMessage, 'tf_static', lambda m: [self.tf.set_transform_static(t, 'tf') for t in m.transforms],
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
