@@ -38,6 +38,7 @@ class TargetLocalizationResult:
     map_source: str                  # 'AMCL' | 'Init+Odom' | 'None'
     matched_rays: int                # 매칭된 라이다 포인트 개수
     sync_dt_ms: Optional[float] = None  # 이미지 대비 선택된 scan 시각 차이 [ms]
+    clock_offset_ms: Optional[float] = None  # 호스트 간 시계 오차 보정량(scan - cam) [ms]
 
 
 def _stamp_to_sec(stamp) -> float:
@@ -157,6 +158,17 @@ class LidarPersonLocalizer:
         publish_cam_tf = bool(_param_or_cfg('publish_cam_tf', True))
         self.scan_sync_slop_sec = float(_param_or_cfg('scan_sync_slop_sec', 0.25))
         self.require_scan_sync = bool(_param_or_cfg('require_scan_sync', True))
+        self.compensate_clock_offset = bool(_param_or_cfg('compensate_clock_offset', True))
+        self.clock_offset_threshold_sec = float(_param_or_cfg('clock_offset_threshold_sec', 0.12))
+        self.lidar_cluster_mode = str(_param_or_cfg('lidar_cluster_mode', 'front_valid')).strip().lower()
+        self.lidar_cluster_tol_m = max(0.10, float(_param_or_cfg('lidar_cluster_tol_m', 0.35)))
+        self.lidar_min_cluster_rays = max(1, int(_param_or_cfg('lidar_min_cluster_rays', 2)))
+        self.use_pose_sector = bool(_param_or_cfg('use_pose_sector', True))
+        # 관측 전용(publish_target_topics=false)일 때는 기본적으로 도킹 중인 로봇의 라이다 모터를 임의로 켜지 않음
+        publish_topics = bool(_param_or_cfg('publish_target_topics', True))
+        self.auto_start_lidar_motor = bool(
+            _param_or_cfg('auto_start_lidar_motor', publish_topics)
+        )
 
         self.xyz = (cam_x, cam_y, cam_z)
         if use_deg:
@@ -197,13 +209,25 @@ class LidarPersonLocalizer:
         self.scan_fps: float = 0.0
         self._scan_lock = threading.Lock()
         self._scan_buffer: deque = deque(maxlen=40)
+        self._skew_samples: deque = deque(maxlen=60)
+        self._last_skew_scan_sec: float = -1.0
+        self.last_clock_offset_sec: float = 0.0
+        self._last_skew_log_wall: float = 0.0
         self.scan_sub = node.create_subscription(
             LaserScan, self.scan_topic, self._on_scan, qos_profile_sensor_data
         )
-        self.motor_client = node.create_client(Empty, self.start_motor_srv)
+        self.motor_client = (
+            node.create_client(Empty, self.start_motor_srv)
+            if self.auto_start_lidar_motor
+            else None
+        )
         self._motor_requested = False
         self._startup_time = time.time()
-        self._watchdog_timer = node.create_timer(2.5, self._check_lidar_motor)
+        self._watchdog_timer = (
+            node.create_timer(2.5, self._check_lidar_motor)
+            if self.auto_start_lidar_motor
+            else None
+        )
 
         # 3. 타겟 인물 위치 발행 토픽 (로봇 기준 / 맵 기준 / RViz 마커)
         self.pub_point_base = node.create_publisher(
@@ -285,34 +309,132 @@ class LidarPersonLocalizer:
         with self._scan_lock:
             self._scan_buffer.append((scan_sec, now, msg))
 
+    def _estimate_clock_offset_sec(
+        self,
+        frame_sec: float,
+        frame_rx_wall: float,
+        live: list,
+    ) -> float:
+        """수신 wall-clock 기준 동시 도착 스캔과 이미지 간 영구 시계 오차(scan - cam)를 추정합니다."""
+        if not self.compensate_clock_offset or frame_sec <= 0.0 or not live:
+            return 0.0
+
+        nearest_s, nearest_w, _ = min(live, key=lambda item: abs(item[1] - frame_rx_wall))
+        if (
+            abs(nearest_w - frame_rx_wall) <= 0.18
+            and nearest_s > 0.0
+            and nearest_s != self._last_skew_scan_sec
+        ):
+            sample = (nearest_s - frame_sec) - (nearest_w - frame_rx_wall)
+            if abs(sample) < 30.0:
+                self._skew_samples.append(sample)
+                self._last_skew_scan_sec = nearest_s
+
+        if not self._skew_samples:
+            return 0.0
+        est = float(np.median(self._skew_samples))
+        if len(self._skew_samples) < 3 and abs(est) < 0.35:
+            return 0.0
+        if abs(est) < self.clock_offset_threshold_sec:
+            self.last_clock_offset_sec = 0.0
+            return 0.0
+        self.last_clock_offset_sec = est
+        if (frame_rx_wall - self._last_skew_log_wall) >= 10.0:
+            self._last_skew_log_wall = frame_rx_wall
+            self.node.get_logger().warn(
+                f'[시간 오차 보정] scan-camera 시계 차이 {est * 1000.0:+.0f}ms 감지 -> 자동 오프셋 매칭 적용중'
+            )
+        return est
+
     def _select_scan_for_stamp(
-        self, frame_stamp: Optional[BuiltinTime]
-    ) -> Tuple[Optional[LaserScan], Optional[float], bool]:
-        """이미지 타임스탬프와 가장 가까운 LiDAR 스캔을 선택합니다."""
+        self,
+        frame_stamp: Optional[BuiltinTime],
+        frame_rx_wall: Optional[float] = None,
+    ) -> Tuple[Optional[LaserScan], Optional[float], bool, float]:
+        """이미지 타임스탬프와 가장 가까운 LiDAR 스캔을 선택합니다(호스트 시계 오차 자동 보정 포함)."""
         now_wall = time.time()
+        rx_wall = frame_rx_wall if (frame_rx_wall is not None and frame_rx_wall > 0.0) else now_wall
         with self._scan_lock:
             live = [(s_sec, w_t, m) for (s_sec, w_t, m) in self._scan_buffer if (now_wall - w_t) < 2.5]
         if not live:
             if self.latest_scan is not None and (now_wall - self.last_scan_WallTime) < 2.5:
-                return self.latest_scan, None, False
-            return None, None, False
+                return self.latest_scan, None, False, 0.0
+            return None, None, False, 0.0
 
         frame_sec = _stamp_to_sec(frame_stamp)
         if frame_sec <= 0.0:
-            return live[-1][2], None, False
+            return live[-1][2], None, False, 0.0
 
-        best_sec, _, best_msg = min(live, key=lambda item: abs(item[0] - frame_sec))
-        abs_dt = abs(best_sec - frame_sec)
-        dt_ms = (best_sec - frame_sec) * 1000.0
+        clock_offset = self._estimate_clock_offset_sec(frame_sec, rx_wall, live)
+        target_sec = frame_sec + clock_offset
+        best_sec, _, best_msg = min(live, key=lambda item: abs(item[0] - target_sec))
+        abs_dt = abs(best_sec - target_sec)
+        dt_ms = (best_sec - target_sec) * 1000.0
         if abs_dt <= self.scan_sync_slop_sec:
-            return best_msg, dt_ms, True
+            return best_msg, dt_ms, True, clock_offset
         if not self.require_scan_sync:
-            return best_msg, dt_ms, False
-        return None, dt_ms, False
+            return best_msg, dt_ms, False, clock_offset
+        return None, dt_ms, False, clock_offset
+
+    def _compute_half_sector(
+        self,
+        target: UnifiedTrackedPerson,
+        half_w: float,
+        fx: float,
+    ) -> float:
+        """타겟 bbox(및 가능 시 Pose 좌우 몸통 관절 폭)에서 LiDAR 매칭 수평 반각을 계산합니다."""
+        x1, _, x2, _ = target.bbox
+        alpha_left = math.atan2(-(x1 - half_w), fx)
+        alpha_right = math.atan2(-(x2 - half_w), fx)
+        bbox_span = abs(alpha_left - alpha_right)
+        half_sector = max(math.radians(3.5), min(math.radians(18.0), bbox_span * 0.35))
+
+        if not self.use_pose_sector or target.keypoints is None or len(target.keypoints) < 13:
+            return half_sector
+
+        kpts = target.keypoints
+        left_xs = [
+            float(kpts[idx][0])
+            for idx in (5, 11)
+            if len(kpts[idx]) >= 3 and float(kpts[idx][2]) >= 0.35 and x1 <= float(kpts[idx][0]) <= x2
+        ]
+        right_xs = [
+            float(kpts[idx][0])
+            for idx in (6, 12)
+            if len(kpts[idx]) >= 3 and float(kpts[idx][2]) >= 0.35 and x1 <= float(kpts[idx][0]) <= x2
+        ]
+        if not left_xs or not right_xs:
+            return half_sector
+
+        pad = max(12.0, 0.12 * max(1.0, float(x2 - x1)))
+        sx1 = max(float(x1), min(left_xs + right_xs) - pad)
+        sx2 = min(float(x2), max(left_xs + right_xs) + pad)
+        if sx2 <= sx1:
+            return half_sector
+        torso_span = abs(math.atan2(-(sx1 - half_w), fx) - math.atan2(-(sx2 - half_w), fx))
+        sector_span = min(bbox_span * 0.70, max(math.radians(5.0), torso_span * 1.15))
+        return max(math.radians(3.0), min(math.radians(15.0), sector_span * 0.5))
+
+    def _select_cluster_distance(self, dists: np.ndarray) -> float:
+        """섹터 내 라이다 거리 배열에서 배경 벽면 대신 최전방 유효 다리/몸통 클러스터 거리를 선택합니다."""
+        if self.lidar_cluster_mode == 'p25' or dists.size <= 1:
+            p25 = float(np.percentile(dists, 25))
+            cluster = dists[(dists >= p25 - 0.15) & (dists <= p25 + 0.25)]
+            return float(np.mean(cluster)) if cluster.size > 0 else p25
+
+        s = np.sort(dists)
+        tol = self.lidar_cluster_tol_m
+        min_rays = self.lidar_min_cluster_rays
+        for anchor in s:
+            cluster = s[(s >= anchor) & (s <= anchor + tol)]
+            if cluster.size >= min_rays:
+                return float(np.mean(cluster))
+        # 전 구간에 2개 이상 모인 클러스터가 없을 때만 가장 가까운 포인트로 폴백
+        return float(s[0])
 
     def _check_lidar_motor(self):
         """도킹 스테이션 위에서 라이다 모터가 멈춰 있을 때 자동으로 1회 기동."""
-        if self._motor_requested:
+        if not self.auto_start_lidar_motor or self.motor_client is None or self._motor_requested:
             return
         if time.time() - self.last_scan_WallTime > 2.2:
             self._motor_requested = True
@@ -421,6 +543,7 @@ class LidarPersonLocalizer:
         frame_height: int,
         publish: bool = True,
         frame_stamp: Optional[BuiltinTime] = None,
+        frame_rx_wall: Optional[float] = None,
     ) -> TargetLocalizationResult:
         x1, y1, x2, y2 = target.bbox
         cx, cy = target.center
@@ -432,10 +555,7 @@ class LidarPersonLocalizer:
         # top_cam_link 기준 (+X 정면, +Y 왼쪽, +Z 위):
         # 이미지 오른쪽(cx > W/2)은 -Y 방향, 이미지 왼쪽(cx < W/2)은 +Y 방향
         alpha_c = math.atan2(-(cx - half_w), fx)
-        alpha_left = math.atan2(-(x1 - half_w), fx)
-        alpha_right = math.atan2(-(x2 - half_w), fx)
-        bbox_span = abs(alpha_left - alpha_right)
-        half_sector = max(math.radians(3.5), min(math.radians(18.0), bbox_span * 0.35))
+        half_sector = self._compute_half_sector(target, half_w, fx)
 
         cam_dist_m: Optional[float] = None
         matched_rays = 0
@@ -443,7 +563,10 @@ class LidarPersonLocalizer:
         frame_time = Time.from_msg(frame_stamp) if _stamp_to_sec(frame_stamp) > 0.0 else None
 
         # 1. 이미지 시각과 동기화된 라이다 스캔을 선택해 top_cam_link 좌표계로 변환
-        scan, sync_dt_ms, _ = self._select_scan_for_stamp(frame_stamp)
+        scan, sync_dt_ms, _, clock_offset = self._select_scan_for_stamp(
+            frame_stamp, frame_rx_wall=frame_rx_wall
+        )
+        scan_time: Optional[Time] = None
         if scan is not None:
             lidar_frame = scan.header.frame_id or 'rplidar_link'
             scan_time = (
@@ -495,10 +618,7 @@ class LidarPersonLocalizer:
                         if np.any(in_sector):
                             dists = np.hypot(xc[in_sector], yc[in_sector])
                             matched_rays = int(dists.size)
-                            # 배경 벽면을 배제하고 앞쪽 사람 다리/몸통 클러스터(25백분위수 부근)를 선택
-                            p25 = float(np.percentile(dists, 25))
-                            cluster = dists[(dists >= p25 - 0.15) & (dists <= p25 + 0.25)]
-                            cam_dist_m = float(np.mean(cluster)) if cluster.size > 0 else p25
+                            cam_dist_m = self._select_cluster_distance(dists)
                             source = 'LiDAR'
 
         # 2. 라이다 포인트가 없을 때 바운딩 박스 크기 기반 폴백 추정
@@ -526,8 +646,11 @@ class LidarPersonLocalizer:
         base_angle_deg = math.degrees(math.atan2(base_xyz[1], base_xyz[0]))
 
         # 4. 저장된 맵(map) 기준 타겟 3D 좌표 변환 (AMCL 또는 도킹 시 Init+Odom 폴백)
+        # 시계 오차가 보정된 경우 로봇 TF(scan_time)와 출력 stamp(scan.header.stamp)를 로봇 시계에 정렬
+        use_scan_clock = (abs(clock_offset) > 0.0 and scan is not None and scan_time is not None)
+        robot_lookup_time = scan_time if use_scan_clock else frame_time
         map_xyz: Optional[Tuple[float, float, float]] = None
-        mat_map_from_base, map_source = self._get_map_from_base_matrix(frame_time)
+        mat_map_from_base, map_source = self._get_map_from_base_matrix(robot_lookup_time)
         if mat_map_from_base is not None:
             map_xyz = apply_transform_point(mat_map_from_base, base_xyz)
 
@@ -544,9 +667,11 @@ class LidarPersonLocalizer:
             map_source=map_source,
             matched_rays=matched_rays,
             sync_dt_ms=sync_dt_ms,
+            clock_offset_ms=(clock_offset * 1000.0 if abs(clock_offset) > 0.0 else None),
         )
         if publish:
-            self._publish_target_outputs(res, out_stamp=frame_stamp)
+            out_stamp = scan.header.stamp if use_scan_clock else frame_stamp
+            self._publish_target_outputs(res, out_stamp=out_stamp)
         return res
 
     def _publish_target_outputs(

@@ -31,7 +31,8 @@ from person_tracker.gesture_core import (
     HandGestureObservation,
     MultiTargetGestureManager,
     build_person_hand_rois,
-    find_best_hand_owner,
+    find_best_hand_owner_slot,
+    infer_fallback_hand_slot,
 )
 from person_tracker.multi_tracker_core import UnifiedTrackedPerson
 from person_tracker.reid_visualizer import ReIDDebugVisualizer
@@ -306,14 +307,16 @@ class GestureTestNode(BaseTrackerNode):
         label_prefix: str = '',
     ):
         x, y = anchor_xy
+        hand_tag = f'({prog.hand_label}) ' if prog.hand_label else ''
+        prefix = f'{label_prefix.rstrip()} {hand_tag}' if label_prefix else hand_tag
         if prog.state == STATE_TRIGGERED:
-            txt = f'{label_prefix}TARGET LOCKED!'
+            txt = f'{prefix}TARGET LOCKED!'
             col = (80, 255, 80)
         elif prog.state == STATE_FIST_ARMED:
-            txt = f'{label_prefix}OPEN PALM ({prog.open_count}/{prog.open_target})'
+            txt = f'{prefix}OPEN PALM ({prog.open_count}/{prog.open_target})'
             col = (0, 255, 255)
         else:
-            txt = f'{label_prefix}Fist ({prog.fist_count}/{prog.fist_target})'
+            txt = f'{prefix}Fist ({prog.fist_count}/{prog.fist_target})'
             col = (200, 200, 200) if prog.fist_count == 0 else (0, 180, 255)
 
         cv2.putText(
@@ -349,8 +352,8 @@ class GestureTestNode(BaseTrackerNode):
 
         active_ids = [p.track_id for p in detections]
         person_tuples = [(p.track_id, p.bbox, p.keypoints) for p in detections]
-        assigned_obs: Dict[int, List[HandGestureObservation]] = {
-            p.track_id: [] for p in detections
+        assigned_slot_obs: Dict[int, Dict[str, List[HandGestureObservation]]] = {
+            p.track_id: {} for p in detections
         }
         for person in detections:
             if (person.bbox[2] - person.bbox[0]) < self.min_person_width_px:
@@ -359,7 +362,7 @@ class GestureTestNode(BaseTrackerNode):
             rois[person.track_id] = person_rois
             for roi_box, _ in person_rois:
                 for obs in self.gesture_detector.detect_in_roi(frame, roi=roi_box):
-                    owner = find_best_hand_owner(
+                    owner = find_best_hand_owner_slot(
                         obs,
                         person_tuples,
                         min_palm_scale_px=self.min_palm_scale_px,
@@ -367,22 +370,34 @@ class GestureTestNode(BaseTrackerNode):
                         require_pose_wrist=self.require_pose_wrist,
                     )
                     if owner is not None:
-                        assigned_obs[owner[0]].append(obs)
+                        owner_id, hand_slot, _ = owner
+                        assigned_slot_obs[owner_id].setdefault(hand_slot, []).append(obs)
 
         for person in detections:
-            primary = self.gesture_detector.pick_primary_observation(
-                assigned_obs.get(person.track_id, [])
+            per_slot_primary: Dict[str, HandGestureObservation] = {}
+            for hand_slot, slot_list in assigned_slot_obs.get(person.track_id, {}).items():
+                chosen = self.gesture_detector.pick_primary_observation(slot_list)
+                if chosen is not None:
+                    per_slot_primary[hand_slot] = chosen
+                    observations.append(chosen)
+
+            slot_progs = self.gesture_mgr.update_person_hands(
+                person.track_id, per_slot_primary, now=now_wall
             )
-            if primary is not None:
-                observations.append(primary)
-            prog = self.gesture_mgr.update(person.track_id, primary, now=now_wall)
+            prog = self.gesture_mgr.pick_best_progress(
+                slot_progs, fallback_subject_id=person.track_id
+            )
             progresses[person.track_id] = prog
-            if prog.just_triggered:
+            triggered_prog = next((sp for sp in slot_progs if sp.just_triggered), None)
+            if triggered_prog is not None:
                 locked_id = self.tracker.select_target_by_id(person.track_id)
                 person.is_target = True
                 target = person
                 registered_now = True
-                self.get_logger().info(f'[제스처 타겟 등록] ID={locked_id} (주먹->펴기 완료)')
+                progresses[person.track_id] = triggered_prog
+                self.get_logger().info(
+                    f'[제스처 타겟 등록] ID={locked_id} hand={triggered_prog.hand_label} (주먹->펴기 완료)'
+                )
                 self._publish_status(f'TRIGGERED:id={locked_id}')
                 break
 
@@ -448,9 +463,18 @@ class GestureTestNode(BaseTrackerNode):
         else:
             t_g0 = time.perf_counter()
             obs_list = self.gesture_detector.detect_in_roi(frame, roi=None)
-            observations.extend(obs_list)
-            primary = self.gesture_detector.pick_primary_observation(obs_list)
-            prog = self.gesture_mgr.update(0, primary, now=now_wall)
+            slot_lists: Dict[str, List[HandGestureObservation]] = {}
+            mid_x = frame.shape[1] * 0.5
+            for obs in obs_list:
+                slot_lists.setdefault(infer_fallback_hand_slot(obs, mid_x), []).append(obs)
+            per_slot_primary = {}
+            for hand_slot, s_list in slot_lists.items():
+                chosen = self.gesture_detector.pick_primary_observation(s_list)
+                if chosen is not None:
+                    per_slot_primary[hand_slot] = chosen
+                    observations.append(chosen)
+            slot_progs = self.gesture_mgr.update_person_hands(0, per_slot_primary, now=now_wall)
+            prog = self.gesture_mgr.pick_best_progress(slot_progs, fallback_subject_id=0)
             progresses[0] = prog
             t_gesture_ms = (time.perf_counter() - t_g0) * 1000.0
             if prog.just_triggered:

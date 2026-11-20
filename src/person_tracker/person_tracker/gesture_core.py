@@ -79,6 +79,7 @@ class GestureProgress:
     progress: float                         # 0.0 ~ 1.0 전체 진행률
     just_triggered: bool
     observation: Optional[HandGestureObservation] = None
+    hand_label: str = ''                    # 손 슬롯 식별자 ('L', 'R', 'H_L', 'H_R' 등)
 
 
 def _dist(pt_a: np.ndarray, pt_b: np.ndarray) -> float:
@@ -269,8 +270,10 @@ class FistOpenStateMachine:
         grace_frames: int = 3,
         armed_timeout_sec: float = 2.5,
         cooldown_sec: float = 1.5,
+        hand_label: str = '',
     ):
         self.subject_id = subject_id
+        self.hand_label = hand_label
         self.fist_hold_frames = max(1, int(fist_hold_frames))
         self.open_hold_frames = max(1, int(open_hold_frames))
         self.grace_frames = max(0, int(grace_frames))
@@ -387,11 +390,12 @@ class FistOpenStateMachine:
             progress=progress,
             just_triggered=just_triggered,
             observation=obs,
+            hand_label=self.hand_label,
         )
 
 
 class MultiTargetGestureManager:
-    """사람 ID별로 독립적인 FistOpenStateMachine을 관리하고 오래 안 보인 대상을 정리합니다."""
+    """사람 ID 및 손(왼손/오른손 슬롯)별로 독립적인 FistOpenStateMachine을 관리합니다."""
 
     def __init__(
         self,
@@ -408,7 +412,7 @@ class MultiTargetGestureManager:
         self.armed_timeout_sec = armed_timeout_sec
         self.cooldown_sec = cooldown_sec
         self.stale_sec = stale_sec
-        self._machines: Dict[int, FistOpenStateMachine] = {}
+        self._machines: Dict[Tuple[int, str], FistOpenStateMachine] = {}
 
     def set_thresholds(self, fist_hold_frames: int, open_hold_frames: int):
         self.fist_hold_frames = max(1, int(fist_hold_frames))
@@ -419,34 +423,94 @@ class MultiTargetGestureManager:
     def reset_all(self):
         self._machines.clear()
 
-    def update(
-        self,
-        subject_id: int,
-        obs: Optional[HandGestureObservation],
-        now: Optional[float] = None,
-    ) -> GestureProgress:
-        sm = self._machines.get(subject_id)
+    def _get_or_create(self, subject_id: int, hand_label: str) -> FistOpenStateMachine:
+        key = (int(subject_id), str(hand_label))
+        sm = self._machines.get(key)
         if sm is None:
             sm = FistOpenStateMachine(
-                subject_id=subject_id,
+                subject_id=int(subject_id),
                 fist_hold_frames=self.fist_hold_frames,
                 open_hold_frames=self.open_hold_frames,
                 grace_frames=self.grace_frames,
                 armed_timeout_sec=self.armed_timeout_sec,
                 cooldown_sec=self.cooldown_sec,
+                hand_label=str(hand_label),
             )
-            self._machines[subject_id] = sm
-        return sm.update(obs, now=now)
+            self._machines[key] = sm
+        return sm
+
+    def update(
+        self,
+        subject_id: int,
+        obs: Optional[HandGestureObservation],
+        now: Optional[float] = None,
+        hand_label: str = '',
+    ) -> GestureProgress:
+        return self._get_or_create(subject_id, hand_label).update(obs, now=now)
+
+    def update_person_hands(
+        self,
+        subject_id: int,
+        slot_observations: Dict[str, HandGestureObservation],
+        now: Optional[float] = None,
+    ) -> List[GestureProgress]:
+        """사람 1명의 손 슬롯별 관측을 각각 독립 상태머신으로 갱신합니다."""
+        t = time.time() if now is None else now
+        sid = int(subject_id)
+        existing_slots = [label for (k_sid, label) in self._machines if k_sid == sid]
+        all_slots = set(existing_slots) | set(slot_observations.keys())
+
+        results: List[GestureProgress] = []
+        for label in sorted(all_slots):
+            obs = slot_observations.get(label)
+            sm = self._get_or_create(sid, label)
+            prog = sm.update(obs, now=t)
+            if obs is None and (t - sm.last_seen_time) > self.stale_sec:
+                self._machines.pop((sid, label), None)
+                continue
+            results.append(prog)
+        return results
+
+    @staticmethod
+    def pick_best_progress(
+        progresses: List[GestureProgress],
+        fallback_subject_id: int = 0,
+    ) -> GestureProgress:
+        """한 사람의 여러 손 상태머신 중 가장 우선순위가 높은 진행 상태를 선택합니다."""
+        if not progresses:
+            return GestureProgress(
+                subject_id=int(fallback_subject_id),
+                state=STATE_IDLE,
+                last_gesture=GESTURE_IDLE,
+                fist_count=0,
+                fist_target=4,
+                open_count=0,
+                open_target=4,
+                progress=0.0,
+                just_triggered=False,
+                observation=None,
+                hand_label='',
+            )
+
+        def _rank(p: GestureProgress) -> Tuple[int, int, float, int]:
+            state_pri = (
+                3 if p.just_triggered or p.state == STATE_TRIGGERED
+                else (2 if p.state == STATE_FIST_ARMED else 1)
+            )
+            return (state_pri, p.fist_count, p.progress, 1 if p.observation is not None else 0)
+
+        return max(progresses, key=_rank)
 
     def prune_stale(self, active_ids: List[int], now: Optional[float] = None):
         t = time.time() if now is None else now
         active_set = set(active_ids)
         stale_keys = [
-            sid for sid, sm in self._machines.items()
-            if sid not in active_set and (t - sm.last_seen_time) > self.stale_sec
+            key for key, sm in self._machines.items()
+            if (key[0] not in active_set and (t - sm.last_seen_time) > self.stale_sec)
+            or (key[0] in active_set and (t - sm.last_seen_time) > self.stale_sec and sm.state == STATE_IDLE)
         ]
-        for sid in stale_keys:
-            del self._machines[sid]
+        for key in stale_keys:
+            del self._machines[key]
 
 
 def build_person_gesture_roi(
@@ -607,26 +671,30 @@ def is_false_face_detection(
     return True
 
 
-def match_hand_to_person_wrist(
+def infer_fallback_hand_slot(
+    obs: HandGestureObservation,
+    ref_center_x: Optional[float] = None,
+) -> str:
+    """Pose 손목이 보이지 않을 때 MediaPipe 좌/우(또는 화면 좌/우)로 손 슬롯을 구분합니다."""
+    if obs.handedness in ('Left', 'Right'):
+        return 'H_L' if obs.handedness == 'Left' else 'H_R'
+    if ref_center_x is not None:
+        hcx = 0.5 * (obs.hand_bbox[0] + obs.hand_bbox[2])
+        return 'H_xL' if hcx < ref_center_x else 'H_xR'
+    return 'H_any'
+
+
+def match_hand_to_person_wrist_slot(
     obs: HandGestureObservation,
     bbox: Tuple[int, int, int, int],
     keypoints: Optional[np.ndarray],
     min_palm_scale_px: float = 12.0,
     min_person_width_px: int = 44,
     require_pose_wrist: bool = False,
-) -> Optional[float]:
+) -> Optional[Tuple[float, str]]:
     """
-    검출된 손(MediaPipe 손목 landmark[0])과 사람의 YOLO-Pose 손목(9, 10)을 거리 매칭합니다.
-
-    [필터링 및 매칭 원리]
-    1. 원거리/크기 하한 필터: 사람 폭 `< min_person_width_px`(44px) 또는
-       손바닥 크기 `< min_palm_scale_px`(12px) / `> bw * 0.85`인 비정상 스케일을 제거합니다.
-    2. 얼굴 오검출 제외: `is_false_face_detection()` 통과 여부 검사.
-    3. 1:1 손목 매칭: Pose 손목(9,10)이 보이면 허용 반경(`max(32px, 어깨폭*0.72, palm_scale*2.2)`)
-       이내의 최소 픽셀 거리를 반환합니다.
-    4. 폴백 매칭: `require_pose_wrist=False`이고 Pose 손목이 가려진 경우에만 상반신 영역 포함 여부를 검사하고
-       손목 매칭보다 항상 불리한 페널티 거리(`max(60px, bw*0.85)`)를 반환합니다.
-    - 조건 불충족 시 None을 반환합니다.
+    검출된 손(MediaPipe 손목 landmark[0])과 사람의 YOLO-Pose 손목(9:L, 10:R)을 매칭하여
+    `(픽셀 거리, 손 슬롯)`을 반환합니다.
     """
     x1, y1, x2, y2 = bbox
     bw = max(1, x2 - x1)
@@ -640,12 +708,12 @@ def match_hand_to_person_wrist(
     if is_false_face_detection(obs, bbox, keypoints):
         return None
 
-    # Pose 양 손목(9:왼손목, 10:오른손목) 중 가시성 기준 통과 좌표 수집
-    visible_wrists = []
+    # Pose 양 손목(9:왼손목='L', 10:오른손목='R') 중 가시성 기준 통과 좌표 수집
+    visible_wrists: List[Tuple[str, np.ndarray]] = []
     if keypoints is not None and len(keypoints) >= 11:
-        for wrist_i in (9, 10):
+        for wrist_i, slot_name in ((9, 'L'), (10, 'R')):
             if float(keypoints[wrist_i, 2]) >= 0.25:
-                visible_wrists.append(keypoints[wrist_i, :2])
+                visible_wrists.append((slot_name, keypoints[wrist_i, :2]))
 
     if visible_wrists:
         # 손목 매칭 허용 반경: 어깨 폭 또는 BBox·손 크기에 비례해 원거리/근거리 모두 적응
@@ -656,9 +724,12 @@ def match_hand_to_person_wrist(
             wrist_tol = max(32.0, bw * 0.45, obs.palm_scale_px * 2.2)
 
         hand_wrist_px = obs.landmarks_px[0]  # MediaPipe 0번 랜드마크(손목 중심)
-        min_d = min(_dist(hand_wrist_px, w_pt) for w_pt in visible_wrists)
+        best_slot, min_d = min(
+            ((slot_name, _dist(hand_wrist_px, w_pt)) for slot_name, w_pt in visible_wrists),
+            key=lambda item: item[1],
+        )
         if min_d <= wrist_tol:
-            return float(min_d)
+            return float(min_d), best_slot
         return None
 
     if require_pose_wrist:
@@ -669,8 +740,59 @@ def match_hand_to_person_wrist(
     hcy = 0.5 * (hy1 + hy2)
     if (x1 - bw * 0.25) <= hcx <= (x2 + bw * 0.25) and y1 <= hcy <= (y1 + bh * 0.85):
         # 손목 키포인트 기반 매칭보다 항상 후순위가 되도록 페널티 거리 부여
-        return float(max(60.0, bw * 0.85))
+        return float(max(60.0, bw * 0.85)), infer_fallback_hand_slot(obs, 0.5 * (x1 + x2))
     return None
+
+
+def match_hand_to_person_wrist(
+    obs: HandGestureObservation,
+    bbox: Tuple[int, int, int, int],
+    keypoints: Optional[np.ndarray],
+    min_palm_scale_px: float = 12.0,
+    min_person_width_px: int = 44,
+    require_pose_wrist: bool = False,
+) -> Optional[float]:
+    """
+    검출된 손(MediaPipe 손목 landmark[0])과 사람의 YOLO-Pose 손목(9, 10)을 거리 매칭합니다.
+    """
+    matched = match_hand_to_person_wrist_slot(
+        obs,
+        bbox,
+        keypoints,
+        min_palm_scale_px=min_palm_scale_px,
+        min_person_width_px=min_person_width_px,
+        require_pose_wrist=require_pose_wrist,
+    )
+    return matched[0] if matched is not None else None
+
+
+def find_best_hand_owner_slot(
+    obs: HandGestureObservation,
+    persons: List[Tuple[int, Tuple[int, int, int, int], Optional[np.ndarray]]],
+    min_palm_scale_px: float = 12.0,
+    min_person_width_px: int = 44,
+    require_pose_wrist: bool = False,
+) -> Optional[Tuple[int, str, float]]:
+    """검출된 손 1개에 대해 가장 가까운 주인과 손 슬롯 `(track_id, hand_slot, dist_px)`를 찾습니다."""
+    best_id: Optional[int] = None
+    best_slot = ''
+    best_dist = float('inf')
+    for track_id, bbox, keypoints in persons:
+        matched = match_hand_to_person_wrist_slot(
+            obs,
+            bbox,
+            keypoints,
+            min_palm_scale_px=min_palm_scale_px,
+            min_person_width_px=min_person_width_px,
+            require_pose_wrist=require_pose_wrist,
+        )
+        if matched is not None and matched[0] < best_dist:
+            best_dist = matched[0]
+            best_slot = matched[1]
+            best_id = track_id
+    if best_id is None:
+        return None
+    return best_id, best_slot, best_dist
 
 
 def find_best_hand_owner(
@@ -683,20 +805,13 @@ def find_best_hand_owner(
     """
     검출된 손 1개에 대해 전체 사람 목록 중 손목 거리가 가장 가까운 주인(track_id, dist_px)을 찾습니다.
     """
-    best_id: Optional[int] = None
-    best_dist = float('inf')
-    for track_id, bbox, keypoints in persons:
-        d = match_hand_to_person_wrist(
-            obs,
-            bbox,
-            keypoints,
-            min_palm_scale_px=min_palm_scale_px,
-            min_person_width_px=min_person_width_px,
-            require_pose_wrist=require_pose_wrist,
-        )
-        if d is not None and d < best_dist:
-            best_dist = d
-            best_id = track_id
-    if best_id is None:
+    owner = find_best_hand_owner_slot(
+        obs,
+        persons,
+        min_palm_scale_px=min_palm_scale_px,
+        min_person_width_px=min_person_width_px,
+        require_pose_wrist=require_pose_wrist,
+    )
+    if owner is None:
         return None
-    return best_id, best_dist
+    return owner[0], owner[2]
