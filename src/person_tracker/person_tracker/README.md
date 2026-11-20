@@ -78,10 +78,10 @@ flowchart TD
 ```
 
 - **함수 바로 이동 (등록 모듈 순서)**:
-  - 입력·탐지: [`_compressed_cb()`](./base_tracker_node.py#L264) / [`_raw_cb()`](./base_tracker_node.py#L273) / [`_poll_local_frame()`](./base_tracker_node.py#L255) → [`handle_frame()`](./gesture_test_node.py#L393) → [`process_frame()`](./multi_tracker_core.py#L521)
-  - 손 ROI·분류: [`build_person_hand_rois()`](./gesture_core.py#L514) ([`_clamp_square_roi()`](./gesture_core.py#L497) / [`build_person_gesture_roi()`](./gesture_core.py#L452)) → [`detect_in_roi()`](./gesture_core.py#L168) → [`classify_hand_gesture()`](./gesture_core.py#L88)
-  - 얼굴 제외·손목 1:1 매칭: [`find_best_hand_owner()`](./gesture_core.py#L676) → [`match_hand_to_person_wrist()`](./gesture_core.py#L610) ([`is_false_face_detection()`](./gesture_core.py#L561)) → [`pick_primary_observation()`](./gesture_core.py#L239)
-  - 상태머신·잠금: [`MultiTargetGestureManager.update()`](./gesture_core.py#L422) → [`FistOpenStateMachine.update()`](./gesture_core.py#L299) → [`select_target_by_id()`](./multi_tracker_core.py#L501) → [`_activate_target()`](./multi_tracker_core.py#L483) → [`_lock_target_bank()`](./multi_tracker_core.py#L458)
+  - 입력·탐지: [`_compressed_cb()`](./base_tracker_node.py#L264) / [`_raw_cb()`](./base_tracker_node.py#L273) / [`_poll_local_frame()`](./base_tracker_node.py#L255) → [`handle_frame()`](./gesture_test_node.py#L408) → [`process_frame()`](./multi_tracker_core.py#L521)
+  - 손 ROI·분류: [`build_person_hand_rois()`](./gesture_core.py#L578) ([`_clamp_square_roi()`](./gesture_core.py#L561) / [`build_person_gesture_roi()`](./gesture_core.py#L516)) → [`detect_in_roi()`](./gesture_core.py#L169) → [`classify_hand_gesture()`](./gesture_core.py#L89)
+  - 얼굴 제외·손목 1:1 매칭: [`find_best_hand_owner_slot()`](./gesture_core.py#L769) → [`match_hand_to_person_wrist_slot()`](./gesture_core.py#L687) ([`is_false_face_detection()`](./gesture_core.py#L625)) → [`pick_primary_observation()`](./gesture_core.py#L240)
+  - 상태머신·잠금: [`MultiTargetGestureManager.update_person_hands()`](./gesture_core.py#L451) → [`FistOpenStateMachine.update()`](./gesture_core.py#L302) → [`select_target_by_id()`](./multi_tracker_core.py#L501) → [`_activate_target()`](./multi_tracker_core.py#L483) → [`_lock_target_bank()`](./multi_tracker_core.py#L458)
 
 ---
 
