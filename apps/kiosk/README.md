@@ -91,8 +91,8 @@ apps/kiosk/
 ## 관람 버튼과 서버 흐름
 
 1. **로봇 호출** — 브라우저가 `POST /api/sessions`로 관람 세션을 만들고 `POST /api/sessions/<id>/preparation`을 보냅니다. Flask가 관람 방식에 따라 로봇을 배정하고 `prepare_tour` Goal을 전송합니다.
-2. **준비 상태 표시** — `GET /api/sessions/<id>/preparation/events`의 서버 전송 이벤트(SSE)로 최신 준비 상태를 받습니다. 준비 액션이 성공하면 **관람 시작하기** 버튼이 활성화됩니다.
-3. **관람 시작하기** — 브라우저가 `PATCH /api/sessions/<id>`에 `{"status":"active"}`를 보냅니다. Flask가 준비 상태를 확인하고 `start_tour` Goal을 전송합니다.
+2. **준비 상태 표시** — `GET /api/sessions/<id>/preparation/events`의 서버 전송 이벤트(SSE)로 최신 준비 상태를 받습니다.
+3. **자동 시작** — 준비 액션이 성공하면 Flask가 세션을 활성화하고 `start_tour` Goal을 전송합니다. 로봇이 Goal을 수락하면 브라우저는 관람 안내 화면으로 이동합니다.
 4. **관람 진행·종료** — 완료한 작품과 관람 결과는 `TourSession`에 반영됩니다. 사용자가 진행 중인 작업을 취소하면 키오스크가 ROS 액션 취소를 요청합니다.
 
 실제 Goal 전송 코드는 [robot_preparation.py](robot_preparation.py)의 `RosPreparationTransport.action()` 안에 있는 `send_goal_async()`입니다. 브라우저 Network 탭에서는 HTTP 요청을, ROS에서는 각 액션의 `/_action/status`와 `/_action/feedback` 토픽을 확인할 수 있습니다.
@@ -103,7 +103,7 @@ apps/kiosk/
 
 | 인터페이스 | 방향 | 데이터 |
 | --- | --- | --- |
-| `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 준비 액션이 성공한 뒤 관람 시작 버튼을 활성화합니다. |
+| `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 성공 결과를 받으면 서버가 관람을 시작합니다. |
 | `/<robot>/arti/start_tour` (`StartTour`) | 키오스크 → 로봇 | 자유 관람 `/robot1`에는 `artwork_ids: []`, 코스 관람 `/robot4`에는 정수 작품 ID 목록을 보냅니다. |
 | `/arti/description` (`Description`) | 로봇 → 키오스크 | 정수 작품 ID로 SQLite의 `Art` 테이블에서 설명을 조회합니다. |
 | `/<robot>/battery_state`, `/<robot>/dock_status` | 로봇 → 키오스크 | 두 로봇의 배터리와 도킹 상태를 구독합니다. |
