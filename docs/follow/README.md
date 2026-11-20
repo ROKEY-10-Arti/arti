@@ -61,7 +61,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 ```
 좌표: 칼만 필터(등속)로 위치·속도를 매끄럽게, 예측에서 너무 먼 좌표는 버림
 목표: 관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
-회피: LiDAR + Depth 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(BFS)
+회피: LiDAR 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(최단 거리, SciPy 다익스트라)
       → (v, w) 후보를 1.5 s 굴려 보고, 안 부딪히면서(로봇 반지름 0.2 + 여유 0.05) 끝점의 그 거리가 가장 작은 것 (DWA)
 ```
 
