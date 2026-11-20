@@ -28,9 +28,10 @@ def machine(**kw):
 
 
 def stop_at(m, pose, t):
-    """pose에서 반원 진입 -> Nav2 취소 결과 -> 정지 확인까지 진행. 마지막 tick의 Event 반환."""
+    """pose에서 반원 진입 -> Nav2 취소 결과 -> 정지 확인까지 진행. 마지막 tick의 Event 반환.
+    키오스크(kiosk_stop_at_goal)는 취소 없이 goal_pose까지 가므로 Nav2 SUCCEEDED로 도착."""
     m.tick(t, pose, 0, 0, 0)
-    m.nav_result('CANCELED', t)
+    m.nav_result('SUCCEEDED' if m.state == 'NAV_KIOSK' else 'CANCELED', t)
     m.tick(t + .1, pose, 0, 0, 0)
     return m.tick(t + 1, pose, 0, 0, 0)
 
@@ -136,8 +137,43 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(m.state, 'REGISTERING')
         self.assertIn(Event('guide', 'register'), ev)
 
+    def test_kiosk_goes_to_goal_not_zone_edge(self):
+        """[⑪] 키오스크 반원에 들어서도 Nav2를 취소하지 않고 goal_pose까지 감 → SUCCEEDED로 정지 확인."""
+        m, z = self.m, self.m.plan.kiosk_zone
+        edge = Pose2D(z.cx + 0.45, z.cy + 0.30, 0.0)               # 반원 안 가장자리
+        self.assertTrue(z.contains(edge))
+        ev = m.tick(1, edge, 0, 0.2, 0)
+        self.assertEqual(m.state, 'NAV_KIOSK')                    # 안 멈춤
+        self.assertNotIn(Event('cancel', None), ev)
+        m.nav_result('SUCCEEDED', 1.5)                            # goal_pose 도착
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        old = machine(kiosk_stop_at_goal=False)                   # 전 방식: 진입 즉시 취소
+        old.tick(1, edge, 0, 0.2, 0)
+        self.assertEqual(old.state, 'CANCELING')
+
+    def test_kiosk_aborted_inside_zone_counts_as_arrived(self):
+        """[⑪] 목표 바로 앞에서 Nav2 ABORTED여도 반원 안이면 도착. 반원 밖이면 복구."""
+        m, g = self.m, self.m.plan.kiosk_goal
+        m.tick(1, Pose2D(g.x, g.y - 0.1, g.yaw), 0, 0, 0)
+        m.nav_result('ABORTED', 2)
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        m2 = machine()
+        m2.tick(1, Pose2D(0, 0), 0, 0, 0)                          # 도크 앞, 반원 밖
+        m2.nav_result('ABORTED', 2)
+        self.assertEqual(m2.state, 'WAIT_RECOVERY')
+
+    def test_kiosk_turn_to_plane_from_side(self):
+        """[⑪] 어디에 서든 등이 키오스크 면을 보게 = 정면이 zone.direction."""
+        m, z = self.m, self.m.plan.kiosk_zone
+        p = Pose2D(z.cx + 0.45, z.cy + 0.30, math.radians(176))
+        ev = stop_at(m, p, 1)
+        self.assertEqual(m.state, 'FACE_KIOSK')
+        turn = [e.value for e in ev if e.kind == 'spin'][0]
+        self.assertAlmostEqual(math.cos(p.yaw + turn - z.direction), 1.0, places=6)
+
     def test_kiosk_turn_back_to_kiosk_from_side(self):
-        """반원 옆(동쪽)에서 서쪽을 보고 멈춤 → 등이 키오스크(반원 중심)를 보게 약 180° (고정 yaw면 -85°만 돎)."""
+        """kiosk_face_target='center'(전): 반원 옆(동쪽)에서 서쪽을 보고 멈춤 → 등이 반원 중심을 보게 약 180°."""
+        self.m = machine(register_timeout=60, ready_timeout=130, kiosk_face_target='center')
         m, z = self.m, self.m.plan.kiosk_zone
         p = Pose2D(z.cx + 0.45, z.cy + 0.30, math.radians(176))   # 실주행 2026-11-20과 비슷한 자리
         ev = stop_at(m, p, 1)

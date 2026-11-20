@@ -84,7 +84,7 @@ robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_co
 
 ## 초기 대비 바뀐 점 (코스 관람, 2026-11-20)
 
-11/19 첫 실주행 뒤 고친 것. 코드에는 같은 번호로 `[코스 관람 변경 ③]`처럼 표시해 두었다 → `grep -rn "코스 관람 변경 ③" src/`.
+11/19 첫 실주행 뒤 고친 것 (⑪은 11/20 실주행 뒤). 코드에는 같은 번호로 `[코스 관람 변경 ③]`처럼 표시해 두었다 → `grep -rn "코스 관람 변경 ③" src/`.
 
 | # | 바뀐 것 | 왜 (전에 생긴 문제) | 어디를 보면 되나 |
 |---|---|---|---|
@@ -98,6 +98,7 @@ robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_co
 | ⑧ | 해설 중 반원 밖 0.15 m·3 s까지 봐줌 | 호 바로 안쪽에 서서 AMCL이 한 번 튀면 0.7 s 만에 실패 | `course_engine.py` `_explain_ok`, `tick` (5), `explanation_result` |
 | ⑨ | 도킹 접근 원에서 정면이 도크를 보게 spin 후 Dock | 도크를 안 보고 Dock → Create 3가 앞 벽에 부딪혀 실패 | `course_engine.py` `FACE_DOCK`, `_dock_turn` / `a_course.yaml` dock |
 | ⑩ | 인식 노드가 웹캠 직접 열기, `camera_pub` 안 띄움 (`direct_camera`) | 영상이 토픽을 거치고, 같은 웹캠을 두 번 엶 | launch `_tracker` (인식 노드에 `video_source`를 넘기고 `phone_camera.launch.py` `publish_camera:=false`. person_tracker 코드는 안 고침) |
+| ⑪ | 키오스크는 반원 진입 즉시 말고 `kiosk.goal_pose`(RViz로 찍은 자리)까지 가서 서고, 등이 키오스크 면을 똑바로 보게 회전 (`kiosk_stop_at_goal`, `kiosk_face_target: plane`) | 반원 가장자리에 서서 서는 자리·방향이 매번 달라, 관람 시작 때 그림 1 쪽으로 크게 휙 돎 | `course_engine.py` `tick` (1), `nav_result`, `_kiosk_turn` / `a_course.yaml` kiosk |
 
 그 밖에: 로봇 OAK-D 끔 (robot4는 웹캠 사용, 로봇 `standard.launch.py`에서 주석 처리 — 저장소 밖).
 
@@ -184,6 +185,7 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `dock_face` | true | 도킹 접근 원에서 멈춘 뒤 정면이 충전 스테이션(`dock.station`)을 보게 Nav2 spin → Dock. 도크를 안 보고 Dock하면 Create 3가 찾다가 앞 벽에 부딪혀 실패 (2026-11-20). 허용 각도·시간은 `face_tolerance`·`face_timeout` |
 | `explain_zone_margin` / `explain_lost_grace` | 0.15 / 3.0 | 해설 중 반원 밖 0.15 m까지는 안으로 보고, 밖·위치 끊김이 3 s 넘게 계속될 때만 실패 (호 바로 안쪽에 멈춰 AMCL 흔들림으로 바로 실패하던 문제) [m, s] |
 | `kiosk_face` / `face_tolerance` / `face_timeout` | true / 0.35 / 20.0 | 키오스크 반원에서 멈춘 뒤 등(웹캠이 뒤를 봄)이 키오스크(반원 중심)를 보게 Nav2 spin 제자리 회전 → 등록 시작. 차이가 0.35 rad 이하면 안 돎, 20 s 넘거나 실패하면 그대로 등록 [rad, s] |
+| `kiosk_stop_at_goal` / `kiosk_face_target` | true / `plane` | [⑪] true: 키오스크 반원에 들어서도 멈추지 않고 `kiosk.goal_pose`까지 감 (반원 안에서 Nav2 ABORTED면 도착으로 봄). `plane`: 도착 뒤 정면 = 반원 방향(`zone.direction`) → 등(웹캠)이 키오스크 면을 똑바로 봄. 전 방식은 false / `center` |
 | `set_initial_pose` / `start_pose_file` / `start_point` | true / `''`(= arti_common `init_pose.yaml`) / `undock` | 언독 직후 initialpose로 보낼 위치 |
 | `post_undock_sensor_timeout` / `post_undock_settle_time` | 60.0 / 3.0 | 언독 후 scan·AMCL·TF·Nav2 준비 대기 / 연속 유지 [s]. 넘으면 재도킹 |
 | `visitor_topic` | `target_person/point_map` | person_tracker 출력 |

@@ -35,6 +35,7 @@ cmd_vel은 절대 발행하지 않습니다. 이동은 Nav2 컨트롤러만 담�
   ⑧ 해설 중 위치 여유    반원 밖 0.15 m·3 s까지 봐줌 (전: AMCL이 한 번 튀면 0.7 s 만에 실패)
   ⑨ 도킹 전 회전        접근 원에서 정면이 도크를 보게 spin 후 Dock (전: 도크를 안 보고 Dock → 앞 벽에 부딪혀 실패)
   ⑩ 웹캠 직접 받기      인식 노드가 웹캠을 직접 엶, camera_pub 안 띄움 (전: 영상 토픽 경유, 같은 웹캠 두 번 열기)
+  ⑪ 키오스크 정지 위치  반원 진입 즉시 말고 goal_pose(RViz로 찍은 자리)까지 가서 서고, 등이 키오스크 면을 보게 회전 (전: 가장자리에 서서 관람 시작 때 그림 1 쪽으로 휙 돎)
 """
 from __future__ import annotations
 import collections
@@ -140,6 +141,10 @@ class ACourseNode(Node):
         self.declare_parameter('kiosk_face', True)
         self.declare_parameter('face_tolerance', 0.35)         # 목표 방향과 이 이하 차이면 안 돎 [rad] (약 20°)
         self.declare_parameter('face_timeout', 20.0)           # 회전 결과 대기 제한 → 넘으면 그대로 다음 단계 [s]
+        # [코스 관람 변경 ⑪] 키오스크: 반원 진입 즉시 멈추지 않고 a_course.yaml kiosk.goal_pose(RViz로 찍은 자리)까지 감,
+        # 도착 뒤 등이 키오스크 면을 똑바로 보게 회전 (전: 반원 가장자리에서 멈춰 관람 시작 때 그림 1 쪽으로 크게 돎)
+        self.declare_parameter('kiosk_stop_at_goal', True)     # false = 전처럼 반원 진입 즉시 정지
+        self.declare_parameter('kiosk_face_target', 'plane')   # 'plane' = 키오스크 면(zone.direction) / 'center' = 반원 중심(전)
         # [코스 관람 변경 ⑨] 도킹 접근 원에서 정지 후 정면이 충전 스테이션을 보게 회전하고 Dock (course_engine FACE_DOCK 주석 참고).
         # 2026-11-20: 도크를 안 보고 선 채 Dock → Create 3가 찾다가 앞 벽에 부딪혀 Dock 실패.
         self.declare_parameter('dock_face', True)
@@ -241,6 +246,8 @@ class ACourseNode(Node):
                 kiosk_face=bool(self.get_parameter('kiosk_face').value),
                 face_tolerance=float(self.get_parameter('face_tolerance').value),
                 face_timeout=float(self.get_parameter('face_timeout').value),
+                kiosk_stop_at_goal=bool(self.get_parameter('kiosk_stop_at_goal').value),
+                kiosk_face_target=str(self.get_parameter('kiosk_face_target').value),
                 dock_face=bool(self.get_parameter('dock_face').value),
                 explain_zone_margin=float(self.get_parameter('explain_zone_margin').value),
                 explain_lost_grace=float(self.get_parameter('explain_lost_grace').value))

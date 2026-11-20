@@ -87,6 +87,7 @@ class TourMachine:
                  distance_window: float = 1.0, far_hold: float = 1.0,
                  near_hold: float = 0.5, come_here_interval: float = 8.0,
                  kiosk_face: bool = True, face_tolerance: float = 0.35, face_timeout: float = 20.0,
+                 kiosk_stop_at_goal: bool = True, kiosk_face_target: str = 'plane',
                  dock_face: bool = True,
                  explain_zone_margin: float = 0.15, explain_lost_grace: float = 3.0):
         # --- 설정값 (단위: 초 / m) ---
@@ -109,6 +110,11 @@ class TourMachine:
         self.kiosk_face = kiosk_face               # False면 회전 없이 바로 등록
         self.face_tolerance = face_tolerance       # 목표 방향과 이 이하 차이면 회전 생략 [rad]
         self.face_timeout = face_timeout           # 회전 결과가 이 안에 안 오면 그대로 다음 단계(등록/Dock) [s]
+        # --- [코스 관람 변경 ⑪] 키오스크: 찍은 자리(goal_pose)까지 가서 서고, 키오스크 면을 기준으로 돌기 ---
+        self.kiosk_stop_at_goal = kiosk_stop_at_goal   # True: goal_pose까지 감 / False: 전처럼 반원 진입 즉시 정지
+        if kiosk_face_target not in ('plane', 'center'):
+            raise ValueError(f"kiosk_face_target은 'plane' 또는 'center': {kiosk_face_target!r}")
+        self.kiosk_face_target = kiosk_face_target     # 'plane': 등이 키오스크 면을 봄 / 'center': 등이 반원 중심을 봄(전)
         # --- [코스 관람 변경 ⑨] 도킹 접근 원에서 Dock 전에 방향 맞추기 ---
         # 왜: 접근 원(반경 home_position_tolerance 0.30 m)에 들어서자마자 멈추므로, 출구(북쪽)에서 내려오면
         #     로봇이 남쪽·비스듬히 서서 도크가 정면에 없다. Create 3 Dock은 앞쪽 IR로 도크 신호를 보며 다가가는데,
@@ -329,7 +335,12 @@ class TourMachine:
                 self.state_since = now
                 return [self._event('EXIT_ZONE_ENTERED', 'Nav2 목표 취소 요청'), Event('cancel', None)]
             # 키오스크/작품: 반원 진입 시 취소
-            if self.state not in ('NAV_HOME', 'NAV_EXIT') and self._entry_inside(now):
+            # [코스 관람 변경 ⑪] 키오스크는 kiosk_stop_at_goal이면 반원 진입으로 멈추지 않고 goal_pose(RViz로 찍은 자리)까지 간다
+            #   → Nav2 SUCCEEDED가 오면 nav_result에서 정지 확인. (전: 반원 가장자리에서 멈춰 서는 자리·방향이 매번 달라
+            #   관람 시작 때 그림 1 쪽으로 크게 휙 돎, 2026-11-20)
+            kiosk_to_goal = self.state == 'NAV_KIOSK' and self.kiosk_stop_at_goal
+            if (self.state not in ('NAV_HOME', 'NAV_EXIT') and not kiosk_to_goal
+                    and self._entry_inside(now)):
                 self.state = 'CANCELING'
                 self.state_since = now
                 return [self._event('ZONE_ENTERED', 'Nav2 목표 취소 요청'), Event('cancel', None)]
@@ -510,7 +521,11 @@ class TourMachine:
         if not self.kiosk_face or self.last_pose is None:
             return None
         z, pose = self.plan.kiosk_zone, self.last_pose
-        if math.hypot(pose.x - z.cx, pose.y - z.cy) > 0.05:
+        if self.kiosk_face_target == 'plane':
+            # [코스 관람 변경 ⑪] 등이 키오스크 면을 똑바로 보게 = 정면이 반원이 열린 방향(zone.direction, 방 안쪽).
+            #   서는 자리와 상관없이 방향이 항상 같다 → 관람 시작 때 그림 1 쪽으로 도는 각도가 매번 같고 작다.
+            target = z.direction
+        elif math.hypot(pose.x - z.cx, pose.y - z.cy) > 0.05:
             target = math.atan2(pose.y - z.cy, pose.x - z.cx)
         else:
             target = self.plan.kiosk_goal.yaw
@@ -592,6 +607,12 @@ class TourMachine:
             return self._begin_stop(now)
         if result == 'CANCELED' and self.state == 'CANCELING' and self._fresh_inside(now):
             return self._begin_stop(now)
+        # [코스 관람 변경 ⑪] goal_pose까지 가다가 목표 바로 앞에서 Nav2가 포기(progress checker 등)해도
+        #   이미 키오스크 반원 안이면 도착으로 본다 (반원 진입 취소를 안 쓰므로 그 대신)
+        if (result == 'ABORTED' and self.state == 'NAV_KIOSK' and self.kiosk_stop_at_goal
+                and self._fresh_inside(now)):
+            return [self._event('KIOSK_NEAR_GOAL', 'Nav2 ABORTED이지만 키오스크 반원 안; 도착으로 처리')] + \
+                self._begin_stop(now)
         if result in ('ABORTED', 'REJECTED'):
             return self._recover(f'Nav2 {result}; 운영자 복구 승인 필요', now)
         return self._recover(f'Nav2 {result}: 현재 반원 도착 미확인; 동일 목표 재검증 필요', now)
