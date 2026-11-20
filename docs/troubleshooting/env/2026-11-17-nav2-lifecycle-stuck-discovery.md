@@ -40,7 +40,7 @@ turtlebot4 nav2.launch.py는 `use_composition:=False` 고정이라 노드 12개�
 | discovery | 걸린 시간 |
 |---|---|
 | robot1 서버만 (`;192.168.107.101:11811;`) | 40초 넘게 못 받음 (timeout) |
-| Host PC 서버만 (`192.168.107.42:11811;`) | 20.3초 |
+| Host PC 서버만 (`192.168.107.54:11811;`) | 20.3초 |
 | 서버 없음 (`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`) | 1.3초 |
 
 → 같은 PC 노드끼리도 Wi-Fi 너머 서버를 거치느라 수십 초 걸림. robot1 서버가 특히 느림.

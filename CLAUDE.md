@@ -65,7 +65,7 @@ arti/
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
 - Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
 - `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/common/setup.md`, 주행 띄우기는 `docs/common/navigation.md`.
-- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. 서버 ID 0 = `192.168.107.42`(관제 PC, `scripts/run_discovery_server.sh`를 켜 둠). 이 PC(`192.168.107.11`, mu-01, robot1 담당)는 guest → `192.168.107.42:11811;192.168.107.101:11811;` (`/etc/turtlebot4_discovery/setup.bash`와 같은 값). 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
+- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. 서버 ID 0 = `192.168.107.54`(관제 PC, `scripts/run_discovery_server.sh`를 켜 둠). 이 PC(`192.168.107.11`, mu-01, robot1 담당)는 guest → `192.168.107.54:11811;192.168.107.101:11811;` (`/etc/turtlebot4_discovery/setup.bash`와 같은 값). 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
 - `env.bash`는 로컬 전용(gitignore). `env.bash.example`을 복사해서 `ROS_DOMAIN_ID`, 로봇 네임스페이스 설정.
 
 ## 패키지 구성
