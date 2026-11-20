@@ -138,14 +138,14 @@
     "_설명": {
       "_묶음": "속도·가감속 (cmd_vel)",
       "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31). 0.3 → 0.2 (2026-11-20: 현장에서 너무 빠름)",
-      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24). 2026-11-20 현장에서 0.5도 시험했다가 0.8로 되돌림",
+      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24). 2026-11-20 현장: 0.8 → 0.5 (빠르게 돌아 인식을 놓침)",
       "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8 → 0.3, 2026-11-20: 부드럽게 출발. 0.3 m/s까지 1 s)",
       "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8 → 0.3, 2026-11-20: 부드럽게 정지. 0.3 m/s에서 1 s·약 15 cm 더 감 — 0.8일 때는 약 6 cm)",
       "angular_accel": "회전 가속 [rad/s^2] (3.0 → 1.5: 회전이 덜 들쑥날쑥)",
       "min_spin_cmd": "서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s] Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림"
     },
     "max_linear": 0.2,
-    "max_angular": 0.8,
+    "max_angular": 0.5,
     "linear_accel": 0.3,
     "linear_decel": 0.3,
     "angular_accel": 1.5,
@@ -161,12 +161,12 @@
       "w_clearance": "비용: 장애물 근접 (clearance_zone 안)",
       "w_heading": "비용: 목표 근처에서 관람객을 바라보는 방향",
       "w_turn": "비용: 회전 (같은 조건이면 직진)",
-      "control_period": "제어 주기 [s]",
+      "control_period": "제어 주기 [s] (2026-11-20: 0.2도 시험했으나 개선 없어 0.1 유지)",
       "sim_time": "DWA 후보를 굴려 볼 시간 [s]",
       "v_samples": "DWA 전진 속도 후보 수",
       "w_samples": "DWA 회전 속도 후보 수",
       "scan_min_range": "이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]",
-      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s]"
+      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s] (0.5 → 0.8, 2026-11-20: Wi-Fi로 scan이 0.5~0.6 s씩 끊겨 자주 멈춤)"
     },
     "robot_radius": 0.18,
     "safety_margin": 0.02,
@@ -180,7 +180,7 @@
     "v_samples": 7,
     "w_samples": 15,
     "scan_min_range": 0.2,
-    "scan_timeout": 0.5
+    "scan_timeout": 0.8
   },
   "diag": {
     "_설명": {

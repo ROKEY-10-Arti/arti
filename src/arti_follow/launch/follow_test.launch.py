@@ -21,6 +21,7 @@
     (gesture·front는 person_tracker BaseTrackerNode를 상속한 같은 구조, 좌표 토픽·형식은 셋 다 같음)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
     auto_start:=true         액션 없이 켜자마자 관람 시작
+    diag:=true               visitor_follower 진단 로그: 2 s마다 토픽별 수신 Hz·간격·지연, [늦음]·[이유] 즉시 로그
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
@@ -131,7 +132,9 @@ def make_nodes(context):
     tracker = arg('tracker').lower()
     if tracker not in TRACKER_MODES:
         raise RuntimeError(f'tracker:={tracker} → {" | ".join(TRACKER_MODES)} 중 하나')
+    diag = arg('diag').lower() == 'true'
     params = {'start_enabled': drive, 'auto_start': arg('auto_start').lower() == 'true',
+              'diag': diag, 'diag_events': diag,   # 진단: 수신 간격·지연·제어 주기 로그
               'auto_register': tracker in ('front', 'all')}   # 제스처 등록이면 앞 사람 등록 요청 안 보냄
     actions = []
 
@@ -166,6 +169,8 @@ def generate_launch_description():
         DeclareLaunchArgument('tracker', default_value='gesture', choices=list(TRACKER_MODES),
                               description='gesture(기본): 제스처 등록, front: 앞 사람 자동·클릭 등록, '
                                           'all: 예전 multi_tracker_node, camera: 카메라만, none: 안 띄움'),
+        DeclareLaunchArgument('diag', default_value='false',
+                              description='true면 visitor_follower 진단 로그 (토픽별 수신 간격·지연, 제어 주기, 끊긴 순간)'),
         DeclareLaunchArgument('auto_start', default_value='false',
                               description='true면 액션 없이 켜자마자 prepare → start (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('video_source', default_value='',
