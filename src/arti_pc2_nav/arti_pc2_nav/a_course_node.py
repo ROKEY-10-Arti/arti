@@ -145,6 +145,8 @@ class ACourseNode(Node):
         # 도착 뒤 등이 키오스크 면을 똑바로 보게 회전 (전: 반원 가장자리에서 멈춰 관람 시작 때 그림 1 쪽으로 크게 돎)
         self.declare_parameter('kiosk_stop_at_goal', True)     # false = 전처럼 반원 진입 즉시 정지
         self.declare_parameter('kiosk_face_target', 'plane')   # 'plane' = 키오스크 면(zone.direction) / 'center' = 반원 중심(전)
+        # 찍은 자리가 벽 가까이라 Nav2가 끝까지 못 가도 이 거리 안(반원 안)이면 도착 (2026-11-20: 0.22 m 앞에서 멈춤 반복)
+        self.declare_parameter('kiosk_goal_tolerance', 0.30)   # [m]
         # [코스 관람 변경 ⑨] 도킹 접근 원에서 정지 후 정면이 충전 스테이션을 보게 회전하고 Dock (course_engine FACE_DOCK 주석 참고).
         # 2026-11-20: 도크를 안 보고 선 채 Dock → Create 3가 찾다가 앞 벽에 부딪혀 Dock 실패.
         self.declare_parameter('dock_face', True)
@@ -248,6 +250,7 @@ class ACourseNode(Node):
                 face_timeout=float(self.get_parameter('face_timeout').value),
                 kiosk_stop_at_goal=bool(self.get_parameter('kiosk_stop_at_goal').value),
                 kiosk_face_target=str(self.get_parameter('kiosk_face_target').value),
+                kiosk_goal_tolerance=float(self.get_parameter('kiosk_goal_tolerance').value),
                 dock_face=bool(self.get_parameter('dock_face').value),
                 explain_zone_margin=float(self.get_parameter('explain_zone_margin').value),
                 explain_lost_grace=float(self.get_parameter('explain_lost_grace').value))
@@ -853,7 +856,8 @@ class ACourseNode(Node):
         goal = Spin.Goal()
         goal.target_yaw = float(angle)
         goal.time_allowance.sec = int(self.get_parameter('face_timeout').value)
-        self.get_logger().info(f'키오스크 방향 맞추기: {math.degrees(angle):.0f}° 회전 (Nav2 spin)')
+        where = '도크' if self._machine.state == 'FACE_DOCK' else '키오스크'
+        self.get_logger().info(f'{where} 방향 맞추기: {math.degrees(angle):.0f}° 회전 (Nav2 spin)')
 
         def accepted(future):
             try:

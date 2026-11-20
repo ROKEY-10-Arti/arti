@@ -154,6 +154,9 @@ class PrepareTests(unittest.TestCase):
     def test_kiosk_aborted_inside_zone_counts_as_arrived(self):
         """[⑪] 목표 바로 앞에서 Nav2 ABORTED여도 반원 안이면 도착. 반원 밖이면 복구."""
         m, g = self.m, self.m.plan.kiosk_goal
+        m.nav_result('ABORTED', 0)                                # 위치 정보 전 → 반원 판정 불가
+        self.assertEqual(m.state, 'WAIT_RECOVERY')
+        m = machine(kiosk_goal_tolerance=0.0)                     # 근처 도착 끄고 ABORTED 경로만 봄
         m.tick(1, Pose2D(g.x, g.y - 0.1, g.yaw), 0, 0, 0)
         m.nav_result('ABORTED', 2)
         self.assertEqual(m.state, 'VERIFY_STOP')
@@ -161,6 +164,22 @@ class PrepareTests(unittest.TestCase):
         m2.tick(1, Pose2D(0, 0), 0, 0, 0)                          # 도크 앞, 반원 밖
         m2.nav_result('ABORTED', 2)
         self.assertEqual(m2.state, 'WAIT_RECOVERY')
+
+    def test_kiosk_near_goal_counts_as_arrived(self):
+        """[⑪] 2026-11-20 실주행: 찍은 자리 0.22 m 앞 (-1.04, 0.02)에서 Nav2가 더 못 감 → 0.30 m 안이면 도착."""
+        m, g = self.m, self.m.plan.kiosk_goal
+        p = Pose2D(-1.04, 0.02, 2.5)
+        self.assertLess(math.hypot(p.x - g.x, p.y - g.y), 0.30)
+        ev = m.tick(1, p, 0, 0.2, 0)
+        self.assertEqual(m.state, 'CANCELING')
+        self.assertIn(Event('cancel', None), ev)
+        m.nav_result('CANCELED', 1.2)
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        m.tick(1.3, p, 0, 0, 0)
+        m.tick(2.2, p, 0, 0, 0)
+        self.assertEqual(m.state, 'FACE_KIOSK')                     # → 회전 → 등록(스캔)
+        m.spin_result(True, 4)
+        self.assertEqual(m.state, 'REGISTERING')
 
     def test_kiosk_turn_to_plane_from_side(self):
         """[⑪] 어디에 서든 등이 키오스크 면을 보게 = 정면이 zone.direction."""

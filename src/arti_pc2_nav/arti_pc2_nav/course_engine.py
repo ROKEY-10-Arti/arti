@@ -88,6 +88,7 @@ class TourMachine:
                  near_hold: float = 0.5, come_here_interval: float = 8.0,
                  kiosk_face: bool = True, face_tolerance: float = 0.35, face_timeout: float = 20.0,
                  kiosk_stop_at_goal: bool = True, kiosk_face_target: str = 'plane',
+                 kiosk_goal_tolerance: float = 0.30,
                  dock_face: bool = True,
                  explain_zone_margin: float = 0.15, explain_lost_grace: float = 3.0):
         # --- 설정값 (단위: 초 / m) ---
@@ -112,6 +113,7 @@ class TourMachine:
         self.face_timeout = face_timeout           # 회전 결과가 이 안에 안 오면 그대로 다음 단계(등록/Dock) [s]
         # --- [코스 관람 변경 ⑪] 키오스크: 찍은 자리(goal_pose)까지 가서 서고, 키오스크 면을 기준으로 돌기 ---
         self.kiosk_stop_at_goal = kiosk_stop_at_goal   # True: goal_pose까지 감 / False: 전처럼 반원 진입 즉시 정지
+        self.kiosk_goal_tolerance = kiosk_goal_tolerance  # goal_pose 이 거리 안(반원 안)이면 도착으로 멈춤 [m]
         if kiosk_face_target not in ('plane', 'center'):
             raise ValueError(f"kiosk_face_target은 'plane' 또는 'center': {kiosk_face_target!r}")
         self.kiosk_face_target = kiosk_face_target     # 'plane': 등이 키오스크 면을 봄 / 'center': 등이 반원 중심을 봄(전)
@@ -268,6 +270,13 @@ class TourMachine:
         zone, pose = self._zone(), self.last_pose
         return zone.contains(pose)
 
+    def _near_kiosk_goal(self, now: float) -> bool:
+        """[코스 관람 변경 ⑪] 키오스크 반원 안이고 goal_pose에서 kiosk_goal_tolerance 이내인지."""
+        if not self._fresh_inside(now):
+            return False
+        g = self.plan.kiosk_goal
+        return math.hypot(self.last_pose.x - g.x, self.last_pose.y - g.y) <= self.kiosk_goal_tolerance
+
     def _fresh_exit(self, now: float) -> bool:
         """출구 도착인지: 공통 출구 구역(arti_common, follow 팀과 같은 직사각형)이 있으면 그 안,
         없으면 출구 정지점 0.30m 이내."""
@@ -339,6 +348,13 @@ class TourMachine:
             #   → Nav2 SUCCEEDED가 오면 nav_result에서 정지 확인. (전: 반원 가장자리에서 멈춰 서는 자리·방향이 매번 달라
             #   관람 시작 때 그림 1 쪽으로 크게 휙 돎, 2026-11-20)
             kiosk_to_goal = self.state == 'NAV_KIOSK' and self.kiosk_stop_at_goal
+            # 단, 찍은 자리가 벽·키오스크 가까이라 Nav2가 끝까지 못 들어가는 경우가 있어서 (2026-11-20 실주행:
+            # 0.22 m 앞에서 "Failed to make progress" 반복) 반원 안 + goal_pose kiosk_goal_tolerance 이내면 도착으로 멈춘다
+            if kiosk_to_goal and self._near_kiosk_goal(now):
+                self.state = 'CANCELING'
+                self.state_since = now
+                return [self._event('KIOSK_GOAL_NEAR', f'키오스크 목표 {self.kiosk_goal_tolerance:.2f} m 이내; '
+                                                       'Nav2 목표 취소 요청'), Event('cancel', None)]
             if (self.state not in ('NAV_HOME', 'NAV_EXIT') and not kiosk_to_goal
                     and self._entry_inside(now)):
                 self.state = 'CANCELING'

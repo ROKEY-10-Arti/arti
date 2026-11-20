@@ -197,6 +197,7 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `explain_zone_margin` / `explain_lost_grace` | 0.15 / 3.0 | 해설 중 반원 밖 0.15 m까지는 안으로 보고, 밖·위치 끊김이 3 s 넘게 계속될 때만 실패 (호 바로 안쪽에 멈춰 AMCL 흔들림으로 바로 실패하던 문제) [m, s] |
 | `kiosk_face` / `face_tolerance` / `face_timeout` | true / 0.35 / 20.0 | 키오스크 반원에서 멈춘 뒤 등(웹캠이 뒤를 봄)이 키오스크(반원 중심)를 보게 Nav2 spin 제자리 회전 → 등록 시작. 차이가 0.35 rad 이하면 안 돎, 20 s 넘거나 실패하면 그대로 등록 [rad, s] |
 | `kiosk_stop_at_goal` / `kiosk_face_target` | true / `plane` | [⑪] true: 키오스크 반원에 들어서도 멈추지 않고 `kiosk.goal_pose`까지 감 (반원 안에서 Nav2 ABORTED면 도착으로 봄). `plane`: 도착 뒤 정면 = 반원 방향(`zone.direction`) → 등(웹캠)이 키오스크 면을 똑바로 봄. 전 방식은 false / `center` |
+| `kiosk_goal_tolerance` | 0.30 | [⑪] 키오스크 반원 안이고 `goal_pose`에서 이 거리 안이면 도착으로 멈춤. 찍은 자리가 벽 가까이라 Nav2가 끝까지 못 들어가는 경우 (2026-11-20: 0.22 m 앞에서 `Failed to make progress` 반복) [m] |
 | `set_initial_pose` / `start_pose_file` / `start_point` | true / `''`(= arti_common `init_pose.yaml`) / `undock` | 언독 직후 initialpose로 보낼 위치 |
 | `post_undock_sensor_timeout` / `post_undock_settle_time` | 60.0 / 3.0 | 언독 후 scan·AMCL·TF·Nav2 준비 대기 / 연속 유지 [s]. 넘으면 재도킹 |
 | `visitor_topic` | `target_person/point_map` | person_tracker 출력 |
