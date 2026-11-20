@@ -15,7 +15,14 @@
     <p class="server-environment">{{ '모의 신호 테스트 서버' if config.SIGNAL_SIMULATOR else '로봇 연동 서버' }} · {{ request.host }}</p>
     <h1>로봇 및 작품 관리</h1>
     <p>작품 DB(Art), 실시간 로봇 상태, 관람 로그 DB(Log)를 확인하고 작품 정보를 수정합니다.</p>
-    <section><h2>실시간 로봇 상태</h2><table><thead><tr><th>로봇</th><th>배터리</th><th>도크</th><th>이용 가능</th></tr></thead><tbody id="fleet-body"></tbody></table></section><script defer src="/static/js/fleet.js?v=2"></script>
+    <section>
+      <h2>실시간 로봇 상태</h2>
+      <div class="fleet-table-wrap"><table class="fleet-table">
+        <thead><tr><th scope="col">로봇</th><th scope="col">현재 활동</th><th scope="col">배터리</th><th scope="col">도크</th><th scope="col">이용 가능</th></tr></thead>
+        <tbody id="fleet-body"><tr><td colspan="5">로봇 상태를 확인하고 있습니다.</td></tr></tbody>
+      </table></div>
+    </section>
+    <script defer src="/static/js/fleet.js?v=3"></script>
     <div class="stats"><div><b>{{ catalog.artworks | length }}</b>개 작품</div><div><b id="fleet-total">—</b>대 전체</div><div><b id="fleet-available">—</b>대 이용 가능</div><div><b id="fleet-unavailable">—</b>대 이용 불가</div></div>
     <details class="database-section" open>
       <summary id="artworks-heading">작품 DB · Art <small>표에서 수정 후 행별 저장</small></summary>
@@ -65,18 +72,36 @@
     </details>
     <details class="database-section" open>
       <summary id="logs-heading">로그 DB · Log <small id="log-total">{{ total }}건</small></summary>
-      <p>키오스크의 ROS 통신 로그와 HTTP로 수신한 로봇 로그를 저장합니다. 보낸 시간은 한국 시간(KST)으로 표시하고 로그 영역을 열어 둔 동안 약 5초마다 갱신합니다.</p>
+      <p>키오스크와 로봇의 통신 기록입니다. 각 행의 기술 정보를 펼치면 통신 경로와 원문을 볼 수 있습니다. 시간은 한국 시간(KST)으로 표시합니다.</p>
       <form id="log-filters" method="get" action="/data" class="log-filters">
-        <label class="search-field">검색어<input name="q" value="{{ logs.filters.q }}" maxlength="200" placeholder="로그 ID · 보낸 내용"></label>
-        <label>로봇 ID<input name="robot_id" value="{{ logs.filters.robot_id }}" maxlength="64" placeholder="전체 로봇 / 예: tb1"></label>
-        <label>보낸 날짜<input type="date" name="date" value="{{ logs.filters.date }}"></label>
+        <label class="search-field">검색어<input name="q" value="{{ logs.filters.q }}" maxlength="200" placeholder="로그 ID · 기록 ID · 로그 원문"></label>
+        <label>통신 유형<select name="kind">
+          <option value="">전체</option>
+          <option value="action" {{ 'selected' if logs.filters.kind == 'action' }}>액션 · 로봇 호출 및 관람</option>
+          <option value="service" {{ 'selected' if logs.filters.kind == 'service' }}>서비스 · 작품 설명 조회</option>
+        </select></label>
+        <label>기록 ID<input name="robot_id" value="{{ logs.filters.robot_id }}" maxlength="64" placeholder="전체 / 예: robot1"></label>
+        <label>기록 날짜<input type="date" name="date" value="{{ logs.filters.date }}"></label>
         <input type="hidden" name="limit" value="{{ logs.limit }}"><button type="submit">검색</button><button type="button" class="secondary" id="reset-log-filters">검색 조건 초기화</button>
       </form>
       <p id="log-message" role="status" aria-live="polite">수신 로그 {{ total }}건</p>
       <div class="table-wrap"><table class="log-table robot-log-table">
-        <thead><tr><th scope="col">로그 ID</th><th scope="col">로그 보낸 ID</th><th scope="col">보낸 시간</th><th scope="col">보낸 내용</th></tr></thead>
+        <thead><tr><th scope="col">시간</th><th scope="col">발신자</th><th scope="col">대상</th><th scope="col">무슨 일이 있었나요?</th></tr></thead>
         <tbody id="log-rows">{% for entry in logs.logs %}<tr>
-          <td>{{ entry.log_id }}</td><td>{{ entry.robot_id }}</td><td>{{ entry.sent_at | localtime }}</td><td>{{ entry.message }}</td>
+          <td>{{ entry.sent_at | localtime }}</td><td>{{ entry.operator.sender }}</td><td>{{ entry.operator.target }}</td>
+          <td>
+            <p class="log-description">{{ entry.operator.description }}</p>
+            <details class="log-entry-details" id="log-detail-{{ entry.log_id }}">
+              <summary>기술 정보</summary>
+              <dl>
+                <dt>대상 / 네임스페이스</dt><dd>{{ entry.operator.target }}{% if entry.operator.namespace %} · <code>{{ entry.operator.namespace }}</code>{% endif %}</dd>
+                <dt>통신 경로 (리소스)</dt><dd><code>{{ entry.operator.resource or '—' }}</code></dd>
+                <dt>통신 유형</dt><dd>{{ entry.operator.type }}</dd>
+                <dt>상세 내용 (Payload)</dt><dd><code class="log-payload">{{ entry.operator.payload }}</code></dd>
+                <dt>기록 ID / 로그 ID</dt><dd>{{ entry.robot_id }} / {{ entry.log_id }}</dd>
+              </dl>
+            </details>
+          </td>
         </tr>{% else %}<tr><td colspan="4" class="empty">조건에 맞는 수신 로그가 없습니다.</td></tr>{% endfor %}</tbody>
       </table></div>
       <div class="log-pagination"><button type="button" id="log-previous" class="secondary" {{ 'disabled' if logs.offset == 0 else '' }}>이전</button><span id="log-range">{{ logs.offset + 1 if logs.logs else 0 }}–{{ logs.offset + logs.logs | length if logs.logs else 0 }} / {{ total }}</span><button type="button" id="log-next" class="secondary" {{ 'disabled' if not logs.has_more else '' }}>다음</button><button type="button" id="refresh-logs" class="secondary">새로 조회</button></div>

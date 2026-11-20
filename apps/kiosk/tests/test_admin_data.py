@@ -83,6 +83,53 @@ class AdminDataTest(unittest.TestCase):
         with sqlite3.connect(self.config['DATABASE']) as db:
             self.assertEqual([row[1] for row in db.execute('PRAGMA table_info(Log)')],['log_id','robot_id','sent_at','message'])
 
+    def test_operator_log_explains_direction_status_and_failures_for_existing_rows(self):
+        ros_rows = [
+            ('robot4', '/robot4/arti/prepare_tour sending goal start=true'),
+            ('robot4', '/robot4/arti/prepare_tour goal accepted=True'),
+            ('robot4', '/robot4/arti/prepare_tour result status=6 success=False message=AMCL/map_server/Nav2 lifecycle not active'),
+            ('robot1', '/robot1/arti/start_tour feedback state=EXPLAINING artwork_id=2'),
+            ('robot1', '/robot1/arti/start_tour result status=5 success=True message=canceled'),
+            ('kiosk', '/arti/description request artwork_id=1; response success=True description_chars=25'),
+        ]
+        with sqlite3.connect(self.config['DATABASE']) as db:
+            db.executemany('INSERT INTO Log (robot_id,sent_at,message) VALUES (?,0,?)', ros_rows)
+        logs = self.client.get('/api/logs?view=operator').json['logs']
+        outgoing, accepted, aborted, explaining, canceled, service = [row['operator'] for row in reversed(logs[-6:])]
+        self.assertEqual((outgoing['sender'], outgoing['target']), ('키오스크', '로봇 4'))
+        self.assertEqual((accepted['sender'], accepted['target']), ('로봇 4', '키오스크'))
+        self.assertEqual(accepted['namespace'], '/robot4')
+        self.assertIn('주행 시스템이 활성화되지 않았습니다', aborted['description'])
+        self.assertIn('2번 작품 설명 중', explaining['description'])
+        self.assertIn('취소를 확인했습니다', canceled['description'])
+        self.assertEqual(service['target'], '요청 로봇(미확인)')
+        self.assertEqual(logs[0]['operator']['sender'], '미확인')
+        self.assertEqual(logs[0]['operator']['payload'], logs[0]['message'])
+        actions = self.client.get('/api/logs?view=operator&kind=action&limit=2').json
+        self.assertEqual(actions['total'], 5)
+        self.assertTrue(actions['has_more'])
+        self.assertTrue(all(row['operator']['type'].startswith('ROS 액션') for row in actions['logs']))
+        services = self.client.get('/api/logs?kind=service').json
+        self.assertEqual([row['message'] for row in services['logs']], [ros_rows[-1][1]])
+        self.assertEqual(self.client.get('/api/logs?kind=action&robot_id=robot4').json['total'], 3)
+        page = self.client.get('/data').get_data(as_text=True)
+        for label in ('발신자', '2번 작품 설명 중', '통신 경로 (리소스)', '현재 활동'):
+            self.assertIn(label, page)
+
+    def test_fleet_uses_odometry_only_while_fresh(self):
+        from unittest.mock import patch
+
+        fleet = self.app.extensions['robot_availability'].fleet
+        with patch('fleet.time.monotonic', return_value=10):
+            fleet.receive('tb1', 'moving', True)
+            fleet.receive('tb4', 'dock', True)
+            snapshot = self.client.get('/api/fleet').json
+            self.assertEqual(snapshot['tb1']['activity'], '이동 중')
+            self.assertEqual(snapshot['tb4']['activity'], '도크에 정차 중')
+        with patch('fleet.time.monotonic', return_value=14):
+            snapshot = self.client.get('/api/fleet').json
+            self.assertEqual(snapshot['tb1']['activity'], '활동 상태 미수신')
+
     def test_invalid_filters_and_unauthorized_access_are_rejected(self):
         for query in ({'from':'2026-02-30'},{'from':'2026-1-1'},{'to':'2026-11-16','from':'2026-11-17'},
                       {'robot_id':'x'*65},{'q':'x'*201},{'limit':0},{'limit':501},{'offset':-1},{'offset':1000001},{'to':'9999-12-31'}):

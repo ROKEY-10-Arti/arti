@@ -161,7 +161,7 @@ def generate_launch_description():
         # ---------------- localization + Nav2 (nav:=true) ----------------
         OpaqueFunction(function=_localization_and_nav2),
 
-        # ---------------- 코스 주행 노드 ----------------
+        # ---------------- 코스 관람 노드 ----------------
         Node(package='arti_pc2_nav', executable='a_course_node', name='a_course_node',
              namespace=LaunchConfiguration('robot_namespace'), output='screen',
              # TurtleBot4는 /robot4/tf 를 쓰므로 namespace 안의 tf로 연결

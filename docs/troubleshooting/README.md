@@ -12,7 +12,7 @@
 | `env/` | 개발 PC 환경: 빌드(colcon), source, venv, 의존성, `ROS_DOMAIN_ID`·네트워크·DDS 통신 |
 | `robot/` | TurtleBot 4 본체: 배터리, 도킹, Create3, 센서 하드웨어, 로봇 쪽 설정 |
 | `common/` | `src/common/` 패키지: interfaces, bringup(localization·nav2), 지도·공용 좌표 |
-| `follow/` | `src/arti_follow/` 사용자 추종 |
+| `follow/` | `src/arti_follow/` 자유 관람 |
 | `course/` | `src/arti_pc2_nav/` 코스 관람 (robot4) |
 
 `src/`의 역할 폴더와 이름을 맞춘다. 새 역할 폴더가 생기면 여기에도 같은 이름으로 만든다.

@@ -8,8 +8,12 @@ assert.deepEqual(posePayload({x:'0',y:'1',theta:'-1.2',frame_id:'map'},true),{ac
 assert.deepEqual(posePayload({x:'',y:'',theta:'',frame_id:'map'},false),{active:false,frame_id:'map',pose:null});
 assert.throws(()=>posePayload({x:'1',y:'',theta:'',frame_id:'map'},true));
 const malicious='<img src=x onerror="alert(1)">';
-const rows=logRows([{log_id:7,robot_id:malicious,sent_at:0,message:malicious}]);
-assert(!rows.includes('<img')); assert(rows.includes('&lt;img')); assert(rows.includes('<td>7</td>'));
+const rows=logRows([{log_id:7,robot_id:malicious,sent_at:0,message:malicious,operator:{
+  sender:'키오스크',target:'로봇 1',namespace:'/robot1',resource:'/robot1/arti/start_tour',
+  type:'ROS 액션 · 진행 상태',payload:malicious,description:'1번 작품 설명 중',
+}}], new Set(['log-detail-7']));
+assert(!rows.includes('<img')); assert(rows.includes('&lt;img')); assert(rows.includes('id="log-detail-7" open'));
+assert(rows.includes('1번 작품 설명 중')); assert(rows.includes('/robot1/arti/start_tour'));
 assert.equal((rows.match(/<td>/g)||[]).length,4);
 const poseRows=robotRows([{robot_id:malicious,pose:{x:0,y:1,theta:-2},active:true,frame_id:malicious,pose_updated_at:0}]);
 assert(!poseRows.includes('<img')); assert(poseRows.includes('&lt;img')); assert(poseRows.includes('<td>0</td>'));

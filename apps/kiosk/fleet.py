@@ -1,7 +1,8 @@
-# 로봇별 네임스페이스의 배터리와 도크 토픽을 구독한다.
+# 로봇별 네임스페이스의 배터리, 도킹, 이동 상태 토픽을 구독한다.
 # 콜백에 로봇 이름을 고정해 두 로봇의 수신값을 구분한다.
 
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -24,7 +25,7 @@ class Fleet:
             for name, fields in self.values.items():
                 # 리뷰: 도킹 해제 메시지를 놓치면 마지막 도킹 수신 후 최대 15초 동안
                 # 호출 가능으로 보일 수 있다. 운영에서 허용할 수 있는 지연인지 확인이 필요하다.
-                row = {key: value if now - stamp <= 15 else None
+                row = {key: value if now - stamp <= (3.5 if key == 'moving' else 15) else None
                        for key, (stamp, value) in fields.items()}
                 row["available"] = row.get("dock") is True and (row.get("battery") or 0) > 30
                 rows[name] = row
@@ -33,9 +34,19 @@ class Fleet:
     def subscribe(self, node, qos):
         from sensor_msgs.msg import BatteryState
         from irobot_create_msgs.msg import DockStatus
+        from nav_msgs.msg import Odometry
+
+        def odometry(name, msg):
+            velocity = msg.twist.twist
+            speed = math.hypot(velocity.linear.x, velocity.linear.y)
+            rotation = abs(velocity.angular.z)
+            moving = (speed >= 0.02 or rotation >= 0.08) if math.isfinite(speed) and math.isfinite(rotation) else None
+            self.receive(name, 'moving', moving)
+
         for name, namespace in self.names.items():
             node.create_subscription(BatteryState, namespace + "/battery_state",
                 lambda msg, n=name: self.receive(n, "battery", round(msg.percentage * 100, 5)
                     if 0 <= msg.percentage <= 1 else None), qos)
             node.create_subscription(DockStatus, namespace + "/dock_status",
                 lambda msg, n=name: self.receive(n, "dock", msg.is_docked), qos)
+            node.create_subscription(Odometry, namespace + '/odom', lambda msg, n=name: odometry(n, msg), qos)

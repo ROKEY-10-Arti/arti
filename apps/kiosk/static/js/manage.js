@@ -55,6 +55,7 @@ for (const form of artworkForms) form.addEventListener('submit', async event => 
 let stopped = false;
 const filters = document.querySelector('#log-filters');
 const pageState = document.querySelector('#log-page-state');
+const logBody = document.querySelector('#log-rows');
 let offset = Number(pageState.dataset.offset), limit = Number(pageState.dataset.limit), total = Number(pageState.dataset.total);
 let logController = null, requestNumber = 0, logTimer = null;
 let appliedLogFilters = new URLSearchParams(new FormData(filters));
@@ -74,10 +75,15 @@ async function loadLogs(requestedOffset = 0) {
   message.textContent = '로봇 로그를 조회하고 있습니다…';
   previous.disabled = next.disabled = true;
   try {
-    const data = await jsonRequest('/api/logs?' + query.toString(), {signal:controller.signal});
+    const apiQuery = new URLSearchParams(query);
+    apiQuery.set('view', 'operator');
+    const data = await jsonRequest('/api/logs?' + apiQuery.toString(), {signal:controller.signal});
     if (stopped || number !== requestNumber) return;
     offset = data.offset; limit = data.limit; total = data.total;
-    document.querySelector('#log-rows').innerHTML = logRows(data.logs);
+    const openDetails = new Set([...logBody.querySelectorAll('.log-entry-details[open]')].map(details => details.id));
+    const focusedDetails = document.activeElement?.closest('.log-entry-details')?.id;
+    logBody.innerHTML = logRows(data.logs, openDetails);
+    if (focusedDetails) document.getElementById(focusedDetails)?.querySelector('summary').focus({preventScroll:true});
     document.querySelector('#log-total').textContent = `${total}건`;
     const start = data.logs.length ? offset + 1 : 0;
     const end = data.logs.length ? offset + data.logs.length : 0;
@@ -96,14 +102,13 @@ function scheduleLogs() {
   if (!stopped) logTimer = setTimeout(() => {if (!document.hidden && filters.closest('details').open) void loadLogs(offset); else scheduleLogs();}, 5000);
 }
 filters.addEventListener('submit', event => {event.preventDefault(); applyLogFilters(); void loadLogs(0);});
-document.querySelector('#reset-log-filters').addEventListener('click', () => {
-  for (const name of ['q','robot_id','date']) filters.elements[name].value = '';
-  applyLogFilters(); void loadLogs(0);
-});
-bindLogReset({request:jsonRequest, writeOptions, onReset: async () => {
-  for (const name of ['q','robot_id','date']) filters.elements[name].value = '';
-  applyLogFilters(); await loadLogs(0);
-}});
+function resetLogFilters() {
+  for (const name of ['q','robot_id','date','kind']) filters.elements[name].value = '';
+  applyLogFilters();
+  return loadLogs(0);
+}
+document.querySelector('#reset-log-filters').addEventListener('click', () => void resetLogFilters());
+bindLogReset({request:jsonRequest, writeOptions, onReset:resetLogFilters});
 previous.addEventListener('click', () => void loadLogs(Math.max(0, offset - limit)));
 next.addEventListener('click', () => void loadLogs(offset + limit));
 document.querySelector('#refresh-logs').addEventListener('click', () => void loadLogs(offset));

@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 from uuid import uuid4
 from flask import Response, abort, jsonify, render_template, request
 
+from ros_events import feedback_activity
+
 GROUPS = [
  ('availability','호출 가능 여부',[('available_on','호출 가능 ON'),('available_off','호출 가능 OFF'),('availability_lost','가용 신호 수신 중단')]),
  ('assignment','호출·배정',[('assign','선택 로봇 배정 성공'),('reject','배정 거절'),('call_timeout','호출 응답 시간 초과'),('call_failed','호출 서비스 오류')]),
@@ -38,6 +40,7 @@ class ManualTransport:
         self.cv = threading.Condition(threading.RLock())
         self.jobs = {}
         self.runtime = {}
+        self.robot_sessions = {}
         self.history = []
         self.latest = None
         self.sequence = 0
@@ -45,6 +48,19 @@ class ManualTransport:
         pass
     def stop(self):
         self.stopped.set()
+
+    def activity(self, namespace):
+        # The second robot uses its historical selection value in the simulator.
+        robot = 'robot2' if namespace == '/robot4' else namespace.removeprefix('/')
+        with self.cv:
+            runtime = self.runtime.get(self.robot_sessions.get(robot), {})
+            if not runtime.get('receiving', True):
+                return '활동 상태 수신 중단'
+            event = runtime.get('phase')
+            if event in {'art1', 'art2', 'art3'}:
+                return feedback_activity('start_tour', 'EXPLAINING', int(event[-1]))
+            return LABELS.get(event)
+
     def snapshot(self, sid=None):
         with self.cv:
             return {'sessions': [{'id': k, 'phase': (self.runtime.get(k, {}).get('phase') or v.phase), 'robot': v.robot_id}
@@ -138,10 +154,13 @@ def register_signal_simulator(app, get_db, serialize):
                 with job.lock:
                     # Intentional bypass: test inputs can jump forward, backward, or recover after termination.
                     job.cancel.clear()
+                    if job.robot_id != robot and sim.robot_sessions.get(job.robot_id) == sid:
+                        sim.robot_sessions.pop(job.robot_id)
                     job.robot_id, job.robot_namespace = robot, '/' + robot
                     job.message, job.progress = message, float(progress)
                     job.motion_pending = False
                     runtime = sim.runtime.setdefault(sid, {'receiving': True})
+                    sim.robot_sessions[robot] = sid
                     if event in {'connection_off', 'connection_on'}:
                         runtime['receiving'] = event == 'connection_on'
                     else:
