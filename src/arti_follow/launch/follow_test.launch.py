@@ -95,8 +95,10 @@ def tracker_actions(ns, mode):
     if mode not in TRACKER_NODES:
         return [camera]
     executable, name, params = TRACKER_NODES[mode]
+    # top_cam_tf_node가 phone_camera.launch.py에서 이미 <ns>/tf_static을 발행하므로 중복 발행 비활성화
+    tracker_params = {**params, 'publish_cam_tf': False}
     tracker = Node(package='person_tracker', executable=executable, name=name, namespace=ns,
-                   output='screen', parameters=[params])
+                   output='screen', parameters=[tracker_params])
     return [camera, TimerAction(period=2.0, actions=[tracker])]     # 카메라가 먼저 켜지게
 
 

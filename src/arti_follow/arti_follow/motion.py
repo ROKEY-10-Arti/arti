@@ -11,6 +11,61 @@ import cv2
 from geometry_msgs.msg import TwistStamped
 import numpy as np
 
+try:
+    from scipy.sparse import coo_matrix as _coo_matrix
+    from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra
+except ImportError:
+    _coo_matrix = None
+    _csgraph_dijkstra = None
+
+_SQRT2 = math.sqrt(2.0)
+
+
+def _grid_shortest_paths(free: np.ndarray, gy: int, gx: int) -> np.ndarray:
+    """8방향 격자 최단 거리 계산 (SciPy C 다익스트라 우선, 미설치 시 NumPy 벡터 웨이브프론트 폴백)."""
+    n = free.shape[0]
+    if _coo_matrix is not None and _csgraph_dijkstra is not None:
+        idx = np.arange(n * n, dtype=np.int32).reshape(n, n)
+        rows, cols, weights = [], [], []
+        for dy, dx, w in ((0, 1, 1.0), (1, 0, 1.0), (1, 1, _SQRT2), (1, -1, _SQRT2)):
+            y0, y1 = max(0, -dy), n - max(0, dy)
+            x0, x1 = max(0, -dx), n - max(0, dx)
+            mask = free[y0:y1, x0:x1] & free[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            if np.any(mask):
+                u = idx[y0:y1, x0:x1][mask]
+                v = idx[y0 + dy:y1 + dy, x0 + dx:x1 + dx][mask]
+                rows.append(u)
+                cols.append(v)
+                weights.append(np.full(u.size, w, dtype=np.float64))
+        if not rows:
+            dist = np.full((n, n), np.inf, dtype=np.float64)
+            dist[gy, gx] = 0.0
+            return dist
+        graph = _coo_matrix(
+            (np.concatenate(weights), (np.concatenate(rows), np.concatenate(cols))),
+            shape=(n * n, n * n),
+        )
+        return _csgraph_dijkstra(graph, directed=False, indices=gy * n + gx).reshape(n, n)
+
+    d = np.full((n + 2, n + 2), np.inf, dtype=np.float64)
+    d[1 + gy, 1 + gx] = 0.0
+    for _ in range(2 * n):
+        card = np.minimum(
+            np.minimum(d[:-2, 1:-1] + 1.0, d[2:, 1:-1] + 1.0),
+            np.minimum(d[1:-1, :-2] + 1.0, d[1:-1, 2:] + 1.0),
+        )
+        diag = np.minimum(
+            np.minimum(d[:-2, :-2] + _SQRT2, d[:-2, 2:] + _SQRT2),
+            np.minimum(d[2:, :-2] + _SQRT2, d[2:, 2:] + _SQRT2),
+        )
+        upd = np.minimum(card, diag)
+        cur = d[1:-1, 1:-1]
+        nxt = np.where(free & (upd < cur), upd, cur)
+        if np.array_equal(nxt, cur):
+            break
+        d[1:-1, 1:-1] = nxt
+    return d[1:-1, 1:-1]
+
 
 def wrap(a):
     """각도를 -π ~ π 범위로 맞춘다 (350° → -10°). 회전할 때 짧은 쪽으로 돌게 하려고.
@@ -204,24 +259,14 @@ class MotionMixin:
         grid[c[:, 1], c[:, 0]] = 1
         k = int(math.ceil((p['robot_radius'] + p['safety_margin']) / res))
         raw, grid = grid, cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
-        gx, gy = np.floor((goal - origin) / res).astype(int)
-        rx, ry = np.floor((here - origin) / res).astype(int)
+        gx, gy = np.clip(np.floor((goal - origin) / res).astype(int), 0, n - 1)
+        rx, ry = np.clip(np.floor((here - origin) / res).astype(int), 0, n - 1)
         grid[max(gy - 1, 0):gy + 2, max(gx - 1, 0):gx + 2] = 0      # 목표 자리는 열어 둔다
         win = np.s_[max(ry - k, 0):ry + k + 1, max(rx - k, 0):rx + k + 1]
         grid[win] = raw[win]                        # 로봇 주변은 실제 장애물 칸만 막음 (붙어 있어도 출발 가능)
-        dist = np.full((n, n), np.inf)
-        dist[gy, gx] = 0.0
-        steps = [(dy, dx, math.hypot(dy, dx)) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
-        frontier = [(gy, gx)]
-        while frontier:                             # 목표에서부터 넓혀 가며 거리 채우기
-            nxt = []
-            for y, x in frontier:
-                for dy, dx, w in steps:
-                    yy, xx = y + dy, x + dx
-                    if 0 <= yy < n and 0 <= xx < n and not grid[yy, xx] and dist[y, x] + w < dist[yy, xx]:
-                        dist[yy, xx] = dist[y, x] + w
-                        nxt.append((yy, xx))
-            frontier = nxt
+        free = grid == 0
+        free[gy, gx] = True
+        dist = _grid_shortest_paths(free, int(gy), int(gx))
         dist *= res
         dist[~np.isfinite(dist)] = 50.0
         return dist, origin

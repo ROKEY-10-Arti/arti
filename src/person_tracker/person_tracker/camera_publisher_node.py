@@ -27,7 +27,7 @@ class CameraPublisherNode(Node):
         self.declare_parameter('video_source', '0', ParameterDescriptor(dynamic_typing=True))
         self.declare_parameter('raw_topic', '/top_cam/image_raw')
         self.declare_parameter('compressed_topic', '/top_cam/image_raw/compressed')
-        self.declare_parameter('publish_raw', True)
+        self.declare_parameter('publish_raw', False)
         self.declare_parameter('publish_compressed', True)
         self.declare_parameter('fps', 15.0)          # 저사양 및 무선 네트워크를 고려한 기본 15 FPS
         self.declare_parameter('width', 640)

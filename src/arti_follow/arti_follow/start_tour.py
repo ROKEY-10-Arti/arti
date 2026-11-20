@@ -31,19 +31,29 @@ class TourMixin:
         받음: goal (is_cancel_requested)
         돌려줌: StartTour.Result(success = 취소·출구 완료로 끝남, message = 끝난 이유: completed / canceled / lost ...)"""
         with self.lock:
+            if self.state not in ('REGISTERED', 'READY'):
+                self.get_logger().warn(f'관람 시작 거절 (현재 상태 {self.state})')
+                if goal is not None:
+                    goal.abort()
+                return StartTour.Result(success=False, message='busy')
+            if self.state == 'READY':
+                self.active, self.end_reason = True, ''
+                self.explaining, self.visited, self.reported = 0, [], 0
             self.get_logger().info('관람 시작 → 추종')
             self.tour_at, self.end_at = self.now(), None
             self.set_state('FOLLOW')                # 다음 주기부터 step이 따라감 (안 보이면 SEARCH로)
-        while self.active:
-            if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
-                with self.lock:
+        while True:
+            with self.lock:
+                if not self.active:
+                    break
+                if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
                     self.end_tour('READY', 'canceled')   # 돌아가 도킹할 때까지 루프가 계속 돌며 RETURNING feedback
             self.send_feedback(goal)
             time.sleep(0.2)
-        reason = self.end_reason
-        result = StartTour.Result(success=reason in ('canceled', 'completed'), message=reason)
         with self.lock:
+            reason = self.end_reason
             visited, self.visited = self.visited, []   # 관람 기록은 로그로 남기고 지운다 (관람객 데이터 남기지 않음)
+        result = StartTour.Result(success=reason in ('canceled', 'completed'), message=reason)
         self.get_logger().info(f'관람 결과: success={result.success}, message={reason}, '
                                f'설명 완료 {visited}')
         if goal is not None:
@@ -63,17 +73,18 @@ class TourMixin:
         내보냄: feedback (state, artwork_id)"""
         if goal is None:
             return
-        if self.state in RETURNING:
-            goal.publish_feedback(StartTour.Feedback(state='RETURNING', artwork_id=0))
-            return
-        if self.reported < len(self.visited):
-            done = self.visited[self.reported]
-            self.reported += 1
-            goal.publish_feedback(StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=done))
-            return
-        explaining = self.explaining if self.state in TRACKING else 0
-        goal.publish_feedback(StartTour.Feedback(
-            state='EXPLAINING' if explaining else 'FOLLOW', artwork_id=explaining))
+        with self.lock:
+            if self.state in RETURNING:
+                fb = StartTour.Feedback(state='RETURNING', artwork_id=0)
+            elif self.reported < len(self.visited):
+                done = self.visited[self.reported]
+                self.reported += 1
+                fb = StartTour.Feedback(state='ARTWORK_COMPLETED', artwork_id=done)
+            else:
+                explaining = self.explaining if self.state in TRACKING else 0
+                fb = StartTour.Feedback(
+                    state='EXPLAINING' if explaining else 'FOLLOW', artwork_id=explaining)
+        goal.publish_feedback(fb)
 
     def follow(self, now, pose, here):
         """[FOLLOW] step [6]에서: 관람객 위치를 알고 마지막으로 본 지 lost_timeout(3 s) 안 → 0.8 m 유지하며 따라간다.
@@ -258,11 +269,13 @@ class TourMixin:
         """[구독] artwork_zone/explaining (Int32) — 설명 중인 작품 번호. 관람 중일 때만 저장.
         받음: msg.data  2 또는 0 (설명 끝)
         바뀜: explaining → send_feedback의 EXPLAINING"""
-        self.explaining = msg.data if self.active else 0
+        with self.lock:
+            self.explaining = msg.data if self.active else 0
 
     def on_explained(self, msg):
         """[구독] artwork_zone/explained (Int32) — 끝까지 설명한 작품 번호. 관람 중이고 처음일 때만 추가.
         받음: msg.data  2
         바뀜: visited → send_feedback이 ARTWORK_COMPLETED로 한 번씩 보고"""
-        if self.active and msg.data not in self.visited:
-            self.visited.append(msg.data)
+        with self.lock:
+            if self.active and msg.data not in self.visited:
+                self.visited.append(msg.data)

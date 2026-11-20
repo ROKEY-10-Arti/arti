@@ -81,7 +81,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
@@ -160,10 +160,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.get_logger().info('파라미터 ' + ', '.join(f'{k}={v}' for k, v in self.p.items()))
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        tf_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT)
         def sub(kind, topic, fn, qos):               # 진단 켜면 수신 간격·지연·콜백 시간을 잰다
             return self.create_subscription(kind, topic, self.timed(topic, fn), qos)
-        # tf는 네임스페이스 안(/robot1/tf)에 있으므로 상대 이름으로 받아 Buffer에 넣는다
-        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], 100)
+        # tf는 네임스페이스 안(/robot1/tf)에 있으므로 상대 이름으로 받아 Buffer에 넣는다 (BEST_EFFORT로 Wi-Fi 재전송 폭주 방지)
+        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], tf_qos)
         sub(TFMessage, 'tf_static', lambda m: [self.tf.set_transform_static(t, 'tf') for t in m.transforms],
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
@@ -184,7 +185,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
 
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.docked = None                          # dock_status (아직 못 받으면 None)
         self.docked_at = None                       # dock_status를 마지막으로 받은 시각 (undock 실패 로그용)
         self.active, self.end_reason = False, ''    # 관람(준비 포함) 중인지, 끝난 이유 (액션 result)
@@ -303,24 +304,30 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         받음: msg.header.frame_id, msg.header.stamp (그 시각 TF로 변환), msg.point.x, y
         바뀜: kf.x (위치·속도), seen (마지막으로 본 시각), seen_since (등록 확인: 계속 보이기 시작한 시각)
         로봇을 움직이거나 state를 바꾸지는 않는다 (그건 step)."""
-        if self.state not in LISTEN:
+        with self.lock:
+            state = self.state
+            reg_first = self.reg_first
+        if state not in LISTEN:
             return                                  # 관람 전·undock·초기 위치·출발 방향 보기 중 좌표는 버림
-        if self.state == 'WAIT_VISITOR' and self.p['auto_register']:
+        if state == 'WAIT_VISITOR' and self.p['auto_register']:
             stamp = Time.from_msg(msg.header.stamp).nanoseconds / 1e9
-            if self.reg_first is None or stamp < self.reg_first + self.p['register_settle']:
+            if reg_first is None or stamp < reg_first + self.p['register_settle']:
                 return                              # 등록 요청 전 좌표 = 예전 대상(또는 아무나)일 수 있음
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
         q = apply(f, np.array([[msg.point.x, msg.point.y]]))[0]
         now = self.now()
-        if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > self.p['register_gap']):
-            self.seen_since = now                   # 등록 확인 시작 (처음이거나 끊겼다 다시 보임)
-        if self.kf.x is None or now - self.seen >= self.p['lost_timeout']:
-            self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
-        else:
-            self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
-        self.seen = now
+        with self.lock:
+            if self.state not in LISTEN:
+                return
+            if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > self.p['register_gap']):
+                self.seen_since = now                   # 등록 확인 시작 (처음이거나 끊겼다 다시 보임)
+            if self.kf.x is None or now - self.seen >= self.p['lost_timeout']:
+                self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
+            else:
+                self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
+            self.seen = now
 
     def person(self):
         """칼만 필터에서 관람객 위치·속도를 꺼낸다. 속도는 max_person_speed(1.5 m/s)로 자름 (튀는 값 막기).
@@ -577,9 +584,12 @@ def main():
     except KeyboardInterrupt:
         signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
     finally:
-        node.active = False                         # 준비·관람 액션 대기 루프 끝냄
+        with node.lock:
+            node.active = False                     # 준비·관람 액션 대기 루프 끝냄
+            node.drive(0.0, 0.0)                    # DDS context 정리 전 정지 명령을 먼저 송신
+            node.enabled = False
+        time.sleep(0.05)
         executor.shutdown(timeout_sec=1.0)
-        node.drive(0.0, 0.0)
         node.destroy_node()
         rclpy.shutdown()
 

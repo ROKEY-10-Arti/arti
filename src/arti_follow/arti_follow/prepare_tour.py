@@ -51,8 +51,14 @@ class PrepareMixin:
             goal.abort()
             return PrepareTour.Result(success=False, message='not_requested')
         with self.lock:
+            if self.active:
+                self.get_logger().warn(f'호출 거절 (이미 진행 중, state={self.state})')
+                if goal is not None:
+                    goal.abort()
+                return PrepareTour.Result(success=False, message='busy')
             self.begin_tour()
-        if self.state == 'UNDOCK':
+            state = self.state
+        if state == 'UNDOCK':
             self.send_prepare_feedback(goal)
             why = self.undock(goal)
             with self.lock:
@@ -61,20 +67,25 @@ class PrepareMixin:
                 elif self.active:
                     self.home = self.lookup(self.p['odom_frame'], self.p['base_frame'])   # 관람 끝나면 돌아올 곳
                     self.set_state('LOCALIZE')
-        while self.active and self.state != 'REGISTERED':
-            if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
-                with self.lock:
+        while True:
+            with self.lock:
+                if not self.active or self.state == 'REGISTERED':
+                    break
+                if goal is not None and goal.is_cancel_requested and self.state not in RETURNING:
                     self.end_tour('READY', 'canceled')   # 언독했으면 돌아가 도킹한 뒤 result (루프가 계속 돎)
             self.send_prepare_feedback(goal)
             time.sleep(0.2)
-        if self.active and self.state == 'REGISTERED':
+        with self.lock:
+            ok = self.active and self.state == 'REGISTERED'
+            reason = self.end_reason or 'unknown'
+            cur_state = self.state
+        if ok:
             self.send_prepare_feedback(goal)        # 마지막 feedback REGISTERED
             self.get_logger().info('prepare_tour 성공 → result success=true, message=registered '
                                    '(goal=succeed, start_tour 대기)')
             if goal is not None:
                 goal.succeed()
             return PrepareTour.Result(success=True, message='registered')
-        reason = self.end_reason or 'unknown'
         if goal is None:
             outcome = 'auto_start (goal 없음)'
         elif reason == 'canceled':
@@ -82,7 +93,7 @@ class PrepareMixin:
         else:
             outcome = 'goal.abort()'
         self.get_logger().error(f'prepare_tour 실패 → result success=false, message={reason!r}, '
-                                f'{outcome} / state={self.state}')
+                                f'{outcome} / state={cur_state}')
         if goal is not None:
             goal.canceled() if reason == 'canceled' else goal.abort()
         return PrepareTour.Result(success=False, message=reason)
@@ -95,12 +106,16 @@ class PrepareMixin:
         내보냄: feedback (state)"""
         if goal is None:
             return
-        if self.state == 'UNDOCK':
+        with self.lock:
+            cur_state = self.state
+            seen_since = self.seen_since
+            seen = self.seen
+        if cur_state == 'UNDOCK':
             state = 'UNDOCKING'
-        elif self.state == 'WAIT_VISITOR':
-            seeing = self.seen_since is not None and self.now() - self.seen <= self.p['register_gap']
+        elif cur_state == 'WAIT_VISITOR':
+            seeing = seen_since is not None and self.now() - seen <= self.p['register_gap']
             state = 'REGISTERING' if seeing else 'ARRIVED'
-        elif self.state == 'REGISTERED':
+        elif cur_state == 'REGISTERED':
             state = 'REGISTERED'
         else:                                       # READY·LOCALIZE·START_FACE·RETURN·DOCK_FACE·DOCK
             state = 'MOVING'
