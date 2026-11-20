@@ -160,8 +160,10 @@ class PrepareTests(unittest.TestCase):
         m.tick(1, Pose2D(g.x, g.y - 0.1, g.yaw), 0, 0, 0)
         m.nav_result('ABORTED', 2)
         self.assertEqual(m.state, 'VERIFY_STOP')
-        m2 = machine()
-        m2.tick(1, Pose2D(0, 0), 0, 0, 0)                          # 도크 앞, 반원 밖
+        m2, z = machine(), self.m.plan.kiosk_zone
+        behind = Pose2D(z.cx - 0.2*math.cos(z.direction), z.cy - 0.2*math.sin(z.direction))
+        self.assertFalse(z.contains(behind))                       # 반원 뒤쪽(키오스크 벽 쪽) = 반지름과 상관없이 밖
+        m2.tick(1, behind, 0, 0, 0)
         m2.nav_result('ABORTED', 2)
         self.assertEqual(m2.state, 'WAIT_RECOVERY')
 
