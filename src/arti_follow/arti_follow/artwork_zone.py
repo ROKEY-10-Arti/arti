@@ -17,7 +17,7 @@
 구역은 arti_common/config/artworks.yaml (map 좌표 반원). 코드에 좌표를 두지 않는다.
 
 작품 구역
-  관람객이 dwell_time(5 s) 동안 dwell_radius(0.6 m) 안에 머무름 (is_dwelling)
+  관람객이 dwell_time(3 s) 동안 dwell_radius(0.6 m) 안에 머무름 (is_dwelling)
   → 그 위치가 작품 반원 안이면 (여럿이면 중심이 가장 가까운 작품, find_artwork_zone)
   → 이미 끝까지 설명한 작품이 아니면 explain_artwork goal
   설명 중 처음 위치에서 leave_distance(1 m) 넘게 벗어나거나 lost_timeout(1 s) 동안 좌표가 없으면 취소
@@ -44,7 +44,7 @@ from arti_common.zones import load_zones   # 구역 읽기·판정 (두 로봇 �
 PARAMS = {
     'zones_file': '',              # '' = 설치된 share/arti_common/config/artworks.yaml
     'map_frame': 'map',
-    'dwell_time': 5.0,             # 이만큼 머물러야 설명 [s] (T32)
+    'dwell_time': 3.0,             # 이만큼 머물러야 설명 [s] (T32)
     'dwell_radius': 0.6,           # 머무름 판정 반경 [m] (T32)
     'leave_distance': 1.0,         # 설명 중 이만큼 벗어나면 취소 [m] (T32)
     'lost_timeout': 1.0,           # 좌표가 이만큼 안 오면 머무름 초기화·설명 취소 [s]

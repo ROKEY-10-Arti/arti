@@ -11,7 +11,7 @@
 ## 범위
 
 관람객을 추적 대상으로 등록하고, 지도 위 위치를 계속 추정해서 약 0.8 m 거리를 유지하며 따라간다.
-작품 반원 구역에서 5초 멈추면 해설하고, 대상을 놓치면 분실 처리, 배터리 부족·종료 구역이면 도킹한다.
+작품 반원 구역에서 3초 멈추면 해설하고, 대상을 놓치면 분실 처리, 배터리 부족·종료 구역이면 도킹한다.
 상태는 중앙 서버가 아니라 **로봇 노드가 직접** 관리한다. 웹(Flask)은 다른 팀이고 ROS 2로 데이터만 주고받는다.
 
 ## 추종 주행 노드: `visitor_follower` (노드 하나, 파일 넷: 본체·`prepare_tour.py`·`start_tour.py`·`motion.py`)
@@ -79,7 +79,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).
   옵션은 follow_test와 같고 `audio:=false`(음성 노드 따로), `player_cmd:=`, `zones_file:=` 추가.
   구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
-  관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
+  관람객이 작품 반원 안에서 3초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
   (관람이 끝나면 `arti/tour_end`로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
   `artwork_zone`은 `follow/state`가 FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정한다 (그 밖에는 `off (follow ...)`, 단독 테스트는 `need_follow:=false`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`
