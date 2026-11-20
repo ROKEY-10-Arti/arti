@@ -64,8 +64,8 @@ nano env.bash
                /                          \
   로봇 PC A (guest) ── robot1      로봇 PC B (guest) ── robot4
   ```
-  - `ARTI_PC_ROLE`: 관제 PC는 `host`, 로봇 PC는 `guest`. **관제 PC(서버 ID 0)는 `192.168.107.42`** 한 대뿐이라 (`/etc/turtlebot4_discovery/setup.bash`의 0번 칸과 같음) 팀원 PC는 `guest`
-  - `ARTI_HOST_PC_IP`: guest만 적는다. 지금은 `192.168.107.42` (예시 파일 값 그대로). 관제 PC에서 `hostname -I`로 확인
+  - `ARTI_PC_ROLE`: 관제 PC는 `host`, 로봇 PC는 `guest`. **관제 PC(서버 ID 0)는 `192.168.107.54`** 한 대뿐이라 (`/etc/turtlebot4_discovery/setup.bash`의 0번 칸과 같음) 팀원 PC는 `guest`
+  - `ARTI_HOST_PC_IP`: guest만 적는다. 지금은 `192.168.107.54` (예시 파일 값 그대로). 관제 PC에서 `hostname -I`로 확인
   - guest PC에서는 `fastdds discovery`/`run_discovery_server.sh`를 켜지 않는다. 켜 두면 쓸모없는 서버가 하나 더 생길 뿐이다
   - `ARTI_DISCOVERY_SERVERS`: **자기가 맡은 로봇만** `서버ID:IP`로 적는다 (robot1 담당 `1:192.168.107.101`)
   - Host PC는 작업하는 동안 별도 터미널에서 `bash scripts/run_discovery_server.sh`를 켜 둔다
@@ -99,8 +99,8 @@ direnv allow
 pb
 cd ~ && cd ~/project/arti           # 다시 들어오면 direnv가 환경을 다시 불러온다
 echo $ROS_DOMAIN_ID $ARTI_ROBOT1_NS
-echo $ROS_DISCOVERY_SERVER            # Guest(robot1 담당): 192.168.107.42:11811;192.168.107.101:11811;
-                                      # Guest(robot4 담당) 예: 192.168.107.42:11811;;;;<robot4 IP>:11811;
+echo $ROS_DISCOVERY_SERVER            # Guest(robot1 담당): 192.168.107.54:11811;192.168.107.101:11811;
+                                      # Guest(robot4 담당) 예: 192.168.107.54:11811;;;;<robot4 IP>:11811;
                                       # /etc/turtlebot4_discovery/setup.bash 값과 같아야 한다
 which python3                       # ~/venvs/arti_venv/bin/python3
 ros2 pkg list | grep arti            # arti_bringup, arti_interfaces 가 보이면 성공
