@@ -145,7 +145,9 @@ class ACourseNode(Node):
         # 도착 뒤 등이 키오스크 면을 똑바로 보게 회전 (전: 반원 가장자리에서 멈춰 관람 시작 때 그림 1 쪽으로 크게 돎)
         self.declare_parameter('kiosk_stop_at_goal', True)     # false = 전처럼 반원 진입 즉시 정지
         self.declare_parameter('kiosk_face_target', 'plane')   # 'plane' = 키오스크 면(zone.direction) / 'center' = 반원 중심(전)
-        # 찍은 자리가 벽 가까이라 Nav2가 끝까지 못 가도 이 거리 안(반원 안)이면 도착 (2026-11-20: 0.22 m 앞에서 멈춤 반복)
+        # 찍은 자리가 벽 가까이라 Nav2가 끝까지 못 가도 이 거리 안(반원 안)이면 도착.
+        # 왜 0.30: 2026-11-20 실주행에서 0.22 m 앞에서 "Failed to make progress"로 멈춤 → 그 거리 + 여유.
+        # 로봇은 찍은 자리 최대 0.30 m 앞에 설 수 있다 (자세한 이유는 config/a_course.yaml kiosk 주석)
         self.declare_parameter('kiosk_goal_tolerance', 0.30)   # [m]
         # [코스 관람 변경 ⑨] 도킹 접근 원에서 정지 후 정면이 충전 스테이션을 보게 회전하고 Dock (course_engine FACE_DOCK 주석 참고).
         # 2026-11-20: 도크를 안 보고 선 채 Dock → Create 3가 찾다가 앞 벽에 부딪혀 Dock 실패.

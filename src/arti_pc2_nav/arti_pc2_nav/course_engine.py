@@ -113,7 +113,11 @@ class TourMachine:
         self.face_timeout = face_timeout           # 회전 결과가 이 안에 안 오면 그대로 다음 단계(등록/Dock) [s]
         # --- [코스 관람 변경 ⑪] 키오스크: 찍은 자리(goal_pose)까지 가서 서고, 키오스크 면을 기준으로 돌기 ---
         self.kiosk_stop_at_goal = kiosk_stop_at_goal   # True: goal_pose까지 감 / False: 전처럼 반원 진입 즉시 정지
-        self.kiosk_goal_tolerance = kiosk_goal_tolerance  # goal_pose 이 거리 안(반원 안)이면 도착으로 멈춤 [m]
+        # 찍은 자리 근처는 costmap 여유 공간 때문에 Nav2가 끝까지 못 들어가거나 미세 조정하다 progress checker로
+        # 실패할 수 있다 (2026-11-20 실주행: 0.22 m 앞에서 "Failed to make progress" 2번 → 도착 판정이 안 나 등록 못 함).
+        # 그래서 반원 안 + goal_pose 이 거리 이내면 도착으로 멈춘다. 0.30 = 실주행에서 멈춘 0.22 m + 여유.
+        # 대신 로봇이 찍은 자리 최대 이만큼 앞에 설 수 있다 (줄이면 정확해지지만 다시 못 멈출 수 있음).
+        self.kiosk_goal_tolerance = kiosk_goal_tolerance  # [m]
         if kiosk_face_target not in ('plane', 'center'):
             raise ValueError(f"kiosk_face_target은 'plane' 또는 'center': {kiosk_face_target!r}")
         self.kiosk_face_target = kiosk_face_target     # 'plane': 등이 키오스크 면을 봄 / 'center': 등이 반원 중심을 봄(전)
@@ -271,7 +275,9 @@ class TourMachine:
         return zone.contains(pose)
 
     def _near_kiosk_goal(self, now: float) -> bool:
-        """[코스 관람 변경 ⑪] 키오스크 반원 안이고 goal_pose에서 kiosk_goal_tolerance 이내인지."""
+        """[코스 관람 변경 ⑪] 키오스크 반원 안이고 goal_pose에서 kiosk_goal_tolerance 이내인지.
+        반원 안도 같이 보는 이유: 도착 뒤 등록·회전은 키오스크 반원 기준이라, 반원 밖에서 멈추면
+        정지 확인(VERIFY_STOP, 반원 안이어야 통과)에서 막힌다."""
         if not self._fresh_inside(now):
             return False
         g = self.plan.kiosk_goal
