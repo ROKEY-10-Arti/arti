@@ -22,8 +22,6 @@ from cv_bridge import CvBridge
 from typing import Optional, Tuple
 from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
 from person_tracker.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
-from person_tracker.local_camera import LocalCamera, parse_source
-from rcl_interfaces.msg import ParameterDescriptor
 
 
 class MultiModelTrackerNode(Node):
@@ -61,8 +59,6 @@ class MultiModelTrackerNode(Node):
 
         self.declare_parameter('use_compressed', True)
         self.declare_parameter('image_topic', '')
-        # 카메라 직접 읽기 (기본): '0' 웹캠 / DroidCam URL. '' 이면 image_topic 구독 (OAK-D·다른 PC 카메라)
-        self.declare_parameter('video_source', '0', ParameterDescriptor(dynamic_typing=True))
         self.declare_parameter('depth_topic', '/oakd/stereo/image_raw')
         self.declare_parameter('initial_family', 3)  # 1:v8n, 2:11n, 3:26n
         self.declare_parameter('initial_task', 3)    # 1:Det, 2:Seg, 3:Pose
@@ -116,13 +112,7 @@ class MultiModelTrackerNode(Node):
         self.ram_mb = 0.0
         self.last_sys_check = 0.0
 
-        src = parse_source(self.get_parameter('video_source').value)
-        self.camera: Optional[LocalCamera] = None
-        if src is not None:                         # 직접 읽기: 토픽 없이 20 Hz로 최신 프레임 처리
-            self.camera = LocalCamera(src, self.get_logger())
-            image_topic = f'webcam:{src}'
-            self.create_timer(1.0 / 20.0, self.poll_camera)
-        elif use_compressed:
+        if use_compressed:
             self.sub = self.create_subscription(
                 CompressedImage,
                 image_topic,
@@ -518,16 +508,6 @@ class MultiModelTrackerNode(Node):
                 cv2.LINE_AA,
             )
         cv2.imshow(self.info_win_name, panel)
-
-    def poll_camera(self):
-        frame = self.camera.take()
-        if frame is not None:
-            self.handle_frame(frame, self.get_clock().now().to_msg())
-
-    def destroy_node(self):
-        if self.camera is not None:
-            self.camera.close()
-        super().destroy_node()
 
     def compressed_callback(self, msg: CompressedImage):
         try:

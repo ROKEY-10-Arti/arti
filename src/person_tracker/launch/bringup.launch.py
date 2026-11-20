@@ -113,7 +113,7 @@ def _launch_setup(context, *args, **kwargs):
             )
             actions.append(TimerAction(period=3.0, actions=[init_pose_node]))
 
-    # 3. 상단 캠 TF(top_cam_tf) (+ 인식 노드를 안 띄우면 camera_pub) — 동일 config_file & namespace & 각도 사용
+    # 3. 상단 카메라(camera_pub) + 상단 캠 TF(top_cam_tf) — 동일 config_file & namespace & 각도 사용
     if run_camera:
         phone_cam_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -130,8 +130,7 @@ def _launch_setup(context, *args, **kwargs):
                 'pitch': str(cam_pitch),
                 'yaw': str(cam_yaw),
                 'use_degrees': 'true' if cam_use_deg else 'false',
-                # 인식 노드가 카메라를 직접 읽으므로(아래 4) camera_pub은 인식 노드를 안 띄울 때만
-                'publish_camera': 'false' if (use_oakd or run_tracker) else 'true',
+                'publish_camera': 'false' if use_oakd else 'true',
                 'use_sim_time': 'true' if use_sim_time else 'false',
             }.items(),
         )
@@ -148,8 +147,6 @@ def _launch_setup(context, *args, **kwargs):
             parameters=[{
                 'use_compressed': True if use_oakd else publish_compressed,
                 'image_topic': tracker_image_topic,
-                # 카메라 직접 읽기 (토픽 없음). OAK-D면 '' → image_topic 구독
-                'video_source': '' if use_oakd else video_source,
                 'use_sim_time': use_sim_time,
                 'cam_x': cam_x,
                 'cam_y': cam_y,

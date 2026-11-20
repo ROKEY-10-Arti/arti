@@ -227,7 +227,7 @@ ros2 topic echo /robot1/follow/state
 | `search_stall_time` / `search_stall_dist` | 3 / 0.05 | 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 이만큼도 안 줄면 막힘 → 그 자리에서 회전 탐색 [s] / [m] |
 | `robot_radius` / `safety_margin` | 0.18 / 0.02 | 로봇 반지름 / 여유 [m]. 합 0.20 안을 지나는 궤적 금지, 통과 가능한 최소 폭 약 0.65 m (0.20/0.05일 때 약 0.85 m) |
 | `search_time` / `wait_time` | 20 / 10 | 회전 탐색 한 바퀴 시간 (속도 = 2π/search_time = 0.31 rad/s) / 정지 대기 [s] |
-| `max_linear` / `max_angular` | 0.2 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
+| `max_linear` / `max_angular` | 0.2 / 0.5 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `face_offset_deg` | -15 | 시작 때 바라볼 방향 보정 [deg] (+ 왼쪽, - 오른쪽) |
 | `undock` | true | 시작 때 undock |

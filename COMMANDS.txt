@@ -62,7 +62,7 @@ ros2 topic echo /robot1/dock_status --once
 # ① 호출·등록 (undock → 위치 잡기 → 키오스크 쪽 회전 → 관람객 등록)
 ros2 action send_goal --feedback /robot1/arti/prepare_tour arti_interfaces/action/PrepareTour "{start: true}"
 
-# ② 자유관람 시작 (artwork_ids는 빈 리스트)
+# ② 자유 관람 시작 (artwork_ids는 빈 리스트)
 ros2 action send_goal --feedback /robot1/arti/start_tour arti_interfaces/action/StartTour "{artwork_ids: []}"
 
 # 작품 설명 조회 서비스 (PC3 서버 /arti/description, 네임스페이스 없음, 작품 번호 int)

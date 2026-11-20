@@ -15,15 +15,15 @@ TurtleBot 4 두 대로 갤러리 관람객을 안내하는 큐레이터 로봇 (
 
 ## PC 간 인터페이스 (팀 합의, 2026-11-18)
 
-PC1 = robot1 PC(이 PC, 자유관람·추종), PC2 = robot4 PC(코스관람), PC3 = 키오스크/관제 PC(작품 DB).
+PC1 = robot1 PC(이 PC, 자유 관람·추종), PC2 = robot4 PC(코스 관람), PC3 = 키오스크/관제 PC(작품 DB).
 PC 사이 기능은 아래 이름·방식으로만 주고받는다. 이름·방식·방향을 바꾸려면 팀 합의 후 이 표부터 고친다.
 
 | 기능 | ROS 2 인터페이스 이름 | 방식 | 요청 방향 | 담당 |
 | --- | --- | --- | --- | --- |
 | Robot1 호출·등록 | `/robot1/arti/prepare_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (PrepareTour) |
 | Robot4 호출·등록 | `/robot4/arti/prepare_tour` | Action | PC3 → PC2 | 코스주행 |
-| Robot1 자유관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (StartTour) |
-| Robot4 코스관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 | 코스주행 |
+| Robot1 자유 관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (StartTour) |
+| Robot4 코스 관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 | 코스주행 |
 | 작품 설명 조회 | `/arti/description` | Service | PC1·PC2 → PC3 | 클라이언트: arti_audio `guide_audio_node` |
 
 - `/arti/description`은 네임스페이스 없는 전역 이름 (PC3 서버 하나를 두 로봇이 같이 씀).

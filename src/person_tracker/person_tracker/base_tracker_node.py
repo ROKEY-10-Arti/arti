@@ -95,7 +95,7 @@ class BaseTrackerNode(Node):
         self.declare_parameter('image_topic', '')
         self.declare_parameter(
             'video_source',
-            '0',
+            '',
             ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter('imgsz', 320)

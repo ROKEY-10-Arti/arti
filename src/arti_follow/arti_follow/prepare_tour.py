@@ -112,12 +112,13 @@ class PrepareMixin:
         도크 밖이면 먼저 Create 3 dock 액션으로 도크에 올린 뒤 undock 한다 (dock_first).
         받음: goal (취소 확인용), (docked: dock_status)
         돌려줌: '' (성공) / 'dock_status_unavailable' / 'no_dock_server' / 'dock_failed' /
-                'no_undock_server' / 'undock_failed' / 'canceled'"""
+                'no_undock_server' / 'undock_failed' / 'canceled' / 'node_shutdown'"""
         # dock_status를 아직 못 받았으면 잠깐(최대 3 s) 기다린다 (노드를 막 켰을 때)
         end = time.monotonic() + 3.0
         while self.docked is None and time.monotonic() < end:
-            if goal is not None and goal.is_cancel_requested:
-                return 'canceled'
+            why = self.interrupted(goal)
+            if why:
+                return why
             time.sleep(0.1)
         if self.docked is None:
             self.get_logger().error('dock_status를 받지 못함 (3 s) → undock 요청을 보내지 않음 '
@@ -141,8 +142,9 @@ class PrepareMixin:
         #    dock_status가 False가 되면 실제로 언독된 것으로 본다 → 로봇이 멈출 때까지 기다린 뒤 성공
         end = time.monotonic() + self.p['undock_timeout']
         while not sent.done():
-            if goal is not None and goal.is_cancel_requested:
-                return 'canceled'
+            why = self.interrupted(goal)
+            if why:
+                return why
             if self.docked is False:
                 log.warn(f'undock 요청 응답은 아직 없지만 dock_status is_docked=False ({time.monotonic() - t0:.1f} s) '
                          f'→ 언독된 것으로 보고 로봇이 멈추길 기다림 (네트워크 지연)')
@@ -161,9 +163,10 @@ class PrepareMixin:
         done = handle.get_result_async()
         # ② 언독 동작이 끝났는지 (결과 응답도 늦거나 사라질 수 있음 → 그때는 dock_status False + 로봇 정지로 판단)
         if not self.wait_future(done, max(end - time.monotonic(), 0.0), goal):
-            if goal is not None and goal.is_cancel_requested:
+            why = self.interrupted(goal)
+            if why:
                 handle.cancel_goal_async()
-                return 'canceled'
+                return why
             if self.docked is False:
                 log.warn('undock 결과 응답은 없지만 dock_status is_docked=False → 로봇이 멈추길 기다림 (네트워크 지연)')
                 return self.wait_undock_motion(time.monotonic() + 15.0, goal, t0)
@@ -197,8 +200,9 @@ class PrepareMixin:
         sent = self.dock_client.send_goal_async(Dock.Goal())
         result = None
         while time.monotonic() < end:
-            if goal is not None and goal.is_cancel_requested:
-                return 'canceled'
+            why = self.interrupted(goal)
+            if why:
+                return why
             if self.docked is True:                     # 응답보다 dock_status가 먼저 올 수 있음
                 time.sleep(1.0)                         # 도크에 완전히 붙고 멈출 시간
                 log.info(f'dock 끝 ({time.monotonic() - t0:.1f} s) → 이어서 undock')
@@ -230,8 +234,9 @@ class PrepareMixin:
         돌려줌: '' (진행) / 'canceled'"""
         log, last, still_since = self.get_logger(), None, None
         while time.monotonic() < end:
-            if goal is not None and goal.is_cancel_requested:
-                return 'canceled'
+            why = self.interrupted(goal)
+            if why:
+                return why
             pose = self.lookup(self.p['odom_frame'], self.p['base_frame'])
             now = time.monotonic()
             if pose is not None and last is not None and math.hypot(pose[0] - last[0], pose[1] - last[1]) < 0.01 \
@@ -246,13 +251,22 @@ class PrepareMixin:
         log.warn('언독 뒤 로봇이 멈췄는지 확인 못 함 (odom TF 없음 또는 계속 움직임) → 그래도 다음 단계로')
         return ''
 
+    def interrupted(self, goal):
+        """기다리는 중(undock·dock·응답) 그만둘 이유가 있는지.
+        돌려줌: 'node_shutdown' (노드가 꺼지는 중) / 'canceled' (키오스크 취소) / '' (계속)"""
+        if self.shutting_down:
+            return 'node_shutdown'
+        if goal is not None and goal.is_cancel_requested:
+            return 'canceled'
+        return ''
+
     def wait_future(self, future, timeout, goal):
         """future(서비스·액션 응답)가 끝날 때까지 기다린다 (다른 스레드가 채움).
         받음: future, timeout [s], goal (취소되면 그만 기다림)
         돌려줌: 끝났으면 True, 시간 초과·취소면 False"""
         end = time.monotonic() + timeout
         while not future.done():
-            if time.monotonic() > end or (goal is not None and goal.is_cancel_requested):
+            if time.monotonic() > end or self.interrupted(goal):
                 return False
             time.sleep(0.1)
         return True
