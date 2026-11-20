@@ -1,4 +1,4 @@
-# course — robot4 코스관람 (src/arti_pc2_nav/)
+# course — robot4 코스 관람 (src/arti_pc2_nav/)
 
 노드·인터페이스·파라미터·실행 방법은 패키지 README가 원본이다: [`src/arti_pc2_nav/README.md`](../../src/arti_pc2_nav/README.md).
 

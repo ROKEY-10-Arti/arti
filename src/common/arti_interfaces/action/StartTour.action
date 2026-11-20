@@ -1,6 +1,6 @@
 # 관람 시작 및 진행 (PC3 Client -> PC1/PC2 Server)
-# 자유관람(Robot1): artwork_ids = []
-# 코스관람(Robot4): artwork_ids = [1, 3, 4] 등
+# 자유 관람(Robot1): artwork_ids = []
+# 코스 관람(Robot4): artwork_ids = [1, 3, 4] 등
 # 관람 종료는 Result, 취소는 Action Cancel로 처리
 
 # Goal
