@@ -16,7 +16,9 @@
                              (visitor_follower auto_register 끔)
     tracker:=front           front_tracker_node: 로봇 바로 앞 사람 자동 등록(register_front) + 클릭 등록
     tracker:=all             multi_tracker_node (예전 노드, 모델·모드 바꾸는 벤치마크 화면) + 앞 사람 자동 등록
-    tracker:=camera          카메라만 띄우고 인식 노드는 뺌 (인식은 다른 PC·bag 재생에서)
+    tracker:=camera          카메라만 띄우고 인식 노드는 뺌 (camera_pub → top_cam 토픽, 인식은 다른 PC에서)
+    video_source:=<값>       인식 노드가 직접 여는 카메라 ('0' 웹캠, DroidCam URL). 비우면 phone_camera.yaml
+                             (gesture·front·all은 카메라를 직접 읽고 영상 토픽을 내지 않음)
     (gesture·front는 person_tracker BaseTrackerNode를 상속한 같은 구조, 좌표 토픽·형식은 셋 다 같음)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
     auto_start:=true         액션 없이 켜자마자 관람 시작
@@ -24,8 +26,8 @@
 전제: AMCL(localization)이 이미 이 네임스페이스로 떠 있다 (map→odom).
 
 뜨는 것
-    phone_camera.launch.py (person_tracker)   camera_pub: 웹캠 → <ns>/top_cam/image_raw/compressed, top_cam_tf
-    인식 노드 (person_tracker, tracker 인자) YOLO 인식·ReID + LiDAR → <ns>/target_person/point_map
+    phone_camera.launch.py (person_tracker)   top_cam_tf (탑캠 위치 TF). camera_pub(웹캠 → top_cam 토픽)은 tracker:=camera일 때만
+    인식 노드 (person_tracker, tracker 인자) 카메라 직접 읽기(video_source) → YOLO 인식·ReID + LiDAR → <ns>/target_person/point_map
                                               인식 창: 사람 박스 + 로봇까지 거리(m) (타겟 초록, '~'는 LiDAR 없이 박스 크기로 추정)
     visitor_follower                          좌표 → <ns>/cmd_vel (화면 없음, 로그만)
 인식 노드는 네임스페이스를 붙여 띄운다. 안 붙이면 설정 파일을 못 찾아 네임스페이스 없는 토픽을 구독해서
@@ -42,10 +44,11 @@ import subprocess
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo,
-                            OpaqueFunction, TimerAction)
+                            OpaqueFunction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
+import yaml
 
 
 # ros2 bag으로 녹화할 토픽 (네임스페이스 뒤 이름).
@@ -82,22 +85,29 @@ def pc_time_sync():
         return f'확인 실패 ({e})'
 
 
-def tracker_actions(ns, mode):
-    """person_tracker: 카메라 launch + 인식 노드 (둘 다 같은 네임스페이스). mode=camera면 카메라만.
-    카메라(video_source)는 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0)."""
+def tracker_actions(ns, mode, video_arg):
+    """person_tracker: 탑캠 TF + 인식 노드 (같은 네임스페이스).
+    인식 노드가 카메라를 직접 연다 (video_source, 토픽 없음): 웹캠은 한 프로세스만 열 수 있으므로
+    camera_pub(웹캠 → top_cam 토픽)은 띄우지 않는다. mode=camera(인식은 다른 PC)일 때만 camera_pub.
+    video_source = video_source 인자, 비었으면 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0)."""
     try:
         share = get_package_share_directory('person_tracker')
     except PackageNotFoundError:
         raise RuntimeError('person_tracker 패키지가 없음 → colcon build 하거나 tracker:=none') from None
-    camera = IncludeLaunchDescription(
+    with open(os.path.join(share, 'config', 'phone_camera.yaml'), encoding='utf-8') as f:
+        video_source = video_arg or str((yaml.safe_load(f) or {}).get('video_source', '0'))
+    direct = mode in TRACKER_NODES
+    camera = IncludeLaunchDescription(            # direct면 top_cam_tf만, camera 모드면 camera_pub도
         PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'phone_camera.launch.py')),
-        launch_arguments={'namespace': ns}.items())
-    if mode not in TRACKER_NODES:
+        launch_arguments={'namespace': ns, 'video_source': video_source,
+                          'publish_camera': 'false' if direct else 'true'}.items())
+    if not direct:
         return [camera]
     executable, name, params = TRACKER_NODES[mode]
     tracker = Node(package='person_tracker', executable=executable, name=name, namespace=ns,
-                   output='screen', parameters=[params])
-    return [camera, TimerAction(period=2.0, actions=[tracker])]     # 카메라가 먼저 켜지게
+                   output='screen', parameters=[{**params, 'video_source': video_source}])
+    return [camera, LogInfo(msg=f'[카메라] {name}가 직접 읽음: video_source={video_source} (토픽 발행 없음)'),
+            tracker]
 
 
 def make_nodes(context):
@@ -128,7 +138,7 @@ def make_nodes(context):
                                    f'bag 저장: {out}'))
 
     if tracker != 'none':
-        actions += tracker_actions(ns, tracker)
+        actions += tracker_actions(ns, tracker, arg('video_source').strip())
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
@@ -149,6 +159,8 @@ def generate_launch_description():
                                           'all: 예전 multi_tracker_node, camera: 카메라만, none: 안 띄움'),
         DeclareLaunchArgument('auto_start', default_value='false',
                               description='true면 액션 없이 켜자마자 prepare → start (undock → 초기 위치 → 인식 → 추종)'),
+        DeclareLaunchArgument('video_source', default_value='',
+                              description="인식 노드가 직접 열 카메라: '0' 웹캠 / DroidCam URL (비우면 person_tracker phone_camera.yaml)"),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
                               description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),

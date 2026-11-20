@@ -87,7 +87,7 @@
   "follow": {
     "_설명": {
       "_묶음": "추종 (FOLLOW): 거리·예측·칼만 필터",
-      "target_distance": "유지 거리 [m]",
+      "target_distance": "유지 거리 [m] (요구사항 약 80cm. 2026-11-20 현장에서 1.2도 시험했다가 0.8로 되돌림)",
       "distance_tolerance": "이 안이면 전진 안 함 [m]",
       "restart_margin": "멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)",
       "lead_time": "관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐) 0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)",
@@ -113,7 +113,9 @@
     "_설명": {
       "_묶음": "놓침 → 탐색 (SEARCH → WAIT → LOST)",
       "lost_timeout": "좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)",
-      "search_move_time": "최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s] (0 → 5: 사람이 그 자리에 서 있으면 영원히 못 도착)",
+      "search_move_time": "최종 좌표로 이동하는 안전 시간 상한. 0이면 상한 없음 [s] (5 → 20, 2026-11-20: 5 s면 1 m 남짓밖에 못 가서 먼 곳에서 놓치면 도착 전에 회전. 막힘은 search_stall_time이 따로 끊음)",
+      "search_stall_time": "최종 좌표로 가는 중 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 search_stall_dist만큼도 안 줄면 막힌 것으로 보고 그 자리에서 회전 탐색 [s] (길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음. 먼저 제자리 회전하는 동안은 셈하지 않음)",
+      "search_stall_dist": "막힘 판정에서 '경로 거리가 줄었다'로 치는 최소 거리 [m]",
       "search_arrive": "최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)",
       "turn_first_angle": "SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°) DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤",
       "search_time": "최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 → 2π/20 = 0.31 rad/s [s] 10 → 20 (2026-11-19: 0.63 rad/s는 너무 빨라 탑캠이 다시 못 잡음)",
@@ -122,7 +124,9 @@
       "wait_time": "회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]"
     },
     "lost_timeout": 1.5,
-    "search_move_time": 5.0,
+    "search_move_time": 20.0,
+    "search_stall_time": 3.0,
+    "search_stall_dist": 0.05,
     "search_arrive": 0.35,
     "turn_first_angle": 1.0,
     "search_time": 20.0,
@@ -133,17 +137,17 @@
   "motion": {
     "_설명": {
       "_묶음": "속도·가감속 (cmd_vel)",
-      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31)",
-      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24)",
-      "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8: 빨리 0.3 m/s까지)",
-      "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8: 0.3 m/s에서 약 6 cm만 더 감, 너무 가까이 가는 것 줄임)",
+      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31). 0.3 → 0.2 (2026-11-20: 현장에서 너무 빠름)",
+      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24). 2026-11-20 현장에서 0.5도 시험했다가 0.8로 되돌림",
+      "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8 → 0.3, 2026-11-20: 부드럽게 출발. 0.3 m/s까지 1 s)",
+      "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8 → 0.3, 2026-11-20: 부드럽게 정지. 0.3 m/s에서 1 s·약 15 cm 더 감 — 0.8일 때는 약 6 cm)",
       "angular_accel": "회전 가속 [rad/s^2] (3.0 → 1.5: 회전이 덜 들쑥날쑥)",
       "min_spin_cmd": "서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s] Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림"
     },
-    "max_linear": 0.3,
+    "max_linear": 0.2,
     "max_angular": 0.8,
-    "linear_accel": 0.8,
-    "linear_decel": 0.8,
+    "linear_accel": 0.3,
+    "linear_decel": 0.3,
     "angular_accel": 1.5,
     "min_spin_cmd": 0.1
   },
