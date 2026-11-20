@@ -72,6 +72,7 @@ import time
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from arti_interfaces.action import PrepareTour, StartTour
+import cv2
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from irobot_create_msgs.action import Dock, Undock
 from irobot_create_msgs.msg import DockStatus
@@ -190,6 +191,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.start = self.load_start_point(self.p['start_point'])          # AMCL 초기 위치 = 도크 (x, y, yaw) map
         self.face_from = self.load_start_point(self.p['face_from_point'])  # 언독 끝 자리 = 시작 회전 기준
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
+        self.map_bad = self.load_map()              # 사람이 있을 수 없는 칸 (A1, 없으면 None)
+        self.anchor = None                          # 마지막으로 확인한 관람객 위치 (odom xy, 시각) — 다시 잡을 때 기준 (A2)
+        self.run_since = None                       # 관람객 좌표가 끊김 없이 오기 시작한 시각 (A4)
+        self.search_goal = None                     # 놓친 순간의 마지막 위치 (odom xy) — 탐색 목표
+        self.reject_log_at = None
 
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
@@ -323,15 +329,73 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
+        p = self.p
+        # [A1] 지도 검사: 벽 안·지도 밖 좌표는 사람일 수 없음 (인식 모듈이 벽 점을 사람으로 고른 경우)
+        if msg.header.frame_id == p['map_frame'] and self.in_wall(msg.point.x, msg.point.y):
+            return self.reject_person('wall', f'벽 안·지도 밖 ({msg.point.x:.2f}, {msg.point.y:.2f})')
         q = apply(f, np.array([[msg.point.x, msg.point.y]]))[0]
         now = self.now()
-        if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > self.p['register_gap']):
+        # [A2] 다시 잡을 때 거리 검사: 놓친 뒤(또는 탐색 중) 들어온 좌표가 마지막으로 확인한 위치(anchor)에서
+        # 사람이 그동안 걸어갈 수 있는 거리(reacquire_radius + reacquire_speed × 지난 시간, 최대 reacquire_max)보다 멀면
+        # 다른 사람·오인식으로 보고 버린다 (2026-11-20: 1초 만에 2~3 m 튄 좌표로 엉뚱한 곳을 따라감)
+        reacquire = self.kf.x is not None and (now - self.seen >= p['lost_timeout'] or self.state in ('SEARCH', 'WAIT'))
+        if reacquire and self.anchor is not None:
+            dist = float(np.linalg.norm(q - self.anchor[0]))
+            allowed = min(p['reacquire_radius'] + p['reacquire_speed'] * (now - self.anchor[1]), p['reacquire_max'])
+            if dist > allowed:
+                return self.reject_person('far', f'마지막 위치에서 {dist:.1f} m (허용 {allowed:.1f} m)')
+        if self.run_since is None or now - self.seen > p['register_gap']:
+            self.run_since = now                    # 끊김 없이 보이기 시작한 시각 (탐색 중 확인용, A4)
+        if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > p['register_gap']):
             self.seen_since = now                   # 등록 확인 시작 (처음이거나 끊겼다 다시 보임)
-        if self.kf.x is None or now - self.seen >= self.p['lost_timeout']:
+        if self.kf.x is None or now - self.seen >= p['lost_timeout']:
             self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
         else:
             self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
         self.seen = now
+        if self.state in ('FOLLOW', 'REGISTERED'):  # 확인된 관람객 위치 = 다음에 다시 잡을 때의 기준
+            self.anchor = (self.kf.x[:2].copy(), now)
+
+    def reject_person(self, key, why):
+        """관람객 좌표를 버릴 때: 1 s에 한 번 WARN (diag면 종류별로 셈).
+        받음: key ('wall' / 'far'), why 로그 문장"""
+        if self.diag is not None:
+            self.diag.add('person_reject:' + key)
+        now = self.now()
+        if self.reject_log_at is None or now - self.reject_log_at >= 1.0:
+            self.reject_log_at = now
+            self.get_logger().warn(f'관람객 좌표 버림: {why}, 상태 {self.state}')
+
+    def load_map(self):
+        """지도(map_file, 비면 $ARTI_MAP)에서 '사람이 있을 수 없는 칸'(벽 + 모르는 곳) 표를 만든다 (A1).
+        벽을 person_wall_margin만큼 넓혀서 본다: 오인식 좌표는 라이다가 벽에 맞은 점(벽 표면)에 찍히고,
+        AMCL 오차로 벽 바로 옆 빈칸에 떨어지기도 한다. 사람은 몸 두께 때문에 라이다 점이 벽에서 15 cm 이상 떨어짐.
+        돌려줌: (bad (H, W) bool, 해상도, 원점 (x, y)), 못 읽으면 None (검사 안 함)"""
+        path = self.p['map_file'] or os.environ.get('ARTI_MAP', '')
+        try:
+            with open(path, encoding='utf-8') as f:
+                m = yaml.safe_load(f)
+            img = cv2.imread(os.path.join(os.path.dirname(path), m['image']), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise OSError(f'지도 그림 {m["image"]}을 못 읽음')
+            occ = img / 255.0 if m.get('negate', 0) else (255 - img.astype(np.float32)) / 255.0
+            bad = (occ > m.get('free_thresh', 0.196)).astype(np.uint8)    # 빈칸이 아닌 곳 = 벽 + 모름
+            k = int(round(self.p['person_wall_margin'] / m['resolution']))
+            if k > 0:                                # 지도 벽은 두께 2칸(10 cm) 선 → 깎으면 사라지므로 넓히기만 한다
+                bad = cv2.dilate(bad, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        except (OSError, KeyError, TypeError, yaml.YAMLError) as e:
+            self.get_logger().warn(f'지도를 못 읽음 ({path or "map_file·$ARTI_MAP 비어 있음"}: {e!r}) → 관람객 좌표 벽 검사 안 함')
+            return None
+        self.get_logger().info(f'관람객 좌표 벽 검사: {path} ({img.shape[1]}×{img.shape[0]}, 벽 {self.p["person_wall_margin"]} m 넓혀 봄)')
+        return bad.astype(bool), float(m['resolution']), (float(m['origin'][0]), float(m['origin'][1]))
+
+    def in_wall(self, x, y):
+        """map 좌표 (x, y)가 벽 안·지도 밖이면 True (지도가 없으면 늘 False)."""
+        if self.map_bad is None:
+            return False
+        bad, res, (ox, oy) = self.map_bad
+        c, r = int((x - ox) / res), bad.shape[0] - 1 - int((y - oy) / res)
+        return not (0 <= r < bad.shape[0] and 0 <= c < bad.shape[1]) or bool(bad[r, c])
 
     def person(self):
         """칼만 필터에서 관람객 위치·속도를 꺼낸다. 속도는 max_person_speed(1.5 m/s)로 자름 (튀는 값 막기).
@@ -446,7 +510,12 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
         if self.kf.x is not None and now - self.seen < p['lost_timeout']:
-            return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
+            # [6-1] 탐색 중(SEARCH·WAIT)에 다시 보이면 search_confirm_time 동안 끊김 없이 보여야 FOLLOW (A4).
+            # 순간 오인식에 끌려가지 않고, 확인되는 동안은 마지막 위치 탐색을 계속한다
+            if self.state not in ('SEARCH', 'WAIT') or now - self.run_since >= p['search_confirm_time']:
+                return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
+            self.dbg['reason'] = 'reacquire_confirm'
+            return self.search(now, pose, here)
         self.holding = False
         # [10] 사람 정보가 아예 없나? (kf.x == None) → 예: 정지 / 아니오: 아래로(탐색)
         # 사람을 한 번도 못 봤으면 탐색할 기준(마지막 위치)이 없다 → 그냥 정지

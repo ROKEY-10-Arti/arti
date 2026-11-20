@@ -224,6 +224,9 @@ ros2 topic echo /robot1/follow/state
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 등록 확인 시간 / 끊김으로 보는 간격 [s] |
 | `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
 | `search_move_time` / `search_arrive` | 20 / 0.35 | 마지막 위치로 이동하는 안전 시간 상한 [s] / 도착 거리 [m] |
+| `person_wall_margin` / `map_file` | 0.1 / '' | 관람객 좌표가 지도의 벽(이만큼 넓혀 봄)·지도 밖이면 버림 [m] / 지도 yaml ('' = $ARTI_MAP) |
+| `reacquire_radius` / `reacquire_speed` / `reacquire_max` | 1.0 / 1.0 / 4.0 | 놓친 뒤 다시 잡을 때 마지막 확인 위치에서 허용 거리 = radius + speed × 지난 시간 (최대 max) [m, m/s, m]. 넘으면 버림 |
+| `search_confirm_time` | 0.5 | 탐색 중 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW [s] (그동안 마지막 위치 탐색 계속) |
 | `search_stall_time` / `search_stall_dist` | 3 / 0.05 | 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 이만큼도 안 줄면 막힘 → 그 자리에서 회전 탐색 [s] / [m] |
 | `robot_radius` / `safety_margin` | 0.18 / 0.02 | 로봇 반지름 / 여유 [m]. 합 0.20 안을 지나는 궤적 금지, 통과 가능한 최소 폭 약 0.65 m (0.20/0.05일 때 약 0.85 m) |
 | `search_time` / `wait_time` | 20 / 10 | 회전 탐색 한 바퀴 시간 (속도 = 2π/search_time = 0.31 rad/s) / 정지 대기 [s] |

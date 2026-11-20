@@ -134,6 +134,23 @@
     "search_spin_extra": 3.0,
     "wait_time": 10.0
   },
+  "person_filter": {
+    "_설명": {
+      "_묶음": "관람객 좌표 거르기 (인식 모듈이 다른 사람·벽을 잡은 좌표 버림, 2026-11-20)",
+      "map_file": "벽 검사에 쓸 지도 yaml ('' = 환경 변수 $ARTI_MAP = 저장소 maps/gallery.yaml). 못 읽으면 검사 안 함",
+      "person_wall_margin": "벽을 이만큼 넓혀서 그 안의 좌표도 버림 [m] (오인식은 벽 표면 라이다 점 + AMCL 오차. 사람 라이다 점은 벽에서 15 cm 이상)",
+      "reacquire_radius": "놓친 뒤 다시 잡을 때, 마지막으로 확인한 위치에서 기본 허용 거리 [m]",
+      "reacquire_speed": "다시 잡을 때 허용 거리가 지난 시간만큼 늘어나는 속도 [m/s] (사람 걷는 속도)",
+      "reacquire_max": "다시 잡을 때 허용 거리 상한 [m] (오래 놓쳐도 이보다 먼 좌표는 버림 → 결국 LOST)",
+      "search_confirm_time": "탐색 중(SEARCH·WAIT) 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW로 돌아감 [s]"
+    },
+    "map_file": "",
+    "person_wall_margin": 0.1,
+    "reacquire_radius": 1.0,
+    "reacquire_speed": 1.0,
+    "reacquire_max": 4.0,
+    "search_confirm_time": 0.5
+  },
   "motion": {
     "_설명": {
       "_묶음": "속도·가감속 (cmd_vel)",

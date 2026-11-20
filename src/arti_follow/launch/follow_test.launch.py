@@ -67,9 +67,18 @@ BAG_TOPICS = [
 # tracker 인자: all = 카메라 + 인식 노드, camera = 카메라만, none = 둘 다 안 띄움
 TRACKER_MODES = ('gesture', 'front', 'all', 'camera', 'none')
 # 인식 노드: (executable, node name, parameters)
+# 재식별(놓친 뒤 같은 관람객인지) 기준을 person_tracker 기본값보다 엄격하게 (gesture·front = BaseTrackerNode 파라미터).
+# 2026-11-20: 놓칠 때마다 다른 사람·벽을 관람객으로 다시 잡음 (ID 50→52→63→66→69→73→71). 대신 진짜 관람객도
+# 다시 잡히기까지 조금 더 걸릴 수 있다 (너무 안 잡히면 값을 낮춘다). 괄호 = person_tracker 기본값
+REID_STRICT = {
+    'reid_match_thresh': 0.60,       # (0.50) 다시 잡을 때 특징 유사도 기준
+    'search_min_sim': 0.58,          # (0.48) 탐색 중 후보가 넘어야 할 최소 유사도
+    'recover_margin': 0.10,          # (0.06) 1위 후보가 2위보다 이만큼 앞서야 복귀 (비슷한 사람 둘이면 안 붙임)
+    'recover_confirm_frames': 5,     # (2) 이만큼 연속 프레임 같은 후보여야 복귀 (15 fps면 약 0.3 s)
+}
 TRACKER_NODES = {
-    'gesture': ('gesture_test_node', 'gesture_test_node', {}),
-    'front': ('front_tracker_node', 'front_tracker_node', {}),
+    'gesture': ('gesture_test_node', 'gesture_test_node', REID_STRICT),
+    'front': ('front_tracker_node', 'front_tracker_node', REID_STRICT),
     'all': ('multi_tracker_node', 'multi_person_tracker_node',
             {'show_info_window': False,      # 화면은 인식 영상 창 하나만
              'show_distance': True}),        # 박스마다 거리(m)

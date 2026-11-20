@@ -33,6 +33,7 @@ class PrepareMixin:
         self.explaining, self.visited = 0, []
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None
+        self.anchor = self.search_goal = self.run_since = None   # 지난 관람객 위치 기준 지움 (A2·A4)
         self.reg_first = self.reg_last = None       # 앞 사람 등록 요청 (WAIT_VISITOR)
         self.get_logger().info('호출 → 관람 준비 시작 (undock → 위치 → 키오스크 → 등록)')
         self.set_state('UNDOCK' if self.p['undock'] else 'LOCALIZE')

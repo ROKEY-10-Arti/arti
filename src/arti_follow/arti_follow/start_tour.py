@@ -121,6 +121,7 @@ class TourMixin:
             self.lost_at, self.spin_at, self.wait_at = now, None, None
             self.best_dist, self.progress_at = None, now   # 이동 진척 (가장 짧았던 경로 거리, 그때 시각)
             self.path_dist = None                   # 이전 dwa(추종) 값은 목표가 달라서 버림
+            self.search_goal = last.copy()          # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4)
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
             self.get_logger().info(f'관람객 놓침 → 마지막 위치까지 이동 ({float(np.linalg.norm(last - here)):.2f} m)')
@@ -131,6 +132,7 @@ class TourMixin:
         #    진척은 직선거리가 아니라 경로 거리(dwa가 구한 '장애물을 돌아가는 거리')로 잰다:
         #    벽을 돌아가느라 직선거리가 잠깐 늘어도 경로 거리는 줄어드므로 막힘으로 잘못 보지 않는다
         if self.spin_at is None:
+            last = self.search_goal if self.search_goal is not None else last
             dist = float(np.linalg.norm(last - here))
             path = self.path_dist                   # 지난 주기 dwa 값. None = 못 구함(전부 막힘·먼저 회전 중)
             reachable = path is not None and path < 49.0   # 약 50 = 길이 안 보임 → 진척 아님 (3 s 뒤 막힘)
@@ -182,6 +184,7 @@ class TourMixin:
         self.end_reason, self.end_at = reason, None
         self.drive(0.0, 0.0)
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
+        self.anchor = self.search_goal = self.run_since = None
         self.tour_end_pub.publish(Empty())
         self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
         if self.p['return_to_dock'] and self.home is not None and self.docked is not True \
