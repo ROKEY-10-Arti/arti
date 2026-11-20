@@ -153,6 +153,10 @@
       "lidar_gate": "칼만 예측 위치에서 이 거리 안의 후보만 [m]",
       "lidar_ambiguity": "두 번째로 가까운 후보가 첫 번째보다 이만큼도 안 멀면 애매 → 안 씀 [m]",
       "person_map_clear": "지도 벽에서 이 거리 안의 후보는 벽으로 보고 버림 [m] (AMCL 오차 포함)",
+      "static_time": "관람객에게서 먼 후보가 같은 칸에 이만큼 계속 보이면 고정 물체(모서리·받침대)로 보고 뺌 [s] (2026-11-20: 모서리를 다리로 잡음, 0 이하 = 안 씀)",
+      "static_forget": "고정 물체 칸이 이만큼 안 보이면 잊음 [s]",
+      "static_learn_dist": "관람객 추정 위치에서 이 거리 안의 후보는 고정 물체로 새로 배우지 않음 [m] (서서 감상하는 관람객 본인 보호)",
+      "static_cell": "고정 물체를 기억하는 칸 크기 [m] (둘레 8칸까지 뺌)",
       "person_obstacle_clear": "추종 중 관람객 추정 위치에서 이 거리 안의 라이다 점은 장애물에서 뺌 [m] (0 = 안 뺌)",
       "seg_gap": "scan 이웃 점 사이가 이보다 멀면 다른 묶음 [m]",
       "leg_min_points": "다리 묶음 최소 점 수",
@@ -166,6 +170,10 @@
     "lidar_gate": 0.5,
     "lidar_ambiguity": 0.3,
     "person_map_clear": 0.15,
+    "static_time": 3.0,
+    "static_forget": 5.0,
+    "static_learn_dist": 1.0,
+    "static_cell": 0.05,
     "person_obstacle_clear": 0.3,
     "seg_gap": 0.1,
     "leg_min_points": 2,
@@ -212,7 +220,7 @@
       "_묶음": "장애물 회피 (LiDAR, DWA + 격자 길 찾기)",
       "robot_radius": "로봇 반지름 [m] (TurtleBot 4 실제 0.171). 0.20 → 0.18 (2026-11-19: 좁은 통로) → 0.28 (2026-11-20: 위에 올린 노트북이 장애물에 부딪힘)",
       "safety_margin": "반지름 밖 여유 [m]. 이 합(0.30) 안을 지나는 궤적은 금지, 길 찾기는 합/grid_resolution 칸만큼 부풀림. 0.05 → 0.02: 통과 가능 최소 폭 약 0.85 m → 0.65 m (시뮬레이션)",
-      "grid_resolution": "길 찾기 격자 칸 [m]",
+      "grid_resolution": "길 찾기 격자 칸 [m] (0.1 → 0.05, 2026-11-20: 10 cm 격자는 벽 점 위치 오차가 한 칸이라 반지름 0.28에서 작품 4 쪽 통로(약 0.8 m)가 막혀 도크 복귀가 안 됨. 계산 약 5 ms)",
       "clear_resolution": "장애물 거리(안전 판정) 격자 칸 [m]. 로봇 주변만 거리 변환으로 계산, 격자 오차(칸 × 1.42)는 가까운 쪽으로 잡음 (2026-11-20: 궤적 점 × 장애물 점 직접 계산 대신)",
       "field_reuse_dist": "목표·로봇이 이보다 덜 움직였으면 지난 길 찾기 거리 지도를 다시 씀 [m] (2026-11-20: 제어 밀림 줄이기)",
       "field_max_age": "길 찾기 거리 지도를 다시 쓰는 최대 시간 [s] (안전 판정은 매 주기 새로)",
@@ -229,11 +237,13 @@
       "scan_min_range": "이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]",
       "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s] (0.5 → 0.8, 2026-11-20: Wi-Fi로 scan이 0.5~0.6 s씩 끊겨 자주 멈춤)",
       "map_obstacles": "지도(map_file)의 벽 칸도 장애물로 피함 (AMCL map→odom이 있을 때). 라이다(약 20 cm 높이)가 못 보는 높은 물체·유리는 지도에 벽으로 그려 둔다 (2026-11-20 저녁 추가). false = 라이다만",
-      "map_obstacle_dock_clear": "도크·언독 지점(init_pose.yaml)에서 이 거리 [m] 안의 지도 벽 점은 뺌 (지도에서 도크가 벽에 붙어 있어 출발·복귀가 막히지 않게)"
+      "map_obstacle_dock_clear": "도크·언독 지점(init_pose.yaml)에서 이 거리 [m] 안의 지도 벽 점은 뺌 (지도에서 도크가 벽에 붙어 있어 출발·복귀가 막히지 않게)",
+      "goal_wall_clear": "추종·탐색 목표가 지도 벽에서 이 거리 [m] 안(또는 벽 속)이면 벽에서 멀어지는 쪽으로 밀어냄. 못 가는 목표면 우회 길을 못 찾음 (2026-11-20: 가운데 벽 끝에서 막힘). 0 = 안 함",
+      "goal_shift_max": "목표를 밀어내는 최대 거리 [m]"
     },
     "robot_radius": 0.28,
     "safety_margin": 0.02,
-    "grid_resolution": 0.1,
+    "grid_resolution": 0.05,
     "clear_resolution": 0.01,
     "field_reuse_dist": 0.1,
     "field_max_age": 0.5,
@@ -250,7 +260,9 @@
     "scan_min_range": 0.2,
     "scan_timeout": 0.8,
     "map_obstacles": true,
-    "map_obstacle_dock_clear": 0.5
+    "map_obstacle_dock_clear": 0.5,
+    "goal_wall_clear": 0.35,
+    "goal_shift_max": 0.6
   },
   "diag": {
     "_설명": {

@@ -126,6 +126,40 @@ def find_people(r, a, ok, p):
     return np.array(people).reshape(-1, 2)
 
 
+class StaticClutter:
+    """라이다 사람 후보 중 '계속 그 자리에 있는 것'(기둥·벽 모서리, 지도에 없는 받침대)을 배워서 뺀다.
+    다리는 움직이고 모서리는 안 움직인다 (2026-11-20: 모서리를 다리로 잡음).
+    - 배우기: 관람객에게서 먼(learn=True) 후보가 같은 칸(cell)에 끊김(1 s) 없이 hold_time 넘게 보이면 고정 물체
+    - 관람객 근처에서는 새로 배우지 않음 → 서서 감상 중인 관람객 본인은 고정 물체가 되지 않음
+      (이미 고정 물체인 칸은 관람객 근처여도 계속 보이면 유지)
+    - forget_time 동안 안 보이면 잊음 (다른 관람객이 서 있다 떠난 자리)"""
+
+    def __init__(self, cell, hold_time, forget_time):
+        self.cell, self.hold, self.forget = cell, hold_time, forget_time
+        self.cells = {}                             # (i, j) → [처음 본 시각, 마지막 본 시각]
+
+    def filter(self, pts, learn, now):
+        """받음: pts 후보 (K, 2) 고정 좌표계(map), learn (K,) bool 배워도 되는 후보, now [s]
+        돌려줌: (K,) bool 남길 후보 (고정 물체 칸과 그 둘레 8칸에 있으면 False)"""
+        keep = np.ones(len(pts), bool)
+        for i, ((x, y), ok) in enumerate(zip(pts, learn)):
+            k = (int(math.floor(x / self.cell)), int(math.floor(y / self.cell)))
+            static = any(self.is_static((k[0] + dx, k[1] + dy), now) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+            c = self.cells.get(k)
+            if c is not None and now - c[1] <= 1.0:
+                c[1] = now                          # 이어서 보임 (고정 물체든 배우는 중이든)
+            elif ok:
+                self.cells[k] = [now, now]          # 처음이거나 끊겼다 다시 → 새로 셈
+            keep[i] = not static
+        if len(self.cells) > 2000 or not int(now) % 5:   # 오래된 칸 정리 (가끔)
+            self.cells = {k: c for k, c in self.cells.items() if now - c[1] <= self.forget}
+        return keep
+
+    def is_static(self, k, now):
+        c = self.cells.get(k)
+        return c is not None and c[1] - c[0] >= self.hold and now - c[1] <= self.forget
+
+
 class PersonKF:
     """관람객 위치 칼만 필터 (등속 모델: 사람이 같은 속도로 걷는다고 가정).
     상태 x = [px, py, vx, vy] (odom 좌표, m · m/s). 튀는 인식 좌표를 매끄럽게 하고, 위치만 받아도 속도를 추정한다."""
@@ -327,7 +361,7 @@ class MotionMixin:
 
     def field(self, goal, here, obs):
         """격자 칸마다 goal까지 장애물을 돌아가는 거리 [m] (dwa의 벌점용).
-        10 cm 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 최단 거리(grid_distances, SciPy 다익스트라).
+        grid_resolution(5 cm) 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 최단 거리(grid_distances, SciPy 다익스트라).
         받음: goal (x, y), here 로봇 (x, y), obs 장애물 점 (N, 2)
         돌려줌: (거리 지도 n×n, 지도 원점 (x, y)). 못 가는 칸은 50"""
         p = self.p
@@ -338,11 +372,14 @@ class MotionMixin:
         c = np.floor((obs - origin) / res).astype(int)
         c = c[((c >= 0) & (c < n)).all(1)]
         grid[c[:, 1], c[:, 0]] = 1
-        k = int(math.ceil((p['robot_radius'] + p['safety_margin']) / res))
+        # 올림 전에 아주 작은 값을 빼서 소수점 오차로 한 칸 더 부풀지 않게 ((0.28 + 0.02) / 0.1 = 3.0000000000000004 → 4칸이
+        # 되어 작품 4 쪽 통로가 막히고 도크 복귀가 60 s 동안 제자리, 2026-11-20)
+        k = int(math.ceil((p['robot_radius'] + p['safety_margin']) / res - 1e-6))
         raw, grid = grid, cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
         gx, gy = np.clip(np.floor((goal - origin) / res).astype(int), 0, n - 1)   # 반올림으로 격자 밖에 나가지 않게
         rx, ry = np.clip(np.floor((here - origin) / res).astype(int), 0, n - 1)
-        grid[max(gy - 1, 0):gy + 2, max(gx - 1, 0):gx + 2] = 0      # 목표 자리는 열어 둔다
+        g = max(1, int(round(0.1 / res)))           # 목표 자리는 ±10 cm 열어 둔다 (격자 크기와 상관없이)
+        grid[max(gy - g, 0):gy + g + 1, max(gx - g, 0):gx + g + 1] = 0
         win = np.s_[max(ry - k, 0):ry + k + 1, max(rx - k, 0):rx + k + 1]
         grid[win] = raw[win]                        # 로봇 주변은 실제 장애물 칸만 막음 (붙어 있어도 출발 가능)
         dist = grid_distances(grid == 0, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]

@@ -92,7 +92,7 @@ from tf2_ros import Buffer
 from visualization_msgs.msg import Marker
 import yaml
 
-from arti_follow.motion import apply, find_people, MotionMixin, PersonKF, yaw_of
+from arti_follow.motion import apply, find_people, MotionMixin, PersonKF, StaticClutter, yaw_of
 from arti_follow.prepare_tour import PrepareMixin
 from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
 
@@ -158,6 +158,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.cam_seen = -1e9                        # 카메라(인식 모듈) 좌표를 마지막으로 받아들인 시각 (라이다 보조와 구분)
         self.people, self.people_time, self.people_used = np.zeros((0, 2)), -1e9, -1e9   # 라이다 사람 후보 (odom)
         self.map_dt = None                          # 지도 벽까지 거리 [m] 격자 (map 좌표, 라이다 사람 후보에서 벽 빼기)
+        self.map_sdf = None                         # 벽 밖 +, 벽 속 - 거리와 기울기 (목표를 벽에서 밀어내기)
+        self.clutter = StaticClutter(self.p['static_cell'], self.p['static_time'], self.p['static_forget'])   # 모서리 등 고정 후보
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
         self.scan_rx = -1e9                         # scan을 받은 시각 (TF 변환 실패로 버려도)
         self.sensor_stop_at = self.sensor_log_at = None   # 센서 때문에 정지 시작한 시각, 마지막 경고 로그 시각
@@ -419,6 +421,13 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         res, (ox, oy) = float(m['resolution']), (float(m['origin'][0]), float(m['origin'][1]))
         free = (occ <= m.get('occupied_thresh', 0.65)).astype(np.uint8)   # 벽 칸 = 0 → 칸마다 벽까지 거리
         self.map_dt = (cv2.distanceTransform(free, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) * res, res, (ox, oy))
+        # 벽 안쪽은 '빈칸까지 거리'를 음수로 → 벽 밖 + 벽 속 어디서나 벽에서 멀어지는 방향(기울기)이 나옴 (reachable_goal).
+        # 여기서는 '모르는 곳'(회색, 가운데 벽 속·지도 밖)도 벽으로 본다: 빈칸으로 보면 목표가 가운데 벽 속으로 밀려 들어감
+        known = (occ <= m.get('free_thresh', 0.196)).astype(np.uint8)
+        sdf = (cv2.distanceTransform(known, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+               - cv2.distanceTransform(1 - known, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)) * res
+        gr, gc = np.gradient(sdf)
+        self.map_sdf = (sdf, gc, -gr)               # 거리, x 방향 기울기, y 방향 기울기 (행은 y가 줄어드는 쪽)
         pts = np.stack([ox + (cols + 0.5) * res, oy + (img.shape[0] - 1 - rows + 0.5) * res], 1)
         for pose in (self.start, self.face_from):   # 도크, 언독 지점 (map)
             if pose is not None:
@@ -480,7 +489,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.update_people(apply(f, find_people(r, a, ok, self.p)), msg.header.stamp)
 
     def update_people(self, cand, stamp):
-        """라이다 사람 후보(odom)에서 지도 벽 근처(person_map_clear 안)를 빼고 저장 + RViz 마커.
+        """라이다 사람 후보(odom)에서 지도 벽 근처(person_map_clear 안)와 고정 물체(StaticClutter)를 빼고 저장 + RViz 마커.
         지도(AMCL map→odom)가 없으면 벽과 구분할 수 없어 후보를 쓰지 않는다 (빈 목록).
         받음: cand 후보 (K, 2) odom, stamp scan 시각
         바뀜: people, people_time"""
@@ -492,7 +501,16 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             m = apply(f, cand)
             c = np.clip(((m[:, 0] - ox) / res).astype(int), 0, dt.shape[1] - 1)
             rr = np.clip(dt.shape[0] - 1 - ((m[:, 1] - oy) / res).astype(int), 0, dt.shape[0] - 1)
-            cand = cand[dt[rr, c] > self.p['person_map_clear']]
+            off_wall = dt[rr, c] > self.p['person_map_clear']
+            cand, m = cand[off_wall], m[off_wall]
+            # 계속 그 자리에 있는 후보(모서리·받침대)는 뺀다. 관람객 근처(static_learn_dist 안)에서는 새로 배우지 않음
+            learn = np.ones(len(cand), bool)
+            if self.kf.x is not None and self.state in TRACKING:
+                last, vel = self.person()
+                ps = last + vel * min(self.now() - self.kf.t, self.p['predict_max'])
+                learn = np.hypot(cand[:, 0] - ps[0], cand[:, 1] - ps[1]) > self.p['static_learn_dist']
+            if self.p['static_time'] > 0:
+                cand = cand[self.clutter.filter(m, learn, self.now())]
         self.people, self.people_time = cand, self.now()
         mk = Marker(type=Marker.SPHERE_LIST, action=Marker.ADD, ns='lidar_people', id=0)
         mk.header.frame_id, mk.header.stamp = self.p['odom_frame'], stamp
@@ -501,6 +519,37 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         mk.pose.orientation.w = 1.0
         mk.points = [Point(x=float(x), y=float(y), z=0.1) for x, y in cand]
         self.people_pub.publish(mk)
+
+    def reachable_goal(self, goal):
+        """주행 목표(odom)가 지도 벽에서 goal_wall_clear 안(로봇 중심이 못 가는 띠, 또는 벽 속)이면
+        벽에서 멀어지는 쪽으로 2 cm씩, 최대 goal_shift_max까지 밀어낸다. 못 가는 목표를 주면 길 찾기 거리 지도가
+        전부 '못 감'이 되어 우회 방향도 사라짐 → 가운데 벽 끝에서 막힘 (2026-11-20). 밀어낸 목표로는 원래 길 찾기가 돌아간다.
+        받음: goal (x, y) odom
+        돌려줌: (x, y) odom (지도·AMCL이 없거나 이미 괜찮으면 그대로)"""
+        p = self.p
+        if self.map_sdf is None or p['goal_wall_clear'] <= 0:
+            return goal
+        to_map = self.lookup(p['map_frame'], p['odom_frame'])
+        to_odom = self.lookup(p['odom_frame'], p['map_frame'])
+        if to_map is None or to_odom is None:
+            return goal
+        sdf, gx, gy = self.map_sdf
+        _, res, (ox, oy) = self.map_dt
+        g = apply(to_map, np.asarray(goal, float)[None])[0]
+        moved = 0.0
+        while moved < p['goal_shift_max']:
+            c, r = int((g[0] - ox) / res), sdf.shape[0] - 1 - int((g[1] - oy) / res)
+            if not (0 <= r < sdf.shape[0] and 0 <= c < sdf.shape[1]) or sdf[r, c] >= p['goal_wall_clear']:
+                break
+            d = np.array([gx[r, c], gy[r, c]])
+            n = float(np.linalg.norm(d))
+            if n < 1e-6:
+                break
+            g, moved = g + d / n * 0.02, moved + 0.02
+        if moved == 0.0:
+            return goal
+        self.dbg['goal_shift'] = moved
+        return apply(to_odom, g[None])[0]
 
     def lidar_assist(self, now):
         """[FOLLOW] 카메라 좌표가 lidar_assist_after 넘게 안 오면(가림·화면 밖·벽 좌표로 버림), 칼만 예측 위치에서

@@ -101,7 +101,7 @@ class TourMixin:
         # [9] 서 있는 중이 아닌가? (holding == False) → 예: dwa로 따라가기 / 아니오: 아래 face()
         # 멀면: 사람에서 로봇 쪽으로 0.8 m 돌아온 점을 목표로 장애물 피해서 이동 (사람 자체를 목표로 하면 부딪힘)
         if not self.holding:
-            goal = ahead - to / d * p['target_distance']
+            goal = self.reachable_goal(ahead - to / d * p['target_distance'])   # 벽에 붙은 목표면 밀어냄 (우회 가능하게)
             self.dbg['reason'] = 'follow'
             return self.drive(*self.dwa(pose, goal, ahead, keep_view=True))
         # 가까우면: 앞으로는 안 가고 사람 쪽으로 몸만 돌림 (작품 감상 중 등)
@@ -123,7 +123,9 @@ class TourMixin:
             self.lost_at, self.spin_at, self.wait_at = now, None, None
             self.best_dist, self.progress_at = None, now   # 이동 진척 (가장 짧았던 경로 거리, 그때 시각)
             self.path_dist = None                   # 이전 dwa(추종) 값은 목표가 달라서 버림
-            self.search_goal = last.copy()          # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4)
+            # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4).
+            # 벽 모서리에 붙어 있으면 로봇이 갈 수 있는 곳으로 밀어냄 → 길 찾기가 모서리를 돌아가는 길을 찾음
+            self.search_goal = np.asarray(self.reachable_goal(last.copy()), float)
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
             # 먼저 돌아볼 곳 = 사람이 가던 쪽 (마지막 위치 + 속도 × search_look_ahead).
