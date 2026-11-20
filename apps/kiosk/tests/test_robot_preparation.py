@@ -1,12 +1,16 @@
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace as Msg
+from unittest.mock import Mock, patch
 
 from app import create_app
-from robot_preparation import Preparation, PreparationError, PreparationManager
+from robot_preparation import Preparation, PreparationError, PreparationManager, RosPreparationTransport
+from ros_events import operator_log
 from tests.auth_helpers import login_admin
 
 
@@ -26,6 +30,8 @@ class FakeTransport:
         self.prepare_release.set()
         self.tour_release = threading.Event()
         self.tour_release.set()
+        self.explanation_release = threading.Event()
+        self.explanation_release.set()
         self.allow_stop = threading.Event()
         self.allow_stop.set()
 
@@ -45,6 +51,9 @@ class FakeTransport:
                 feedback(Msg(state='REGISTERING'))
                 feedback(Msg(state='REGISTERED'))
             else:
+                feedback(Msg(state='MOVING', artwork_id=1))
+                self.explanation_release.wait(2)
+                feedback(Msg(state='EXPLAINING', artwork_id=1))
                 self.tour_release.wait(2)
                 feedback(Msg(state='ARTWORK_COMPLETED', artwork_id=1))
             self.allow_stop.wait(2)
@@ -85,6 +94,81 @@ class PreparationTest(unittest.TestCase):
         self.manager.cancel_job(job)
         self.assertEqual(job.phase, 'cancelled')
 
+    def test_ros_initialization_failure_is_logged_as_an_unsent_action(self):
+        records = []
+        transport = RosPreparationTransport(lambda _: None, lambda *event: records.append(event), discovery_timeout=0)
+        job = Preparation(session={}, robot_id='robot1', robot_namespace='/robot1')
+        with self.assertRaises(PreparationError):
+            transport.action(job, 'prepare_tour', lambda _: None)
+        self.assertEqual(records, [('robot1', '/robot1/arti/prepare_tour goal not sent: ros initialization failed')])
+        self.assertFalse(job.motion_pending)
+
+
+class ActionResponseTest(unittest.TestCase):
+    def setUp(self):
+        self.goal_status = Msg(STATUS_SUCCEEDED=4, STATUS_CANCELED=5, STATUS_ABORTED=6)
+        self.enterContext(patch.dict(sys.modules, {'action_msgs.msg': Msg(GoalStatus=self.goal_status)}))
+        self.result = Future()
+        self.goal_response = Future()
+        self.handle = Mock(accepted=True)
+        self.handle.get_result_async.return_value = self.result
+        self.client = Mock()
+        self.client.wait_for_server.return_value = True
+        self.client.server_is_ready.return_value = True
+        self.client.send_goal_async.return_value = self.goal_response
+        self.logs = []
+        self.transport = RosPreparationTransport(lambda _: None, self.record, discovery_timeout=0.1,
+                                                 server_loss_timeout=0.1)
+        self.transport.types = {'start_tour': Msg(Goal=Msg)}
+        self.transport.clients['/robot1/arti/start_tour'] = self.client
+        self.transport.started.set()
+        self.job = Preparation(dict(id='free', mode='free', artworkIds=['art-01']), phase='touring',
+                               robot_id='robot1', robot_namespace='/robot1', tour_started=True)
+
+    def record(self, robot_id, message):
+        self.logs.append({'robot_id': robot_id, 'message': message})
+
+    def test_lost_server_keeps_job_blocked_until_late_terminal_result(self):
+        finish = Mock()
+        manager = PreparationManager(self.transport, Mock(), finish, Mock())
+        manager.jobs[self.job.session['id']] = self.job
+        self.goal_response.set_result(self.handle)
+        self.client.server_is_ready.return_value = False
+        manager._tour(self.job)
+
+        self.assertEqual(self.job.phase, 'error')
+        self.assertTrue(self.job.motion_pending)
+        self.handle.cancel_goal_async.assert_called_once()
+        failure = next(entry for entry in self.logs if entry['message'].endswith('action server unavailable after send'))
+        self.assertIn('서버 연결이 끊겼습니다', operator_log(failure)['description'])
+        with self.assertRaises(PreparationError):
+            manager.start(dict(id='next', mode='free'))
+        with self.assertRaises(PreparationError):
+            manager.cancel_job(self.job, timeout=0)
+        finish.assert_not_called()
+
+        self.result.set_result(Msg(status=self.goal_status.STATUS_CANCELED, result=Msg(success=False, message='canceled')))
+        manager.cancel_job(self.job, timeout=0)
+        self.assertFalse(self.job.motion_pending)
+        self.assertEqual(self.job.phase, 'cancelled')
+        finish.assert_called_once_with(self.job, 'cancelled')
+
+    def test_missing_goal_response_times_out_and_late_acceptance_requests_cancel(self):
+        with self.assertRaisesRegex(PreparationError, '요청을 받았는지 확인하지 못했어요'):
+            self.transport.action(self.job, 'start_tour', Mock())
+        self.assertEqual(self.logs[-1]['message'], '/robot1/arti/start_tour goal response timeout')
+        self.assertTrue(self.job.motion_pending)
+        self.goal_response.set_result(self.handle)
+        self.handle.cancel_goal_async.assert_called_once()
+
+    def test_unknown_result_status_keeps_motion_unconfirmed(self):
+        self.goal_response.set_result(self.handle)
+        self.result.set_result(Msg(status=0, result=Msg(success=False, message='')))
+        with self.assertRaisesRegex(PreparationError, '액션 응답을 처리하지 못했어요'):
+            self.transport.action(self.job, 'start_tour', Mock())
+        self.assertTrue(self.job.motion_pending)
+        self.assertTrue(any(entry['message'].endswith('action response failed') for entry in self.logs))
+
 
 class PreparationApiTest(unittest.TestCase):
     def setUp(self):
@@ -123,6 +207,26 @@ class PreparationApiTest(unittest.TestCase):
         self.assertEqual(record['status'], 'completed')
         self.assertEqual(record['visitedIds'], ['art-01'])
         self.assertEqual(self.transport.calls, ['prepare_tour', 'start_tour'])
+
+    def test_fleet_activity_follows_action_feedback_and_clears_after_result(self):
+        admin = login_admin(self.app.test_client())
+        self.transport.explanation_release.clear()
+        self.transport.tour_release.clear()
+        self.addCleanup(self.transport.explanation_release.set)
+        self.addCleanup(self.transport.tour_release.set)
+        self.client.post(self.url + '/preparation', json={})
+        job = self.manager.get(self.session['id'])
+        until(lambda: job.phase == 'ready')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '관람 준비 완료 · 관람 시작 대기 중')
+        self.client.patch(self.url, json={'status':'active'})
+        until(lambda: job.tour_state == 'MOVING')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '1번 작품으로 이동 중')
+        self.transport.explanation_release.set()
+        until(lambda: job.tour_state == 'EXPLAINING')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '1번 작품 설명 중')
+        self.transport.tour_release.set()
+        until(lambda: job.phase == 'completed')
+        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '활동 상태 미수신')
 
     def test_cancel_route_then_record_cancel(self):
         self.client.post(self.url+'/preparation', json={})

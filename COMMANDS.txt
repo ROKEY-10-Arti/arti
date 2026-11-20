@@ -76,7 +76,7 @@ ros2 daemon stop; ros2 daemon start
 ros2 topic list | grep robot1
 
 
-# ===== 5. robot4 (코스주행) — 필요할 때만 =====
+# ===== 5. robot4 (코스 관람) — 필요할 때만 =====
 
 ros2 launch arti_bringup localization.launch.py namespace:=/robot4
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=/robot4

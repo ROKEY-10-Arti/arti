@@ -76,7 +76,7 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 | state | 의미 |
 |---|---|
 | MOVING | 다음 작품으로 이동 중 |
-| FOLLOW | 관람객 추종 중 |
+| FOLLOW | 자유 관람 중 관람객을 따라감 |
 | EXPLAINING | 작품 설명 중 |
 | ARTWORK_COMPLETED | 작품 설명 완료 |
 | RETURNING | 복귀 중 |

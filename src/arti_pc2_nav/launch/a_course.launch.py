@@ -60,7 +60,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_yaw', default_value='180.0'),         # 웹캠 방향 [deg] (robot4: 뒤쪽 = 180)
         DeclareLaunchArgument('tracker_node', default_value='gesture_test_node'),  # 인식 노드: gesture_test_node(제스처+클릭) | multi_tracker_node(클릭만)
 
-        # ---------------- 코스 주행 노드 ----------------
+        # ---------------- 코스 관람 노드 ----------------
         Node(package='arti_pc2_nav', executable='a_course_node', name='a_course_node',
              namespace=LaunchConfiguration('robot_namespace'), output='screen',
              # TurtleBot4는 /robot4/tf 를 쓰므로 namespace 안의 tf로 연결

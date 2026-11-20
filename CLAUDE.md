@@ -21,9 +21,9 @@ PC 사이 기능은 아래 이름·방식으로만 주고받는다. 이름·방�
 | 기능 | ROS 2 인터페이스 이름 | 방식 | 요청 방향 | 담당 |
 | --- | --- | --- | --- | --- |
 | Robot1 호출·등록 | `/robot1/arti/prepare_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (PrepareTour) |
-| Robot4 호출·등록 | `/robot4/arti/prepare_tour` | Action | PC3 → PC2 | 코스주행 |
+| Robot4 호출·등록 | `/robot4/arti/prepare_tour` | Action | PC3 → PC2 | 코스 관람 |
 | Robot1 자유 관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 | arti_follow `visitor_follower` (StartTour) |
-| Robot4 코스 관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 | 코스주행 |
+| Robot4 코스 관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 | 코스 관람 |
 | 작품 설명 조회 | `/arti/description` | Service | PC1·PC2 → PC3 | 클라이언트: arti_audio `guide_audio_node` |
 
 - `/arti/description`은 네임스페이스 없는 전역 이름 (PC3 서버 하나를 두 로봇이 같이 씀).
@@ -61,11 +61,11 @@ arti/
 ## 환경
 
 - Ubuntu 24.04, ROS 2 Jazzy. `~/turtlebot4_ws`는 `.bashrc`에서 이미 source됨.
-- 팀 공통 `ROS_DOMAIN_ID=1` (로봇 discovery 설정과 같음). 로봇 네임스페이스: `/robot1`(follow), `/robot4`(코스주행) (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
+- 팀 공통 `ROS_DOMAIN_ID=1` (로봇 discovery 설정과 같음). 로봇 네임스페이스: `/robot1`(follow), `/robot4`(코스 관람) (`env.bash`의 `ARTI_ROBOT1_NS`, `ARTI_ROBOT2_NS`).
 - 저장소 루트(`~/project/arti`) = colcon 워크스페이스 루트. `pb`로 빌드.
 - Python venv: `~/venvs/arti_venv` (`scripts/make_venv.sh`, `--system-site-packages`). pip 의존성은 `requirements.txt`에 버전 고정. pytest·colcon은 pip로 설치하지 않는다(ROS와 충돌).
 - `.envrc`(direnv, 커밋됨)가 들어올 때 `env.bash` → arti venv → `install/setup.bash`를 자동 로드한다. `ws arti`도 같은 효과. 팀원 세팅 절차는 `docs/common/setup.md`, 주행 띄우기는 `docs/common/navigation.md`.
-- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. 서버 ID 0 = `192.168.107.42`(관제 PC, `scripts/run_discovery_server.sh`를 켜 둠). 이 PC(`192.168.107.11`, mu-01, robot1 담당)는 guest → `192.168.107.42:11811;192.168.107.101:11811;` (`/etc/turtlebot4_discovery/setup.bash`와 같은 값). 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
+- ROS 네트워크(RMW, Discovery Server)는 노션 CASE 1-3: **관제 PC(host, discovery server ID 0)에 로봇 PC 2대(guest, 각자 로봇 1대)가 붙는** 구성. `scripts/ros_network.bash`가 `env.bash`의 `ARTI_PC_ROLE`(host/guest), `ARTI_HOST_PC_IP`, `ARTI_DISCOVERY_SERVERS`(자기 로봇만 "서버ID:IP")로 만든다. 서버 ID 0 = `192.168.107.54`(관제 PC, `scripts/run_discovery_server.sh`를 켜 둠). 이 PC(`192.168.107.11`, mu-01, robot1 담당)는 guest → `192.168.107.54:11811;192.168.107.101:11811;` (`/etc/turtlebot4_discovery/setup.bash`와 같은 값). 원본은 `/etc/turtlebot4_discovery/setup.bash`(robot1만). robot4 IP 미정.
 - `env.bash`는 로컬 전용(gitignore). `env.bash.example`을 복사해서 `ROS_DOMAIN_ID`, 로봇 네임스페이스 설정.
 
 ## 패키지 구성
@@ -78,11 +78,11 @@ arti/
 | common | arti_interfaces | ament_cmake | 커스텀 msg/srv/action (역할 간 데이터는 여기로만) | PC 간: `PrepareTour`·`StartTour` action, `Description` srv. 로봇 PC 안: `ExplainArtwork` action, `VisitorDetection` msg |
 | common | arti_bringup | ament_python | 로봇별 launch·파라미터 (localization, nav2, /robot1·/robot4) | `localization.launch.py`(AMCL 시작 위치 = `arti_common/config/init_pose.yaml` dock 자동, `start_point:=undock` 가능) |
 | common | arti_common | ament_python | 공용 좌표 config, 유틸 | `config/artworks.yaml`(작품 4·키오스크 반원 = robot4 실측값, 출구 직사각형 = robot1 값, 두 로봇 공통), `config/init_pose.yaml`(로봇별 도크·출발 위치 — 로봇마다 다른 것은 여기뿐), `zones.py`(구역 읽기·안/밖 판정 `load_zones`, 두 로봇 공통) |
-| (src 바로 아래) | arti_follow | ament_python | 사용자 추종: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피. 노드 하나에 파일 넷: 본체 `visitor_follower.py`, ① 호출·등록 `prepare_tour.py`, ② 관람 `start_tour.py`, 주행 공통 `motion.py`), `artwork_zone`(작품 반원 구역 3초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`(인식 노드만 빼려면 `tracker:=camera`), 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
+| (src 바로 아래) | arti_follow | ament_python | 자유 관람: 등록·재식별, 위치 추정, 80cm 추종, 분실 처리 | `visitor_follower`(인식 모듈의 `target_person/point_map`으로 플로우차트대로 주행 + LiDAR·depth 회피. 노드 하나에 파일 넷: 본체 `visitor_follower.py`, ① 호출·등록 `prepare_tour.py`, ② 관람 `start_tour.py`, 주행 공통 `motion.py`), `artwork_zone`(작품 반원 구역 3초 정지 → `explain_artwork`, 출구·키오스크 → `guide_message`). 통합 실행 `tour.launch.py`(인식 노드만 빼려면 `tracker:=camera`), 구역 RViz `zone_view.launch.py`(`zone_viz` 마커) |
 | (src 바로 아래) | person_tracker | ament_python | 사람 인식: 탑캠 YOLO 추적·재식별 + LiDAR → `target_person/point_map` (jsbzzz/turtlebot_project에서 가져옴) | `multi_tracker_node`, `camera_pub`, `top_cam_tf` 등 |
 | (src 바로 아래) | arti_audio | ament_python | 작품 설명·안내 음성 (T35). 작품 설명(PC3 `/arti/description`, 작품 번호 int32)과 안내 문구(`config/guide_lines.yaml`)를 실행 중에 edge-tts로 합성(캐시 `~/.cache/arti_audio/tts`) → 스피커(`pw-play`) 재생 | `guide_audio_node` (`explain_artwork` 액션, `guide_message` 토픽, `/arti/description` 클라이언트) |
 
-예정 역할 폴더 (필요해지면 추가): `course/`(코스주행, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).
+예정 역할 폴더 (필요해지면 추가): `course/`(코스 관람, 현재 다른 담당), `docent/`(작품 해설), `fleet/`(배정·통행 순서·도킹·비상 정지), `marking/`(AprilTag 작품 마킹), 키오스크/관제 UI(Figma 설계 중).
 역할 패키지끼리 직접 import하지 않는다.
 문서도 같은 구분: `docs/common/`, `docs/follow/` (`docs/README.md`). 역할 설계(노드·토픽·파라미터)가 정해지면 해당 역할 README 표에 적는다.
 

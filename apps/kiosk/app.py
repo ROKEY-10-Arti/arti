@@ -331,7 +331,7 @@ def create_app(test_config=None):
 
     @app.get("/data")
     def data_page():
-        logs = log_page(get_db(), request.args)
+        logs = log_page(get_db(), request.args, operator_view=True)
         return render_template("data.html", catalog=catalog_data(),
                                logs=logs, total=logs['total'])
 

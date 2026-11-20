@@ -24,7 +24,7 @@ async function refreshFleet() {
     }
     const rows = Object.entries(fleet).map(([name, robot]) => {
       const row = document.createElement("tr");
-      for (const value of [name, robot.battery == null ? "미확인" : robot.battery + "%",
+      for (const value of [name, robot.activity ?? "활동 상태 미수신", robot.battery == null ? "미확인" : robot.battery + "%",
         robot.dock == null ? "미확인" : robot.dock ? "도킹" : "미도킹",
         robot.available == null ? "미확인" : robot.available ? "가능" : "불가"]) {
         row.insertCell().textContent = value;
@@ -36,7 +36,9 @@ async function refreshFleet() {
     delay = 6000;
     document.querySelectorAll(".stats b[id^=fleet-]").forEach(card => { card.textContent = "—"; });
     body.replaceChildren();
-    body.insertRow().insertCell().textContent = "상태 조회 실패";
+    const cell = body.insertRow().insertCell();
+    cell.colSpan = 5;
+    cell.textContent = "상태 조회 실패";
   }
   setTimeout(refreshFleet, delay);
 }

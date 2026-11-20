@@ -21,7 +21,7 @@ ROS 환경 변수는 정상이었다.
 
 ```
 ROS_DOMAIN_ID=1
-ROS_DISCOVERY_SERVER=192.168.107.42:11811;192.168.107.101:11811;
+ROS_DISCOVERY_SERVER=192.168.107.54:11811;192.168.107.101:11811;
 ```
 
 ## 재현 방법
@@ -34,7 +34,7 @@ ros2 topic list
 ## 원인
 
 노트북이 다른 Wi-Fi(`DT_Campus_1`, IP `192.168.123.90`)에 자동으로 연결돼 있었다.
-Discovery Server(관제 PC `192.168.107.42`)와 robot1(`192.168.107.101`)에 ping도 안 가서 discovery가 전혀 안 됐다.
+Discovery Server(관제 PC `192.168.107.54`)와 robot1(`192.168.107.101`)에 ping도 안 가서 discovery가 전혀 안 됐다.
 
 ## 해결
 
@@ -48,7 +48,7 @@ Discovery Server(관제 PC `192.168.107.42`)와 robot1(`192.168.107.101`)에 pin
 
 ```bash
 hostname -I                    # 192.168.107.x 인지
-ping -c2 192.168.107.42        # 관제 PC
+ping -c2 192.168.107.54        # 관제 PC
 ping -c2 192.168.107.101       # robot1
 ros2 topic list                # /robot1/..., /arti/... 토픽이 보임
 ```
