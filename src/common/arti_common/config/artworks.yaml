@@ -18,7 +18,7 @@
 artworks:
   - {artwork_id: 1, name: 그림1, x: -2.62,  y: 1.235, facing_deg: 0,      radius: 0.64}     # 왼쪽 벽
   - {artwork_id: 2, name: 그림2, x: -2.52,  y: 3.255, facing_deg: 0,      radius: 0.64}     # 왼쪽 벽
-  - {artwork_id: 3, name: 그림3, x: -1.265, y: 5.145, facing_deg: -88.83, radius: 0.64}     # 위쪽 벽
+  - {artwork_id: 3, name: 그림3, x: -1.265, y: 5.145, facing_deg: -88.83, radius: 0.8}      # 위쪽 벽 (2026-11-20 robot1 현장: 0.64 → 0.8, 관람객 판정 범위 넓힘)
   - {artwork_id: 4, name: 그림4, x: 0.0616, y: 3.665, facing_deg: 174.88, radius: 0.4267}   # 오른쪽 벽
 
 # 안내 구역: 관람객이 들어가면 (멈추지 않아도) guide_message로 안내 음성.
