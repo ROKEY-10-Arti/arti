@@ -21,7 +21,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import psutil
 import rclpy
-from rcl_interfaces.msg import ParameterDescriptor
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -149,6 +149,7 @@ class BaseTrackerNode(Node):
 
         self._cap = None
         self._cap_lock = threading.Lock()
+        self._source_lock = threading.RLock()
         self._latest_cam_frame: Optional[np.ndarray] = None
         self._latest_cam_stamp = None
         self._stop_event = threading.Event()
@@ -157,25 +158,11 @@ class BaseTrackerNode(Node):
         self.sub = None
         self.image_source_label = ''
 
-        raw_source = str(self.get_parameter('video_source').value).strip()
-        if raw_source:
-            src: Union[int, str] = int(raw_source) if raw_source.isdigit() else raw_source
-            self.image_source_label = f'webcam:{src}'
-            self._start_local_capture(src)
-        else:
-            ns = self.get_namespace()
-            use_compressed = bool(self.get_parameter('use_compressed').value)
-            custom_topic = str(self.get_parameter('image_topic').value)
-            image_topic = resolve_image_topic(ns, use_compressed, custom_topic)
-            self.image_source_label = image_topic
-            if use_compressed:
-                self.sub = self.create_subscription(
-                    CompressedImage, image_topic, self._compressed_cb, qos_profile_sensor_data
-                )
-            else:
-                self.sub = self.create_subscription(
-                    Image, image_topic, self._raw_cb, qos_profile_sensor_data
-                )
+        raw_source = self._normalize_video_source(self.get_parameter('video_source').value)
+        use_compressed = bool(self.get_parameter('use_compressed').value)
+        custom_topic = str(self.get_parameter('image_topic').value).strip()
+        self._configure_video_input(raw_source, use_compressed, custom_topic)
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.win_name = win_name
         if self.show_gui:
@@ -219,6 +206,84 @@ class BaseTrackerNode(Node):
                 ema_alpha=float(cfg['ema_alpha']),
                 ema_require_single=bool(cfg['ema_require_single']),
             )
+
+    @staticmethod
+    def _normalize_video_source(val) -> str:
+        return '' if val is None else str(val).strip()
+
+    def _stop_video_input(self):
+        """현재 활성화된 로컬 캡처 스레드·타이머 또는 ROS 이미지 구독을 안전하게 정리합니다."""
+        with self._source_lock:
+            if self._cam_timer is not None:
+                self.destroy_timer(self._cam_timer)
+                self._cam_timer = None
+            self._stop_event.set()
+            if self._cap_thread is not None and self._cap_thread.is_alive():
+                self._cap_thread.join(timeout=1.0)
+            self._cap_thread = None
+            if self._cap is not None:
+                if self._cap.isOpened():
+                    self._cap.release()
+                self._cap = None
+            with self._cap_lock:
+                self._latest_cam_frame = None
+                self._latest_cam_stamp = None
+            if self.sub is not None:
+                self.destroy_subscription(self.sub)
+                self.sub = None
+
+    def _configure_video_input(self, raw_source: str, use_compressed: bool, custom_topic: str):
+        """지정된 video_source 또는 ROS 토픽 설정으로 영상 입력을 (재)구성합니다."""
+        with self._source_lock:
+            self._stop_video_input()
+            self._stop_event.clear()
+            self.last_frame_wall_time = 0.0
+            if raw_source:
+                src: Union[int, str] = int(raw_source) if raw_source.isdigit() else raw_source
+                self.image_source_label = f'webcam:{src}'
+                self._start_local_capture(src)
+            else:
+                image_topic = resolve_image_topic(
+                    self.get_namespace(), use_compressed, custom_topic
+                )
+                self.image_source_label = image_topic
+                if use_compressed:
+                    self.sub = self.create_subscription(
+                        CompressedImage, image_topic, self._compressed_cb, qos_profile_sensor_data
+                    )
+                else:
+                    self.sub = self.create_subscription(
+                        Image, image_topic, self._raw_cb, qos_profile_sensor_data
+                    )
+
+    def _on_set_parameters(self, params) -> SetParametersResult:
+        """실행 중 video_source / image_topic / use_compressed 변경 시 입력 소스를 즉시 전환합니다."""
+        source_keys = {'video_source', 'use_compressed', 'image_topic'}
+        if not any(p.name in source_keys for p in params):
+            return SetParametersResult(successful=True)
+
+        raw_source = self._normalize_video_source(self.get_parameter('video_source').value)
+        use_compressed = bool(self.get_parameter('use_compressed').value)
+        custom_topic = str(self.get_parameter('image_topic').value).strip()
+        for p in params:
+            if p.name == 'video_source':
+                raw_source = self._normalize_video_source(p.value)
+            elif p.name == 'use_compressed':
+                if not isinstance(p.value, bool):
+                    return SetParametersResult(
+                        successful=False, reason='use_compressed must be bool'
+                    )
+                use_compressed = p.value
+            elif p.name == 'image_topic':
+                custom_topic = '' if p.value is None else str(p.value).strip()
+
+        try:
+            self._configure_video_input(raw_source, use_compressed, custom_topic)
+            self.get_logger().info(f'[영상 소스 전환] -> {self.image_source_label}')
+            return SetParametersResult(successful=True)
+        except Exception as exc:
+            self.get_logger().error(f'[영상 소스 전환 실패] {exc}')
+            return SetParametersResult(successful=False, reason=str(exc))
 
     def _start_local_capture(self, src: Union[int, str]):
         cap = cv2.VideoCapture(src, cv2.CAP_V4L2) if isinstance(src, int) else cv2.VideoCapture(src)
@@ -574,11 +639,7 @@ class BaseTrackerNode(Node):
             self._process_key(key)
 
     def destroy_node(self):
-        self._stop_event.set()
-        if self._cap_thread is not None and self._cap_thread.is_alive():
-            self._cap_thread.join(timeout=1.0)
-        if self._cap is not None and self._cap.isOpened():
-            self._cap.release()
+        self._stop_video_input()
         super().destroy_node()
 
 
