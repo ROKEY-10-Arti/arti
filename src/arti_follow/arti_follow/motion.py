@@ -263,6 +263,22 @@ class MotionMixin:
             return self.drive(*self.ramp(0.0, w))
         return self.drive(*self.dwa(pose, goal, goal))
 
+    def predict_yaw(self, yaw, age, now):
+        """늦게 온 odom yaw에 아직 반영되지 않은 회전 명령을 더해 지금 yaw를 추정한다 (Wi-Fi 지연 보정).
+        cmd_vel도 로봇까지 늦게 가므로(오는 지연 ≈ 가는 지연으로 봄) 최근 2×age 초 동안 보낸 명령이
+        odom에 아직 안 들어 있다고 보고 Σ w·dt 를 더한다. 명령 기록은 drive()가 남김 (최근 약 6 s).
+        받음: yaw  odom이 준 값 [rad], age  그 값이 몇 초 전 것인지 [s], now
+        돌려줌: 추정한 지금 yaw [rad]"""
+        if age <= 0.0 or not np.isfinite(age):
+            return yaw
+        since, add = now - 2.0 * age, 0.0
+        hist = list(self.cmd_hist)
+        for (t0, _, w), nxt in zip(hist, hist[1:] + [(now, 0.0, 0.0)]):
+            a, b = max(t0, since), min(nxt[0], now)
+            if b > a:
+                add += w * (b - a)
+        return yaw + add
+
     def drive(self, v, w):
         """속도 명령을 로봇에 보낸다. enabled가 false면 보내지 않음. 보낸 값을 self.cmd에 기억 (ramp·dwa가 '지금 속도'로 씀).
         서 있을 때(v≈0) min_spin_cmd보다 작은 회전은 0으로: Create 3는 아주 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림.
@@ -271,6 +287,7 @@ class MotionMixin:
         if abs(v) < 0.01 and abs(w) < self.p['min_spin_cmd']:
             w = 0.0
         self.cmd = (v, w)
+        self.cmd_hist.append((self.now(), v, w))    # odom 지연 보정용 (predict_yaw)
         if not self.enabled:
             self.cmd = (0.0, 0.0)
             return

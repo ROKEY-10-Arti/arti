@@ -11,7 +11,7 @@ TurtleBot 4 기본 launch로 지도 위에서 주행을 띄우는 순서다. 터
 
 ```bash
 # 1. localization (AMCL + map_server) — "Creating bond timer..."가 보이면 다음 단계
-#    지도 = $ARTI_MAP, 시작 위치 = arti_common/config/init_pose.yaml의 undock (자동)
+#    지도 = $ARTI_MAP, 시작 위치 = arti_common/config/init_pose.yaml의 dock (자동, 도크 위에서 띄우기. 언독 뒤면 start_point:=undock)
 ros2 launch arti_bringup localization.launch.py namespace:=$ARTI_ROBOT1_NS
 
 # 2. rviz — 위치가 어긋나 있을 때만 상단 "2D Pose Estimate"로 다시 지정
@@ -26,7 +26,7 @@ ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT1_NS
 위와 같고 `$ARTI_ROBOT1_NS`만 `$ARTI_ROBOT2_NS`(`/robot4`)로 바꾼다.
 
 ```bash
-ros2 launch arti_bringup localization.launch.py namespace:=$ARTI_ROBOT2_NS   # init_pose.yaml에 robot4가 없으면 시작 위치 없음 → RViz로 지정
+ros2 launch arti_bringup localization.launch.py namespace:=$ARTI_ROBOT2_NS   # init_pose.yaml robot4 dock에 yaw_deg가 없으면 시작 위치 없음 → RViz로 지정
 ros2 launch turtlebot4_viz view_navigation.launch.py namespace:=$ARTI_ROBOT2_NS
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=$ARTI_ROBOT2_NS
 ```

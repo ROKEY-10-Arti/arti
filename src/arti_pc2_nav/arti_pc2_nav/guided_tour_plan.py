@@ -1,4 +1,4 @@
-"""PC2 코스 계획(데이터 구조) + 반원 지오메트리 + YAML/요청 파서.
+"""PC2 코스 계획(데이터 구조) + 반원 지오메트리 + YAML 파서 (config/a_course.yaml).
 
 ROS에 의존하지 않으므로 단독으로 테스트할 수 있습니다(test_full_course.py).
 
@@ -10,10 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
-import json
 import math
-import uuid
 import yaml
+
+
+def artwork_number(value: Any, name: str) -> int:
+    """작품 번호(int, 1 이상) 검사. PC3 DB 번호와 같아야 함 (bool/문자열 거부)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name}: 작품 번호는 1 이상의 정수여야 합니다: {value!r}")
+    return value
 
 
 def number(value: Any, name: str) -> float:
@@ -89,11 +94,10 @@ class Semicircle:
 
 @dataclass(frozen=True)
 class Artwork:
-    """작품 1개: ID, Nav2 목표 자세, 도착 판정 반원, 해설 ID."""
-    artwork_id: str
+    """작품 1개: 번호(= PC3 DB 번호, 해설 요청에도 그대로 사용), Nav2 목표 자세, 도착 판정 반원."""
+    artwork_id: int
     goal: Pose2D
     zone: Semicircle
-    explanation_id: str
 
 
 @dataclass(frozen=True)
@@ -106,14 +110,15 @@ class CoursePlan:
     # YAML에 exit/dock 섹션이 없으면 None -> 기존 시뮬레이션 동작(출구 생략,
     # 언도킹 직후 위치로 복귀)과 동일하게 동작합니다.
     exit_goal: Optional[Pose2D] = None          # 작품 4 다음 들르는 출구 정지점
-    farewell_text: str = '안녕히가세요'          # 출구 도착 시 TTS 인사말
+    farewell_text: str = 'tour_end'             # 출구 도착 시 안내 키 (arti_audio guide_lines.yaml)
     dock_station: Optional[Pose2D] = None        # 충전 스테이션 실측 위치(참고용)
     dock_approach: Optional[Pose2D] = None       # Nav2로 가는 스테이션 정면 접근점
+    exit_zone: Optional[Any] = None              # 출구 구역 (arti_common.zones.Zone, follow 팀과 같은 직사각형). 도착 판정·RViz
 
-    def selected(self, ids: Optional[tuple[str, ...]]) -> 'CoursePlan':
-        """선택 관람(B 코스): 지정한 작품만 지정 순서로 남긴 새 계획을 반환.
+    def selected(self, ids: Optional[tuple[int, ...]]) -> 'CoursePlan':
+        """선택 관람: 지정한 작품만 지정 순서로 남긴 새 계획을 반환 (start_tour artwork_ids).
 
-        ids가 None이면 전체 관람(A 코스)이므로 그대로 반환.
+        ids가 None이면 전체 관람이므로 그대로 반환.
         dataclasses.replace를 써서 exit/dock 필드는 그대로 유지합니다.
         """
         if ids is None:
@@ -129,66 +134,14 @@ class CoursePlan:
         return replace(self, artworks=tuple(by_id[id_] for id_ in ids))
 
 
-@dataclass(frozen=True)
-class CourseRequest:
-    """PC3(키오스크)에서 들어온 코스 요청."""
-    request_id: str                          # 요청 추적용 ID (A/B 문자열이면 uuid 자동 생성)
-    all_artworks: bool                       # True = 전체 관람(A)
-    artwork_ids: Optional[tuple[str, ...]]   # 선택 관람(B) 작품 목록, A이면 None
-
-
 # ---------------------------------------------------------------------------
 # 파서
 # ---------------------------------------------------------------------------
 
-def parse_course_request(raw: str) -> CourseRequest:
-    """코스 요청 문자열 파싱. PC3 문자열 A, B:1,3 또는 JSON 계약 모두 허용.
-
-    예)  'A'                       -> 전체 관람
-         'B:1,3'                   -> 1, 3번만 관람
-         '{"mode":"COURSE","request_id":"r1","all_artworks":true}'
-    """
-    raw = raw.strip()
-    if not raw:
-        raise ValueError('코스 요청이 비었습니다')
-    # --- 간단 문자열 형식 ---
-    if raw.upper() in {'A', 'ALL'}:
-        return CourseRequest(str(uuid.uuid4()), True, None)
-    if raw.upper().startswith('B:'):
-        ids = tuple(part.strip() for part in raw[2:].split(','))
-        if not ids or any(not t for t in ids):
-            raise ValueError('B:1,3 형식으로 선택 작품을 입력하세요')
-        return CourseRequest(str(uuid.uuid4()), False, ids)
-    # --- JSON 형식 ---
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError) as error:
-        raise ValueError('요청은 A, B:1,3 또는 JSON이어야 합니다') from error
-    if not isinstance(data, dict):
-        raise ValueError('JSON 요청은 객체여야 합니다')
-    if data.get('mode') != 'COURSE':
-        raise ValueError('PC2는 mode=COURSE만 처리합니다')
-    rid = data.get('request_id')
-    if not isinstance(rid, str) or not rid.strip() or len(rid) > 128:
-        raise ValueError('request_id는 1~128자 문자열이어야 합니다')
-    all_ = data.get('all_artworks')
-    if not isinstance(all_, bool):
-        raise ValueError('all_artworks는 true/false이어야 합니다')
-    ids = data.get('artwork_ids', [])
-    if not isinstance(ids, list):
-        raise ValueError('artwork_ids는 배열이어야 합니다')
-    if any(not isinstance(x, (str, int)) or isinstance(x, bool) for x in ids):
-        raise ValueError('artwork_ids에는 문자열 또는 정수만 허용합니다')
-    normalized = tuple(str(x).strip() for x in ids)
-    if not all_ and (not normalized or any(not x for x in normalized)):
-        raise ValueError('선택 코스는 1개 이상의 작품 ID를 포함해야 합니다')
-    if all_ and normalized:
-        raise ValueError('전체 관람은 artwork_ids를 비워야 합니다')
-    return CourseRequest(rid, all_, None if all_ else normalized)
-
-
-def load_course_config(path: str | Path) -> CoursePlan:
+def load_course_config(path: str | Path, zones_file: Optional[str] = None) -> CoursePlan:
     """config/a_course.yaml을 읽어 CoursePlan 생성.
+
+    zones_file: exit.zone이 'arti_common'일 때 읽을 공통 구역 파일 (None = 설치된 arti_common/config/artworks.yaml).
 
     누락된 좌표는 즉시 실패시켜 로봇의 잘못된 이동을 방지.
     goal_pose가 자기 반원 밖에 있으면 '도착 판정 불가'이므로 역시 거부합니다.
@@ -212,27 +165,40 @@ def load_course_config(path: str | Path) -> CoursePlan:
         raise ValueError('artworks는 하나 이상의 작품 목록이어야 합니다')
     works = []
     for item in items:
-        if not isinstance(item, dict) or not str(item.get('artwork_id', '')).strip():
-            raise ValueError('각 작품의 artwork_id가 필요합니다')
-        art_id = str(item['artwork_id'])
+        if not isinstance(item, dict):
+            raise ValueError('각 작품은 {artwork_id, goal_pose, zone} 객체여야 합니다')
+        art_id = artwork_number(item.get('artwork_id'), 'artworks.artwork_id')
         goal = Pose2D.parse(item.get('goal_pose'))
         zone = Semicircle.parse(item.get('zone'))
         if not zone.contains(goal):
             raise ValueError(f'{art_id}: goal_pose가 해당 작품의 반원 바깥입니다')
-        works.append(Artwork(art_id, goal, zone,
-                             str(item.get('explanation_id', art_id))))
+        works.append(Artwork(art_id, goal, zone))
     if len({a.artwork_id for a in works}) != len(works):
         raise ValueError('artwork_id가 중복되었습니다')
 
     # --- [실물 로봇 추가] 출구 정지점 (선택 섹션) ---
     exit_goal = None
-    farewell = '안녕히가세요'
+    exit_zone = None
+    farewell = 'tour_end'
     exit_cfg = data.get('exit')
     if exit_cfg is not None:
         if not isinstance(exit_cfg, dict):
             raise ValueError('exit 설정은 객체여야 합니다')
         exit_goal = Pose2D.parse(exit_cfg.get('goal_pose'))
         farewell = str(exit_cfg.get('farewell', farewell))
+        source = exit_cfg.get('zone')
+        if source is not None:
+            if source != 'arti_common':
+                raise ValueError("exit.zone은 'arti_common'만 쓸 수 있습니다 (arti_common/config/artworks.yaml의 exit)")
+            # follow 팀(arti_follow artwork_zone)과 같은 파일·같은 판정 코드로 출구 구역을 읽는다
+            from arti_common.zones import load_zones
+            _, guides = load_zones(zones_file)
+            found = [g for g in guides if g.id == 'exit']
+            if not found:
+                raise ValueError('arti_common artworks.yaml에 zone_id: exit 구역이 없습니다')
+            exit_zone = found[0]
+            if not exit_zone.contains((exit_goal.x, exit_goal.y)):
+                raise ValueError('exit.goal_pose가 arti_common 출구 구역 바깥입니다')
 
     # --- [실물 로봇 추가] 충전 스테이션 / 도킹 접근점 (선택 섹션) ---
     station = approach = None
@@ -243,9 +209,4 @@ def load_course_config(path: str | Path) -> CoursePlan:
         station = Pose2D.parse(dock_cfg.get('station'))
         approach = Pose2D.parse(dock_cfg.get('approach_pose'))
     return CoursePlan(kiosk_goal, kiosk_zone, tuple(works),
-                      exit_goal, farewell, station, approach)
-
-
-def resolve_selection(base: CoursePlan, request: CourseRequest) -> CoursePlan:
-    """요청(A/B)에 맞게 이번 주행에 쓸 계획을 만든다."""
-    return base.selected(request.artwork_ids)
+                      exit_goal, farewell, station, approach, exit_zone)

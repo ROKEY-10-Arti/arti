@@ -84,6 +84,9 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 - 관련 작품이 없으면 `artwork_id = 0`.
 - 작품 설명 완료 시 `ARTWORK_COMPLETED` + 해당 `artwork_id` 전달.
 - 종료는 Result, 취소는 Action Cancel.
+- Result `message` (두 로봇 공통으로 맞춤): 정상 종료 `completed` (`success=true`, Robot4 코스 완료 / Robot1 관람객이 출구 구역에 들어감).
+  Robot1은 그 밖에 `canceled` (`success=true`, 키오스크 취소), `lost`·`not_started` 등 (`success=false`).
+  Robot1은 끝난 뒤 언독 지점으로 돌아가 도킹하고 나서 Result를 보낸다 (그동안 feedback `RETURNING`).
 
 ### 3.3 Description.srv
 작품 ID는 ROS 통신에서 `int32`로 통일, PC3에서 필요 시 DB 문자열 ID로 변환.

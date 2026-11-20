@@ -7,6 +7,8 @@
                                                             (좌표 기록, 설명한 작품, 안내 구역 기록, 진행 중 설명 취소)
 출력  explain_artwork (arti_interfaces/action/ExplainArtwork)  액션 클라이언트 → arti_audio guide_audio_node
       guide_message (std_msgs/String)                         안내 구역(출구·키오스크) 안내 키
+      artwork_zone/entered (std_msgs/String)                  관람객이 들어간 안내 구역 zone_id (들어갈 때마다 한 번)
+                                                            → visitor_follower: end_zone(exit)이면 안내 뒤 관람 끝·도킹
       artwork_zone/state (std_msgs/String)                    지금 판단 (바뀔 때만): idle, dwell 1, explaining 1 ...
       artwork_zone/explaining (std_msgs/Int32, latched)       설명 중인 작품 번호 (시작할 때), 끝나면 0 → visitor_follower feedback
       artwork_zone/explained (std_msgs/Int32)                 끝까지 설명한 작품 번호 (한 번씩) → visitor_follower feedback ARTWORK_COMPLETED
@@ -77,6 +79,7 @@ class ArtworkZone(Node):
 
         self.explain = ActionClient(self, ExplainArtwork, 'explain_artwork')
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
+        self.entered_pub = self.create_publisher(String, 'artwork_zone/entered', 10)
         self.state_pub = self.create_publisher(String, 'artwork_zone/state', 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.explaining_pub = self.create_publisher(Int32, 'artwork_zone/explaining', latched)   # 0 = 설명 안 함
@@ -176,6 +179,7 @@ class ArtworkZone(Node):
             if z.id in self.inside:
                 continue
             self.inside.add(z.id)
+            self.entered_pub.publish(String(data=z.id))     # 들어갈 때마다 (안내 음성 반복 제한과 별개)
             if now - self.guided_at.get(z.id, -1e9) < self.p['guide_rearm_time']:
                 continue
             self.guided_at[z.id] = now
