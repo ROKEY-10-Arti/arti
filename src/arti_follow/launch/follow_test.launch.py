@@ -66,10 +66,21 @@ BAG_TOPICS = [
 
 # tracker 인자: all = 카메라 + 인식 노드, camera = 카메라만, none = 둘 다 안 띄움
 TRACKER_MODES = ('gesture', 'front', 'all', 'camera', 'none')
+# 재식별(놓친 뒤 같은 관람객인지) 기준 (gesture·front = BaseTrackerNode 파라미터). 괄호 = person_tracker 기본값
+# 2026-11-20 이력: 기본값 → 다른 사람·벽을 다시 잡음 / 엄격(0.60·0.58) → 다시 잡기 어려워 되돌림.
+# 2026-11-20 저녁: 로봇이 다가가거나 멀어지면 화면 속 사람 크기가 바뀌어 유사도가 떨어지고 ID가 자주 바뀜
+#   (관람 한 번에 ID 8번, 11 s 동안 못 잡음). 등록 때 특징만 믿지 않고 추종 중 특징을 더 빨리 따라가게 하고,
+#   복귀 기준은 조금만 낮춘다. 비슷한 사람 둘일 때 막는 recover_margin·recover_confirm_frames는 기본값 유지.
+REID_SCALE = {
+    'ema_min_sim': 0.52,             # (0.60) 이 유사도 이상이면 추종 중 특징(recent_bank)을 갱신 → 크기 변화에 따라감
+    'ema_alpha': 0.08,               # (0.04) 갱신할 때 새 특징 비중 (클수록 빨리 따라감, 너무 크면 다른 사람에 물듦)
+    'search_min_sim': 0.44,          # (0.48) 탐색 중 후보가 넘어야 할 최소 외형 유사도
+    'reid_match_thresh': 0.46,       # (0.50) 복귀 점수 기준 (외형 0.65 + 위치 0.35)
+}
 # 인식 노드: (executable, node name, parameters)
 TRACKER_NODES = {
-    'gesture': ('gesture_test_node', 'gesture_test_node', {}),     # 재식별 기준은 person_tracker 기본값
-    'front': ('front_tracker_node', 'front_tracker_node', {}),      # (2026-11-20 엄격하게 해 봤으나 다시 잡기 어려워 되돌림)
+    'gesture': ('gesture_test_node', 'gesture_test_node', REID_SCALE),
+    'front': ('front_tracker_node', 'front_tracker_node', REID_SCALE),
     'all': ('multi_tracker_node', 'multi_person_tracker_node',
             {'show_info_window': False,      # 화면은 인식 영상 창 하나만
              'show_distance': True}),        # 박스마다 거리(m)
