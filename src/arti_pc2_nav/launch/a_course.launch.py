@@ -36,7 +36,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_tts', default_value='true'),           # TTS 노드 같이 실행
         DeclareLaunchArgument('tts_engine', default_value='gtts'),          # 'gtts' 또는 'espeak'
 
-        # ---------------- 코스 주행 노드 ----------------
+        # ---------------- 코스 관람 노드 ----------------
         Node(package='arti_pc2_nav', executable='a_course_node', name='a_course_node',
              namespace=LaunchConfiguration('robot_namespace'), output='screen',
              # TurtleBot4는 /robot4/tf 를 쓰므로 namespace 안의 tf로 연결

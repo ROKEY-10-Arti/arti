@@ -29,8 +29,8 @@ bash scripts/build-interfaces.sh
 ### 실기와 시뮬레이터 설정
 
 - **실기** — 관제 PC의 Fast DDS Discovery Server를 먼저 실행합니다. `run-dev.sh`는 Jazzy, 빌드된 인터페이스, [중앙 ROS 접속 설정](config/central_ros.json)을 불러옵니다. 서버 실행 방법은 [팀 ROS 환경 설정](../../docs/common/setup.md)을 참고하세요.
-- **Robot1 자유관람** — PC1의 `PrepareTour`·`StartTour` 액션 서버를 사용합니다. [로봇 관람 실행 안내](../../docs/follow/README.md)
-- **Robot4 코스관람** — 실기 연동에는 PC2의 두 액션 서버가 필요합니다. 현재 [PC2 코스 노드](../../src/arti_pc2_nav/arti_pc2_nav/a_course_node.py)는 토픽으로 관람 요청을 받습니다.
+- **Robot1 자유 관람** — PC1의 `PrepareTour`·`StartTour` 액션 서버를 사용합니다. [로봇 관람 실행 안내](../../docs/follow/README.md)
+- **Robot4 코스 관람** — 실기 연동에는 PC2의 두 액션 서버가 필요합니다. 현재 [PC2 코스 노드](../../src/arti_pc2_nav/arti_pc2_nav/a_course_node.py)는 토픽으로 관람 요청을 받습니다.
 - **시뮬레이터** — `/remote`에서 도착, 등록 완료 등의 신호를 보내고 별도 SQLite DB에 테스트 데이터를 저장합니다.
 - **관리자** — 각 실행 모드의 `/data`에서 작품·로봇 상태·로그를 확인합니다. 첫 관리자 계정은 서버가 실행 중인 PC에서 `/admin/setup`을 열어 생성합니다. 시스템 상태 화면은 `/sysmon`입니다.
 
@@ -104,7 +104,7 @@ apps/kiosk/
 | 인터페이스 | 방향 | 데이터 |
 | --- | --- | --- |
 | `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 준비 액션이 성공한 뒤 관람 시작 버튼을 활성화합니다. |
-| `/<robot>/arti/start_tour` (`StartTour`) | 키오스크 → 로봇 | 자유관람 `/robot1`에는 `artwork_ids: []`, 코스관람 `/robot4`에는 정수 작품 ID 목록을 보냅니다. |
+| `/<robot>/arti/start_tour` (`StartTour`) | 키오스크 → 로봇 | 자유 관람 `/robot1`에는 `artwork_ids: []`, 코스 관람 `/robot4`에는 정수 작품 ID 목록을 보냅니다. |
 | `/arti/description` (`Description`) | 로봇 → 키오스크 | 정수 작품 ID로 SQLite의 `Art` 테이블에서 설명을 조회합니다. |
 | `/<robot>/battery_state`, `/<robot>/dock_status` | 로봇 → 키오스크 | 두 로봇의 배터리와 도킹 상태를 구독합니다. |
 
@@ -112,7 +112,7 @@ apps/kiosk/
 
 ## 연결이 안 될 때
 
-키오스크를 실행한 채 별도 터미널에서 같은 ROS 설정을 불러옵니다. 아래 예시는 Robot1 자유관람입니다.
+키오스크를 실행한 채 별도 터미널에서 같은 ROS 설정을 불러옵니다. 아래 예시는 Robot1 자유 관람입니다.
 
 ```bash
 source scripts/central-ros-env.bash

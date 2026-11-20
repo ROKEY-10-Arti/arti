@@ -15,7 +15,7 @@
       arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
                                   feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
                                   result: success(등록 완료), message(실패 이유)
-      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
+      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유 관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
                                   취소하면 관람 끝. feedback: state(FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
       artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id

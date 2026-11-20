@@ -13,7 +13,7 @@ FEEDBACK_LABELS = {
     },
     'start_tour': {
         'MOVING': '이동 중',
-        'FOLLOW': '관람객 추종 중',
+        'FOLLOW': '자유 관람 중',
         'EXPLAINING': '작품 설명 중',
         'ARTWORK_COMPLETED': '작품 설명 완료',
         'RETURNING': '충전 스테이션으로 복귀 중',
@@ -115,11 +115,11 @@ def describe_action(robot, action, event):
     if goal and action == 'start_tour':
         ids = goal[1]
         if ids:
-            description = f'키오스크가 {ids}번 작품의 코스관람 시작을 요청하려고 했습니다.'
+            description = f'키오스크가 {ids}번 작품의 코스 관람 시작을 요청하려고 했습니다.'
         elif robot == 'robot1':
-            description = '키오스크가 자유관람 시작을 요청하려고 했습니다.'
+            description = '키오스크가 자유 관람 시작을 요청하려고 했습니다.'
         else:
-            description = '키오스크가 작품 목록 없이 코스관람 시작을 요청하려고 했습니다.'
+            description = '키오스크가 작품 목록 없이 코스 관람 시작을 요청하려고 했습니다.'
         return True, '요청', description
     communication_issues = {
         'goal not sent: cancelled': '요청이 취소돼 로봇에 보내지 않았습니다.',

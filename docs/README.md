@@ -8,7 +8,7 @@ docs/
 │   ├── setup.md             개발 환경 세팅 (.bashrc, direnv, venv, 빌드)
 │   ├── navigation.md        localization → rviz → nav2 띄우기, 두 로봇 공용 지도
 │   └── requirements.md      노션 BR/SR 요약, 수치 기준, 기능→패키지 매핑
-├── follow/              사용자 추종 팀 (src/arti_follow/)
+├── follow/              자유 관람 팀 (src/arti_follow/)
 │   ├── README.md            범위, 노드·인터페이스·파라미터 설계, 확인 필요 사항
 │   └── tasks.md             노션 작업 목록 T01~T46 체크리스트
 └── troubleshooting/     에러 기록 (하위 폴더도 env/robot/common/follow)

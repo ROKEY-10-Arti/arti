@@ -1,6 +1,6 @@
-# 사용자 추종 (follow)
+# 자유 관람 (follow)
 
-- 로봇: **`/robot1`** (`env.bash`의 `ARTI_ROBOT1_NS`). 코스주행은 `/robot4`
+- 로봇: **`/robot1`** (`env.bash`의 `ARTI_ROBOT1_NS`). 코스 관람은 `/robot4`
 - 패키지: `src/arti_follow` (주행), `src/person_tracker` (사람 인식) (인터페이스는 `src/common/arti_interfaces`)
 - 일정 (노션 간트): 11/16 ~ 11/18 코딩 → 11/19 ~ 11/20 테스트
 - **작업 목록: [tasks.md](tasks.md)** (노션 T01~T46)
@@ -29,7 +29,7 @@
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
 | 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / not_docked·undock_failed·no_localization·canceled …). 관람 중 호출은 키오스크가 막음(dock_status) |
-| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`). 키오스크가 prepare_tour 성공 뒤 한 번만 보내므로 검사하지 않음. 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유 관람 시작 (`artwork_ids: []`). 키오스크가 prepare_tour 성공 뒤 한 번만 보내므로 검사하지 않음. 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
 | 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | `artwork_zone`이 알려 주는 설명 중 작품(latched) → feedback EXPLAINING / 끝까지 설명한 작품 → feedback ARTWORK_COMPLETED 한 번 |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
