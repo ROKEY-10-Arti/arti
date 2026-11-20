@@ -146,12 +146,14 @@ class BaseTrackerNode(Node):
         self.last_loc_result: Optional[TargetLocalizationResult] = None
         self.last_loc_log_time = 0.0
         self._current_frame_stamp = None
+        self._current_frame_rx_wall: float = 0.0
 
         self._cap = None
         self._cap_lock = threading.Lock()
         self._source_lock = threading.RLock()
         self._latest_cam_frame: Optional[np.ndarray] = None
         self._latest_cam_stamp = None
+        self._latest_cam_rx_wall: float = 0.0
         self._stop_event = threading.Event()
         self._cap_thread: Optional[threading.Thread] = None
         self._cam_timer = None
@@ -311,9 +313,11 @@ class BaseTrackerNode(Node):
                 if frame.shape[1] != 640 or frame.shape[0] != 480:
                     frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
                 stamp_msg = self.get_clock().now().to_msg()
+                rx_wall = time.time()
                 with self._cap_lock:
                     self._latest_cam_frame = frame
                     self._latest_cam_stamp = stamp_msg
+                    self._latest_cam_rx_wall = rx_wall
             else:
                 time.sleep(0.02)
 
@@ -321,23 +325,29 @@ class BaseTrackerNode(Node):
         with self._cap_lock:
             frame = self._latest_cam_frame
             frame_stamp = self._latest_cam_stamp
+            rx_wall = self._latest_cam_rx_wall
             self._latest_cam_frame = None
             self._latest_cam_stamp = None
         if frame is not None:
+            self._current_frame_rx_wall = rx_wall or time.time()
             self.handle_frame(frame, frame_stamp=frame_stamp)
 
     def _compressed_cb(self, msg: CompressedImage):
+        rx_wall = time.time()
         try:
             np_arr = np.frombuffer(msg.data, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is not None:
+                self._current_frame_rx_wall = rx_wall
                 self.handle_frame(frame, frame_stamp=msg.header.stamp)
         except Exception as exc:
             self.get_logger().warn(f'Compressed decode error: {exc}', throttle_duration_sec=5.0)
 
     def _raw_cb(self, msg: Image):
+        rx_wall = time.time()
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self._current_frame_rx_wall = rx_wall
             self.handle_frame(frame, frame_stamp=msg.header.stamp)
         except Exception as exc:
             self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
@@ -411,8 +421,14 @@ class BaseTrackerNode(Node):
         """ReID 후보 검증용 3D 위치 추정 콜백(토픽 발행 없이 map 또는 base_link XY 좌표와 센서 출처 반환)."""
         if self.localizer is None:
             return None
+        rx_wall = self._current_frame_rx_wall if self._current_frame_rx_wall > 0.0 else time.time()
         res = self.localizer.localize_target(
-            person, w, h, publish=False, frame_stamp=self._current_frame_stamp
+            person,
+            w,
+            h,
+            publish=False,
+            frame_stamp=self._current_frame_stamp,
+            frame_rx_wall=rx_wall,
         )
         if res.map_xyz is not None:
             return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source
@@ -430,12 +446,14 @@ class BaseTrackerNode(Node):
             return None
 
         h_f, w_f = frame_shape[:2]
+        rx_wall = self._current_frame_rx_wall if self._current_frame_rx_wall > 0.0 else now_wall
         loc_res = self.localizer.localize_target(
             target,
             w_f,
             h_f,
             publish=self.publish_target_topics,
             frame_stamp=frame_stamp,
+            frame_rx_wall=rx_wall,
         )
         self.last_loc_result = loc_res
         if now_wall - self.last_loc_log_time >= 1.0:
