@@ -10,16 +10,16 @@
 #   robot1은 관람객 위치, robot4는 로봇 위치로 같은 반원을 판정한다.
 #   facing_deg = a_course.yaml direction(rad)을 도로 바꾼 값.
 #   (이전 robot1 값, 2026-11-17 벽면 기준: 그림1 (-2.72, 1.23) r 0.7 … — git 기록 참고)
-#   ⚠ 그림4는 반지름 0.43 m로 좁다 — 관람객 위치 판정(robot1)이 잘 안 되면 넓히는 것을 robot4 담당과 협의
+#   ⚠ 2026-11-20 robot1 현장 조정: 그림2·3 반지름 0.8, 그림4 0.6 (관람객 위치 판정). robot4 a_course.yaml은 아직 예전 값
 
 # 작품: 관람객이 구역 안에서 멈추면 (artwork_zone 노드의 dwell_time·dwell_radius)
 #       explain_artwork 액션으로 설명 재생. artwork_id = 작품 번호(int) — ROS 통신의 작품 ID는 int32로 통일
 #       (StartTour, Description, ExplainArtwork, artwork_zone/explaining·explained). PC3 작품 DB 번호와 같다.
 artworks:
   - {artwork_id: 1, name: 그림1, x: -2.62,  y: 1.235, facing_deg: 0,      radius: 0.64}     # 왼쪽 벽
-  - {artwork_id: 2, name: 그림2, x: -2.52,  y: 3.255, facing_deg: 0,      radius: 0.64}     # 왼쪽 벽
+  - {artwork_id: 2, name: 그림2, x: -2.52,  y: 3.255, facing_deg: 0,      radius: 0.8}      # 왼쪽 벽 (2026-11-20 robot1 현장: 0.64 → 0.8, 관람객이 반원 오른쪽 위에 섬)
   - {artwork_id: 3, name: 그림3, x: -1.265, y: 5.145, facing_deg: -88.83, radius: 0.8}      # 위쪽 벽 (2026-11-20 robot1 현장: 0.64 → 0.8, 관람객 판정 범위 넓힘)
-  - {artwork_id: 4, name: 그림4, x: 0.0616, y: 3.665, facing_deg: 174.88, radius: 0.4267}   # 오른쪽 벽
+  - {artwork_id: 4, name: 그림4, x: 0.0616, y: 3.665, facing_deg: 174.88, radius: 0.6}      # 오른쪽 벽 (2026-11-20 robot1 현장: 0.4267 → 0.6, 관람객이 경계 3~4 cm 밖에 섬)
 
 # 안내 구역: 관람객이 들어가면 (멈추지 않아도) guide_message로 안내 음성.
 #            guide는 arti_audio guide_lines.yaml의 guides 키.
