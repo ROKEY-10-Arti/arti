@@ -98,7 +98,7 @@ robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_co
 | ⑧ | 해설 중 반원 밖 0.15 m·3 s까지 봐줌 | 호 바로 안쪽에 서서 AMCL이 한 번 튀면 0.7 s 만에 실패 | `course_engine.py` `_explain_ok`, `tick` (5), `explanation_result` |
 | ⑨ | 도킹 접근 원에서 정면이 도크를 보게 spin 후 Dock | 도크를 안 보고 Dock → Create 3가 앞 벽에 부딪혀 실패 | `course_engine.py` `FACE_DOCK`, `_dock_turn` / `a_course.yaml` dock |
 | ⑩ | 인식 노드가 웹캠 직접 열기, `camera_pub` 안 띄움 (`direct_camera`) | 영상이 토픽을 거치고, 같은 웹캠을 두 번 엶 | launch `_tracker` (인식 노드에 `video_source`를 넘기고 `phone_camera.launch.py` `publish_camera:=false`. person_tracker 코드는 안 고침) |
-| ⑪ | 키오스크는 반원 진입 즉시 말고 `kiosk.goal_pose`(RViz로 찍은 자리)까지 가서 서고, 등이 키오스크 면을 똑바로 보게 회전 (`kiosk_stop_at_goal`, `kiosk_face_target: plane`) | 반원 가장자리에 서서 서는 자리·방향이 매번 달라, 관람 시작 때 그림 1 쪽으로 크게 휙 돎 | `course_engine.py` `tick` (1), `nav_result`, `_kiosk_turn` / `a_course.yaml` kiosk `goal_pose` (-1.032, 0.0668) → (-1.2154, 0.1336) / 자리 찍기 `launch/zone_view.launch.py` |
+| ⑪ | 키오스크는 반원 진입 즉시 말고 `kiosk.goal_pose`(RViz로 찍은 자리)까지 가서 서고, 등이 키오스크 면을 똑바로 보게 회전 (`kiosk_stop_at_goal`, `kiosk_face_target: plane`) | 반원 가장자리에 서서 서는 자리·방향이 매번 달라, 관람 시작 때 그림 1 쪽으로 크게 휙 돎 | `course_engine.py` `tick` (1), `nav_result`, `_kiosk_turn` / `a_course.yaml` kiosk `goal_pose` (-1.032, 0.0668) → (-1.4460, 0.0066) / 자리 찍기 `launch/zone_view.launch.py` |
 
 그 밖에: 로봇 OAK-D 끔 (robot4는 웹캠 사용, 로봇 `standard.launch.py`에서 주석 처리 — 저장소 밖).
 

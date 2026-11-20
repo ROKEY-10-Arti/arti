@@ -6,7 +6,7 @@
 # /home/rokey/f_project/src/arti_gallery/config/a_course.yaml 실측 밑변/지름 기반 계산값
 # 코스 시작 지점 (언도킹 후 가장 먼저 감)
 kiosk:
-  goal_pose: {x: -1.2154, y: 0.1336, yaw: 1.5944}  # [코스 관람 변경 ⑪] 2026-11-20 RViz Publish Point로 찍은 자리, follow 팀과 같은 위치로 통일 (전: -1.032, 0.0668)
+  goal_pose: {x: -1.4460, y: 0.0066, yaw: 1.5944}  # [코스 관람 변경 ⑪] 2026-11-20 RViz Publish Point로 찍은 자리 (3번째, 전: -1.2154, 0.1336 / 처음: -1.032, 0.0668)
   # [코스 관람 변경 ⑦] 2026-11-20: -1.5472(키오스크 벽을 봄) → 반대. robot4 웹캠이 뒤(camera_yaw 180)를 보므로 등을 키오스크 쪽으로
   #   [코스 관람 변경 ⑪] 반원 진입으로 멈추지 않고 이 x, y까지 가서 선다 (kiosk_stop_at_goal). RViz Publish Point로 찍은 값.
   #   yaw = zone.direction과 같게 → 도착하면 등(웹캠)이 키오스크 면을 봄 (다르면 도착 뒤 Nav2 spin으로 zone.direction에 맞춤)

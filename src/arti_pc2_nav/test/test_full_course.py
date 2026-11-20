@@ -166,9 +166,11 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(m2.state, 'WAIT_RECOVERY')
 
     def test_kiosk_near_goal_counts_as_arrived(self):
-        """[⑪] 2026-11-20 실주행: 찍은 자리 0.22 m 앞 (-1.04, 0.02)에서 Nav2가 더 못 감 → 0.30 m 안이면 도착."""
-        m, g = self.m, self.m.plan.kiosk_goal
-        p = Pose2D(-1.04, 0.02, 2.5)
+        """[⑪] 2026-11-20 실주행: 찍은 자리 0.22 m 앞에서 Nav2가 더 못 감 → 반원 안 + 0.30 m 안이면 도착."""
+        m, g, z = self.m, self.m.plan.kiosk_goal, self.m.plan.kiosk_zone
+        a = math.atan2(z.cy - g.y, z.cx - g.x)                    # goal에서 반원 중심 쪽으로 0.22 m
+        p = Pose2D(g.x + 0.22*math.cos(a), g.y + 0.22*math.sin(a), 2.5)
+        self.assertTrue(z.contains(p))
         self.assertLess(math.hypot(p.x - g.x, p.y - g.y), 0.30)
         ev = m.tick(1, p, 0, 0.2, 0)
         self.assertEqual(m.state, 'CANCELING')
