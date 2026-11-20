@@ -11,6 +11,8 @@ def bootstrap_venv():
     candidates = []
     if os.environ.get('VIRTUAL_ENV'):
         candidates.append(os.environ['VIRTUAL_ENV'])
+    if os.environ.get('ARTI_VENV'):                 # env.bash의 arti venv 위치 (예: ~/arti/arti_venv)
+        candidates.append(os.environ['ARTI_VENV'])
 
     candidates.extend([
         os.path.expanduser('~/venvs/arti_venv'),
@@ -23,9 +25,13 @@ def bootstrap_venv():
         if not os.path.isdir(venv_root):
             continue
         for site_dir in sorted(glob.glob(os.path.join(venv_root, 'lib', 'python3*', 'site-packages')), reverse=True):
-            if os.path.isdir(site_dir) and site_dir not in sys.path:
+            if not os.path.isdir(site_dir):
+                continue
+            # 이미 이 venv의 python으로 실행 중(sys.path에 있음)이면 그대로 쓴다.
+            # 다음 후보(rokey_venv 등)를 앞에 끼우면 numpy 2·opencv 5가 섞여 cv_bridge가 깨진다.
+            if site_dir not in sys.path:
                 sys.path.insert(0, site_dir)
-                return site_dir
+            return site_dir
     return None
 
 
@@ -69,9 +75,16 @@ def resolve_image_topic(ns: str, use_compressed: bool, custom_topic: str = '') -
         return ns_prefix + sub_suffix
 
     cfg_candidates = [
-        os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml'),
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
     ]
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        cfg_candidates.insert(
+            0,
+            os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
+        )
+    except Exception:
+        pass
     for cfg_path in cfg_candidates:
         if os.path.isfile(cfg_path):
             try:

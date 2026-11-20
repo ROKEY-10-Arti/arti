@@ -1,11 +1,17 @@
 """ROS에 의존하지 않는 ArtI PC2 코스 상태 머신(TourMachine).
 
-전체 흐름:
-  UNDOCK(ROS 노드가 처리) -> KIOSK -> 작품 1..N -> EXIT(인사) ->
-  DOCK APPROACH(스테이션 정면) -> Dock 액션 -> dock_status 확인 -> COMPLETED
+전체 흐름 (PC3 액션 2개):
+  prepare_tour -> start():   UNDOCK(ROS 노드) -> KIOSK -> REGISTERING(관람객 인식 1초) -> WAIT_START
+  start_tour   -> begin_tour(): 작품 1..N -> EXIT(인사) -> DOCK APPROACH -> Dock -> dock_status 확인 -> DONE
+  등록 실패 / 대기 시간 초과 / 취소 / Nav2 실패 -> abort_to_home: 충전 스테이션으로 복귀(NAV_HOME -> Dock)
 
-- EXIT는 계획에 exit_goal이 있을 때만 사용합니다(반원 없는 점 목표, 거리 판정).
-- 객체 인식/추적 없음. 실제 이동은 전부 Nav2가 담당합니다.
+  start_tour(begin_tour(artwork_ids))는 WAIT_START에서 선택 작품 관람 시작:
+  작품 1..N -> EXIT -> 복귀·도킹. 이동 중 관람객이 멀어지거나(far_distance) 안 보이면(lost_timeout)
+  WAIT_VISITOR로 멈추고 come_here 안내 -> 가까이 오면(resume_distance) 이어서 이동,
+  visitor_give_up(10초) 넘으면 register_failed 안내 후 도킹 복귀(end_reason visitor_lost).
+
+- EXIT는 계획에 exit_goal이 있을 때만 사용합니다. 도착 판정 = arti_common 출구 직사각형 안 (없으면 목표점 0.30m).
+- 관람객 인식(visitor_seen())은 등록 판정과 관람 중 거리 감시에 씀. 이동은 전부 Nav2.
 
 설계 방식:
   이 클래스는 ROS를 직접 호출하지 않습니다. 각 메서드는 Event 리스트를 돌려주고,
@@ -18,9 +24,12 @@
   NAV_ARTWORK       현재 작품(index)으로 Nav2 이동 중
   CANCELING         반원 진입 -> Nav2 goal 취소 결과 대기
   VERIFY_STOP       반원 안에서 완전 정지 확인 중
+  REGISTERING       키오스크 앞 정지 후 관람객 인식 기다림 (prepare_tour)
+  WAIT_START        등록 완료, 키오스크 앞에서 start_tour 기다림 (prepare_tour 성공)
+  WAIT_VISITOR      관람 중 이동하다 관람객이 멀어져 멈춤, 가까이 오길 기다림 (start_tour)
   EXPLAINING        작품 해설(TTS) 재생 중, 끝날 때까지 대기
   NAV_EXIT          출구 정지점으로 이동 중
-  CANCELING_EXIT    출구 0.30m 진입 -> 취소 결과 대기
+  CANCELING_EXIT    출구 구역 진입 -> 취소 결과 대기
   VERIFY_EXIT_STOP  출구에서 정지 확인 중
   FAREWELL          '안녕히가세요' 재생 시간 대기
   NAV_HOME          충전 스테이션 접근점으로 이동 중
@@ -28,14 +37,14 @@
   VERIFY_HOME_STOP  접근점에서 정지 확인 중
   DOCKING           Dock 액션 실행 중
   WAIT_DOCK_CONFIRM Dock 성공 후 dock_status.is_docked 확인 대기
-  WAIT_RECOVERY     오류 발생, 운영자 retry 승인 대기
+  WAIT_RECOVERY     Nav2 이동 실패 (노드가 보고 바로 도킹 복귀 또는 ERROR로 바꿈)
   DONE / ERROR      종료
 """
 from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Optional
-from .guided_tour_plan import CoursePlan, CourseRequest, Pose2D, resolve_selection
+from .guided_tour_plan import CoursePlan, Pose2D
 
 
 @dataclass(frozen=True)
@@ -46,8 +55,8 @@ class Event:
       status   -> 상태 JSON dict (/arti/course_status 로 발행)
       navigate -> (이름, Pose2D) : Nav2 NavigateToPose 목표 전송
       cancel   -> None           : 현재 Nav2 목표 취소
-      guide    -> 문자열          : guide_message 토픽 발행 (TTS 인사 등)
-      explain  -> explanation_id : 작품 해설 요청
+      guide    -> 안내 키 문자열  : guide_message 토픽 발행 (arti_audio guide_lines.yaml의 키)
+      explain  -> 작품 번호(int)  : explain_artwork 액션으로 작품 해설 요청
       dock     -> None           : Dock 액션 실행
     """
     kind: str  # status | navigate | cancel | guide | explain | dock
@@ -61,11 +70,22 @@ class TourMachine:
                  confirmation_timeout: float = 12.0,
                  home_position_tolerance: float = 0.30,
                  simulate_explanation: bool = False, simulated_duration: float = 2.0,
-                 max_retries: int = 2, exit_position_tolerance: float = 0.30,
-                 farewell_duration: float = 2.0):
+                 exit_position_tolerance: float = 0.30,
+                 farewell_duration: float = 2.0,
+                 register_confirm_time: float = 1.0, register_gap: float = 0.5,
+                 register_timeout: float = 60.0, ready_timeout: float = 130.0,
+                 skip_register: bool = False,
+                 register_guide: str = 'register', recognized_guide: str = 'recognized',
+                 register_failed_guide: str = 'register_failed',
+                 watch_visitor: bool = True, far_distance: float = 2.5,
+                 resume_distance: float = 1.8, lost_timeout: float = 3.0,
+                 visitor_give_up: float = 10.0,
+                 start_guide: str = 'start', come_here_guide: str = 'come_here',
+                 distance_window: float = 1.0, far_hold: float = 1.0,
+                 near_hold: float = 0.5, come_here_interval: float = 8.0):
         # --- 설정값 (단위: 초 / m) ---
         self.base_plan = plan                      # YAML 원본 계획
-        self.plan = plan                           # 이번 주행에 쓰는 계획(A/B 선택 반영)
+        self.plan = plan                           # 이번 관람에 쓰는 계획(start_tour 작품 선택 반영)
         self.stop_duration = stop_duration         # 이 시간만큼 연속 정지해야 '정지'로 인정
         self.stop_timeout = stop_timeout           # 정지 확인 최대 대기 시간
         self.navigation_timeout = navigation_timeout   # 한 구간 Nav2 이동 최대 시간
@@ -75,22 +95,55 @@ class TourMachine:
         self.home_position_tolerance = home_position_tolerance  # 도킹 접근점 도착 허용 반경
         self.simulate_explanation = simulate_explanation   # True면 TTS 없이 2초 후 해설 완료 처리
         self.simulated_duration = simulated_duration
-        self.max_retries = max_retries             # 운영자 retry 최대 횟수(구간마다 리셋)
         self.exit_position_tolerance = exit_position_tolerance  # 출구 도착 허용 반경
         self.farewell_duration = farewell_duration  # 출구 인사 후 출발까지 대기 시간
+        # --- 관람객 등록 (prepare_tour) ---
+        self.register_confirm_time = register_confirm_time  # 이만큼 끊김 없이 보여야 등록
+        self.register_gap = register_gap           # 인식이 이보다 오래 끊기면 확인을 처음부터
+        self.register_timeout = register_timeout   # 키오스크 도착 후 이 안에 등록 못 하면 실패 -> 복귀
+        self.ready_timeout = ready_timeout         # 등록 후 이 안에 start_tour가 없으면 복귀
+        self.skip_register = skip_register         # True면 인식 없이 바로 등록 (인식 노드 없이 시험)
+        self.register_guide = register_guide       # guide_message 키: 등록 요청 / 인식 완료 / 등록 실패
+        self.recognized_guide = recognized_guide
+        self.register_failed_guide = register_failed_guide
+        # --- 관람 중 관람객 거리 감시 (start_tour, 값은 arti_follow와 같게) ---
+        self.watch_visitor = watch_visitor         # False면 감시 안 함 (인식 없이 시험)
+        self.far_distance = far_distance           # 로봇-관람객 거리가 이보다 멀면 멈춤 [m]
+        self.resume_distance = resume_distance     # 멈춘 뒤 이 안으로 오면 다시 출발 [m] (arti_follow 0.8+0.15)
+        self.lost_timeout = lost_timeout           # 인식 좌표가 이만큼 안 오면 안 보이는 것 [s] (arti_follow)
+        self.visitor_give_up = visitor_give_up     # 멈춘 뒤 이만큼 안 오면 관람 끝 -> 도킹 복귀 [s]
+        self.start_guide = start_guide             # guide 키: 관람 시작 / 따라오세요
+        self.come_here_guide = come_here_guide
+        # 인식 위치가 튀는 것(카메라 추정·LiDAR 매칭이 번갈아 나옴) 때문에 멈춤·출발이 반복되지 않게:
+        self.distance_window = distance_window     # 거리 = 최근 이 시간 동안 받은 좌표들의 거리 중앙값 [s]
+        self.far_hold = far_hold                   # '멀다'가 이만큼 계속돼야 멈춤 [s]
+        self.near_hold = near_hold                 # '가깝다'가 이만큼 계속돼야 다시 출발 [s]
+        self.come_here_interval = come_here_interval  # '따라오세요' 음성 최소 간격 [s]
         # --- 실행 중 상태 ---
         self.state = 'IDLE'
         self.request_id = ''
         self.index = -1                    # -1 = 키오스크, 0..N-1 = 작품 순번, N = 모두 완료
-        self.completed: list[str] = []     # 해설까지 끝난 작품 ID 목록
+        self.completed: list[int] = []     # 해설까지 끝난 작품 번호 목록
         self.dock_origin: Optional[Pose2D] = None  # robot pose before first undock (언도킹 전 도킹 위치)
         self.home_goal: Optional[Pose2D] = None    # safe Nav2 return pose after undock (복귀 목표)
         self.last_pose: Optional[Pose2D] = None    # 마지막으로 받은 신선한 AMCL 위치
         self.last_pose_at = float('-inf')
         self.still_since: Optional[float] = None   # 정지 상태가 시작된 시각
         self.state_since = 0.0                     # 현재 상태에 들어온 시각 (타임아웃 계산용)
-        self.retry_count = 0
-        self.exit_pending = False                  # 출구 구간 진행 중 여부(retry 시 목표 결정용)
+        self.exit_pending = False                  # 출구 구간 진행 중 여부
+        self.returning = False                     # 복귀(NAV_HOME 이후) 중 여부 (여기서 실패하면 ERROR)
+        self.end_reason = ''                       # 관람 없이 복귀한 이유 (register_failed, canceled, not_started)
+        self.fail_reason = ''                      # 마지막 ERROR 이유
+        self.recover_reason = ''                   # 마지막 WAIT_RECOVERY 이유
+        self.visitor_since: Optional[float] = None # 관람객이 끊김 없이 보이기 시작한 시각
+        self.visitor_last = float('-inf')          # 마지막으로 관람객을 본 시각
+        self.visitor_xy: Optional[tuple[float, float]] = None   # 마지막 관람객 map 좌표
+        self.visitor_samples: list[tuple[float, float, float]] = []   # 최근 (시각, x, y) — 거리 중앙값용
+        self.far_since: Optional[float] = None     # '멀다/안 보임'이 시작된 시각
+        self.near_since: Optional[float] = None    # WAIT_VISITOR에서 '가깝다'가 시작된 시각
+        self.come_here_at = float('-inf')          # 마지막 '따라오세요' 음성 시각
+        self.touring = False                       # start_tour로 관람 중 (관람객 거리 감시)
+        self.resume_state = ''                     # WAIT_VISITOR 끝나면 돌아갈 상태 (NAV_ARTWORK/NAV_EXIT)
 
     def _event(self, state: str, detail: str = '') -> Event:
         """/arti/course_status 로 나갈 상태 Event 생성."""
@@ -101,32 +154,35 @@ class TourMachine:
     # 시작 / 준비
     # ------------------------------------------------------------------
 
-    def start(self, request: CourseRequest, now: float, dock_origin: Pose2D) -> list[Event]:
-        """코스 시작: 계획을 확정하고 첫 목표(키오스크)로 이동 Event를 낸다.
+    def start(self, request_id: str, now: float, dock_origin: Pose2D) -> list[Event]:
+        """[prepare_tour] 호출 시작: 키오스크로 이동 Event를 낸다. 키오스크에서 등록 후 WAIT_START로 멈춘다.
 
-        dock_origin = 언도킹 전(도킹 상태)의 로봇 위치.
+        request_id = 로그 추적용 ID, dock_origin = 언도킹 전(도킹 상태)의 로봇 위치.
         """
         if self.state not in ('IDLE', 'DONE', 'ERROR'):
             raise ValueError('이미 코스주행 중입니다')
         if not isinstance(dock_origin, Pose2D) or not all(math.isfinite(x) for x in
                                   (dock_origin.x, dock_origin.y, dock_origin.yaw)):
             raise ValueError('언도킹 출발 위치(map 좌표)가 필요합니다')
-        self.plan = resolve_selection(self.base_plan, request)
-        self.request_id = request.request_id
+        self.plan = self.base_plan                 # 작품 선택은 begin_tour에서
+        self.request_id = request_id
         self.completed = []
         self.index = -1
-        self.retry_count = 0
         self.dock_origin = dock_origin
         # YAML의 고정 도킹 접근점이 있으면 그것을 사용, 없으면(시뮬레이션 skip_undock)
         # 출발 위치를 복귀 목표로 사용.
         self.home_goal = self.plan.dock_approach or dock_origin
         self.exit_pending = False
+        self.touring = False
+        self.returning = False
+        self.end_reason = ''
+        self.fail_reason = ''
         self.state = 'NAV_KIOSK'
         self.state_since = now
         self.still_since = None
         self.last_pose = None
         self.last_pose_at = float('-inf')
-        return [self._event('STARTED', ','.join(a.artwork_id for a in self.plan.artworks)),
+        return [self._event('PREPARE_STARTED', '키오스크로 이동'),
                 Event('navigate', ('kiosk', self.plan.kiosk_goal))]
 
     def set_post_undock_pose(self, pose: Pose2D):
@@ -173,16 +229,21 @@ class TourMachine:
         return zone.contains(pose)
 
     def _fresh_exit(self, now: float) -> bool:
-        """출구 정지점 0.30m 이내인지 (반원 대신 거리 판정)."""
+        """출구 도착인지: 공통 출구 구역(arti_common, follow 팀과 같은 직사각형)이 있으면 그 안,
+        없으면 출구 정지점 0.30m 이내."""
         goal = self.plan.exit_goal
-        return (self._fresh_pose(now) and goal is not None and
-                math.hypot(self.last_pose.x-goal.x, self.last_pose.y-goal.y)
+        if not self._fresh_pose(now) or goal is None:
+            return False
+        if self.plan.exit_zone is not None:
+            return self.plan.exit_zone.contains((self.last_pose.x, self.last_pose.y))
+        return (math.hypot(self.last_pose.x-goal.x, self.last_pose.y-goal.y)
                 <= self.exit_position_tolerance)
 
     def _go_home(self, now: float, detail: str) -> list[Event]:
         """충전 스테이션 접근점(home_goal)으로 이동 시작."""
         self.state = 'NAV_HOME'
         self.state_since = now
+        self.returning = True
         return [self._event('RETURNING_HOME', detail),
                 Event('navigate', ('dock_approach', self.home_goal))]
 
@@ -193,46 +254,15 @@ class TourMachine:
                            self.last_pose.y-self.home_goal.y) <= self.home_position_tolerance)
 
     # ------------------------------------------------------------------
-    # 오류 복구
+    # Nav2 이동 실패
     # ------------------------------------------------------------------
 
     def _recover(self, reason: str, now: float) -> list[Event]:
-        """복구 가능한 오류: Nav2 취소 후 운영자 retry 대기(WAIT_RECOVERY).
-
-        retry 횟수를 초과하면 ERROR로 종료.
-        """
-        if self.retry_count >= self.max_retries:
-            return self.fail(f'복구 허용 횟수 초과: {reason}')
+        """Nav2 이동 실패: goal 취소 후 WAIT_RECOVERY. 노드가 보고 도킹 복귀(abort_to_home) 또는 ERROR."""
         self.state = 'WAIT_RECOVERY'
         self.state_since = now
+        self.recover_reason = reason
         return [self._event('RECOVERY_REQUIRED', reason), Event('cancel', None)]
-
-    def retry(self, now: float) -> list[Event]:
-        """운영자가 승인한 재시도 (/arti/course_recovery {"action":"retry"}).
-
-        실패했던 구간의 목표로 다시 Nav2 이동을 보냅니다.
-        """
-        if self.state != 'WAIT_RECOVERY':
-            raise ValueError('복구 승인 대기 상태가 아닙니다')
-        self.retry_count += 1
-        # 어느 구간에서 실패했는지로 다시 갈 상태 결정
-        if self.exit_pending:
-            self.state = 'NAV_EXIT'
-        else:
-            self.state = 'NAV_KIOSK' if self.index < 0 else ('NAV_HOME' if self.index == len(self.plan.artworks) else 'NAV_ARTWORK')
-        self.state_since = now
-        self.still_since = None
-        if self.state == 'NAV_EXIT':
-            target = ('exit', self.plan.exit_goal)
-        elif self.state == 'NAV_KIOSK':
-            target = ('kiosk', self.plan.kiosk_goal)
-        elif self.state == 'NAV_HOME':
-            target = ('return_to_undock', self.home_goal)
-        else:
-            art = self.plan.artworks[self.index]
-            target = (art.artwork_id, art.goal)
-        return [self._event('RECOVERY_RETRY', f'재시도 {self.retry_count}/{self.max_retries}'),
-                Event('navigate', target)]
 
     # ------------------------------------------------------------------
     # 주기 처리 (a_course_node가 0.1초마다 호출)
@@ -269,6 +299,24 @@ class TourMachine:
                 self.state = 'CANCELING'
                 self.state_since = now
                 return [self._event('ZONE_ENTERED', 'Nav2 목표 취소 요청'), Event('cancel', None)]
+            # [start_tour] 작품·출구로 이동 중 관람객이 멀어지거나 안 보이면 멈추고 '따라오세요'
+            if self.touring and self.watch_visitor and self.state in ('NAV_ARTWORK', 'NAV_EXIT'):
+                why = self._visitor_problem(now)
+                if not why:
+                    self.far_since = None
+                elif self.far_since is None:
+                    self.far_since = now             # 처음 '멀다' → far_hold 동안 계속되는지 봄
+                elif now-self.far_since >= self.far_hold:
+                    self.far_since = None
+                    self.near_since = None
+                    self.resume_state = self.state
+                    self.state = 'WAIT_VISITOR'
+                    self.state_since = now
+                    events = [self._event('VISITOR_WAIT', why), Event('cancel', None)]
+                    if now-self.come_here_at >= self.come_here_interval:
+                        self.come_here_at = now
+                        events.append(Event('guide', self.come_here_guide))
+                    return events
             if now-self.state_since >= self.navigation_timeout:
                 return self._recover('Nav2 이동 시간 초과', now)
 
@@ -303,9 +351,8 @@ class TourMachine:
             if now-self.still_since < self.stop_duration:
                 return []                    # 아직 충분히 오래 정지하지 않음
             # --- 정지 확인 완료: 어디서 멈췄는지에 따라 다음 단계 ---
-            self.retry_count = 0
             if self.state == 'VERIFY_EXIT_STOP':
-                # 출구 -> '안녕히가세요' 안내(guide 토픽 -> TTS)
+                # 출구 -> 안내 키(farewell, 기본 tour_end) 재생 (guide_message -> guide_audio_node)
                 self.state = 'FAREWELL'
                 self.state_since = now
                 return [self._event('EXIT_ARRIVED', self.plan.farewell_text),
@@ -317,18 +364,61 @@ class TourMachine:
                 return [self._event('HOME_ARRIVED', '충전 스테이션 접근 위치 도착; Dock 액션 실행'),
                         Event('dock', None)]
             if self.index < 0:
-                # 키오스크 -> 첫 번째 작품으로 이동
-                self.index = 0
-                self.state = 'NAV_ARTWORK'
+                # [prepare_tour] 키오스크 도착 -> 관람객 등록 기다림
+                self.state = 'REGISTERING'
                 self.state_since = now
-                first = self.plan.artworks[0]
-                return [self._event('KIOSK_STOPPED', '객체인식 단계는 PC2 단독 시뮬레이션에서 제외'),
-                        Event('guide', 'start'), Event('navigate', (first.artwork_id, first.goal))]
+                self.visitor_since, self.visitor_last = None, float('-inf')   # 도착 전 인식은 안 셈
+                return [self._event('KIOSK_STOPPED', '관람객 등록 시작'),
+                        Event('guide', self.register_guide)]
             # 작품 -> 해설(TTS) 시작
             self.state = 'EXPLAINING'
             self.state_since = now
             art = self.plan.artworks[self.index]
-            return [self._event('ARTWORK_STOPPED', art.artwork_id), Event('explain', art.explanation_id)]
+            return [self._event('ARTWORK_STOPPED', str(art.artwork_id)), Event('explain', art.artwork_id)]
+
+        # (4-1) [prepare_tour] 관람객 등록: register_confirm_time 동안 끊김 없이 보이면 등록
+        elif self.state == 'REGISTERING':
+            seeing = (self.visitor_since is not None and now-self.visitor_last <= self.register_gap)
+            if self.skip_register or (seeing and now-self.visitor_since >= self.register_confirm_time):
+                self.state = 'WAIT_START'
+                self.state_since = now
+                detail = '인식 생략(skip_register)' if self.skip_register else '관람객 인식 완료'
+                return [self._event('REGISTERED', detail), Event('guide', self.recognized_guide)]
+            if now-self.state_since >= self.register_timeout:
+                self.end_reason = 'register_failed'
+                return ([self._event('REGISTER_FAILED', f'{self.register_timeout:.0f}초 안에 관람객 인식 못 함'),
+                         Event('guide', self.register_failed_guide)]
+                        + self._go_home(now, '등록 실패; 충전 스테이션으로 복귀'))
+
+        # (4-2) [prepare_tour] 등록 후 start_tour 대기: 시간 초과면 복귀
+        elif self.state == 'WAIT_START':
+            if now-self.state_since >= self.ready_timeout:
+                self.end_reason = 'not_started'
+                return ([self._event('START_TIMEOUT', f'등록 후 {self.ready_timeout:.0f}초 동안 관람 시작 없음')]
+                        + self._go_home(now, '관람 시작 없음; 충전 스테이션으로 복귀'))
+
+        # (4-3) [start_tour] 관람객 기다림: 가까이 오면 이어서 이동, visitor_give_up 넘으면 도킹 복귀
+        elif self.state == 'WAIT_VISITOR':
+            if not self._visitor_near(now):
+                self.near_since = None
+            elif self.near_since is None:
+                self.near_since = now                # 처음 '가깝다' → near_hold 동안 계속되는지 봄
+            if self.near_since is not None and now-self.near_since >= self.near_hold:
+                self.near_since = None
+                self.state = self.resume_state
+                self.state_since = now               # 이동 시간 초과는 다시 셈
+                if self.state == 'NAV_EXIT':
+                    target = ('exit', self.plan.exit_goal)
+                else:
+                    art = self.plan.artworks[self.index]
+                    target = (art.artwork_id, art.goal)
+                return [self._event('VISITOR_BACK', '관람객 가까이 옴; 이어서 이동'), Event('navigate', target)]
+            if now-self.state_since >= self.visitor_give_up:
+                self.end_reason = 'visitor_lost'
+                self.exit_pending = False
+                return ([self._event('VISITOR_LOST', f'{self.visitor_give_up:.0f}초 동안 관람객이 돌아오지 않음'),
+                         Event('guide', self.register_failed_guide)]
+                        + self._go_home(now, '관람객 분실; 충전 스테이션으로 복귀'))
 
         # (5) 해설 중: 반원 이탈 감시, 결과는 explanation_result()로 들어옴
         elif self.state == 'EXPLAINING':
@@ -403,7 +493,7 @@ class TourMachine:
         self.still_since = None
         return [self._event(self.state, '목표 위치 내부 및 Odometry 연속 정지 확인')]
 
-    def explanation_result(self, artwork_id: str, success: bool, now: float) -> list[Event]:
+    def explanation_result(self, artwork_id: int, success: bool, now: float) -> list[Event]:
         """작품 해설(TTS) 완료 결과 처리 -> 다음 작품 / 출구 / 복귀로 진행."""
         if self.state != 'EXPLAINING':
             return []
@@ -415,9 +505,8 @@ class TourMachine:
         if not success:
             return self.fail(f'작품 {active} 해설 실패')
         self.completed.append(active)
-        events = [self._event('ARTWORK_COMPLETED', active)]
+        events = [self._event('ARTWORK_COMPLETED', str(active))]
         self.index += 1
-        self.retry_count = 0
         if self.index == len(self.plan.artworks):
             # 마지막 작품까지 끝남
             if self.plan.exit_goal is not None:
@@ -454,9 +543,11 @@ class TourMachine:
             return []
         self.state = 'DONE'
         self.state_since = now
+        # 안내 음성(tour_end)은 출구(FAREWELL)에서 이미 했으므로 도킹 후에는 하지 않음
+        detail = (f'관람 없이 복귀 ({self.end_reason}) + 실제 도킹 완료' if self.end_reason
+                  else '전체 작품 관람 + 원위치 복귀 + 실제 도킹 완료; PC3 예약 해제 요청')
         return [self._event('DOCKED', '도킹 액션 및 is_docked 상태 확인'),
-                Event('guide', 'tour_end'),
-                self._event('COMPLETED', '전체 작품 관람 + 원위치 복귀 + 실제 도킹 완료; PC3 예약 해제 요청')]
+                self._event('COMPLETED', detail)]
 
     def dock_simulated(self, now: float) -> list[Event]:
         """명시적으로 켠 모의 도킹(simulate_docking). 실제 물리 도킹 성공이 아님."""
@@ -472,4 +563,85 @@ class TourMachine:
         if self.state in ('IDLE', 'DONE', 'ERROR'):
             return []
         self.state = 'ERROR'
+        self.fail_reason = reason
         return [self._event('FAILED', reason)]
+
+    # ------------------------------------------------------------------
+    # [prepare_tour] 관람객 인식 / 도중 복귀
+    # ------------------------------------------------------------------
+
+    def visitor_seen(self, now: float, xy: Optional[tuple[float, float]] = None):
+        """관람객 인식 1건 (노드가 target_person/point_map 받을 때마다 호출, xy = map 좌표).
+        register_gap보다 오래 끊겼다가 다시 보이면 등록 확인 시간을 처음부터 센다."""
+        if self.visitor_since is None or now-self.visitor_last > self.register_gap:
+            self.visitor_since = now
+        self.visitor_last = now
+        if xy is not None:
+            self.visitor_xy = (float(xy[0]), float(xy[1]))
+            self.visitor_samples.append((now, self.visitor_xy[0], self.visitor_xy[1]))
+            self.visitor_samples = [smp for smp in self.visitor_samples if now-smp[0] <= self.distance_window]
+
+    def _visitor_distance(self, now: float) -> Optional[float]:
+        """로봇-관람객 거리 [m]. 위치나 인식이 오래됐으면 None."""
+        if (not self._fresh_pose(now) or self.visitor_xy is None
+                or now-self.visitor_last > self.lost_timeout):
+            return None
+        # 최근 distance_window 동안 받은 좌표들의 거리 중앙값 (튀는 값 한두 개는 무시됨)
+        recent = [smp for smp in self.visitor_samples if now-smp[0] <= self.distance_window] \
+            or [(now, self.visitor_xy[0], self.visitor_xy[1])]
+        dists = sorted(math.hypot(x-self.last_pose.x, y-self.last_pose.y) for _, x, y in recent)
+        mid = len(dists) // 2
+        return dists[mid] if len(dists) % 2 else (dists[mid-1]+dists[mid]) / 2.0
+
+    def _visitor_problem(self, now: float) -> str:
+        """이동 중 멈춰야 하는 이유 ('' = 괜찮음)."""
+        if now-self.visitor_last > self.lost_timeout:
+            return f'관람객이 {self.lost_timeout:.0f}초 넘게 안 보임'
+        dist = self._visitor_distance(now)
+        if dist is not None and dist > self.far_distance:
+            return f'관람객이 멀어짐 ({dist:.2f} m > {self.far_distance:.2f} m)'
+        return ''
+
+    def _visitor_near(self, now: float) -> bool:
+        """멈춘 뒤 다시 출발해도 되는지: 관람객이 보이고 resume_distance 안."""
+        dist = self._visitor_distance(now)
+        return dist is not None and dist <= self.resume_distance
+
+    def begin_tour(self, artwork_ids, now: float) -> list[Event]:
+        """[start_tour] WAIT_START(등록 완료)에서 관람 시작. artwork_ids = 작품 번호 목록.
+        비어 있으면 전체 작품. 방문 순서는 YAML 코스 순서 (요청 순서와 상관없이 동선대로)."""
+        if self.state != 'WAIT_START':
+            raise ValueError('not_prepared')
+        ids = tuple(int(i) for i in artwork_ids)
+        plan = self.base_plan
+        if ids:
+            picked = {a.artwork_id for a in plan.selected(ids).artworks}   # 없는 번호·중복이면 ValueError
+            plan = plan.selected(tuple(a.artwork_id for a in plan.artworks if a.artwork_id in picked))
+        self.plan = plan
+        self.completed = []
+        self.index = 0
+        self.touring = True
+        self.far_since = None
+        self.near_since = None
+        self.come_here_at = float('-inf')
+        self.state = 'NAV_ARTWORK'
+        self.state_since = now
+        self.still_since = None
+        first = self.plan.artworks[0]
+        return [self._event('TOUR_STARTED', ','.join(str(a.artwork_id) for a in self.plan.artworks)),
+                Event('guide', self.start_guide), Event('navigate', (first.artwork_id, first.goal))]
+
+    # 복귀 중(또는 이미 끝난) 상태: abort_to_home은 이유만 남기고 하던 복귀를 계속함
+    RETURN_STATES = ('NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'DOCKING', 'WAIT_DOCK_CONFIRM')
+
+    def abort_to_home(self, reason: str, now: float) -> list[Event]:
+        """관람 시작 전·관람 중 어디서든 그만두고 충전 스테이션으로 복귀 (취소·Nav2 실패 등).
+        새 Nav2 goal이 이전 goal을 대신하므로 따로 취소하지 않는다. reason은 end_reason에 남는다."""
+        if self.state in ('IDLE', 'DONE', 'ERROR'):
+            raise ValueError(f'{self.state} 상태에서는 복귀할 수 없습니다')
+        if not self.end_reason:
+            self.end_reason = reason
+        if self.state in self.RETURN_STATES:
+            return []
+        self.exit_pending = False
+        return self._go_home(now, f'{reason}; 충전 스테이션으로 복귀')

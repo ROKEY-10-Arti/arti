@@ -11,6 +11,54 @@ import cv2
 from geometry_msgs.msg import TwistStamped
 import numpy as np
 
+try:                                                # 격자 최단 거리를 C로 계산 (없으면 numpy로 대신)
+    from scipy.sparse import coo_matrix as _coo_matrix
+    from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra
+except ImportError:
+    _coo_matrix = _csgraph_dijkstra = None
+
+_SQRT2 = math.sqrt(2.0)
+
+
+def grid_distances(free, gy, gx):
+    """8방향 격자에서 (gy, gx)부터 모든 칸까지의 최단 거리 [칸] (대각선 √2). 못 가는 칸은 inf.
+    (팀원 브랜치 fix/follow-stability-perf에서 가져옴. 예전 순수 Python BFS보다 3~7배 빠르고 결과는 같음)
+    SciPy가 있으면: 이웃 칸끼리 잇는 그래프를 만들어 C 다익스트라 한 번.
+    없으면: numpy로 격자 전체를 한꺼번에 '이웃 + 1(또는 √2)'로 줄여 가기를 바뀌지 않을 때까지 반복.
+    받음: free  (n, n) bool, 지나갈 수 있는 칸 = True
+          gy, gx  출발 칸 (목표)
+    돌려줌: (n, n) 거리 [칸]"""
+    n = free.shape[0]
+    if _coo_matrix is not None:
+        idx = np.arange(n * n, dtype=np.int32).reshape(n, n)
+        rows, cols, weights = [], [], []
+        for dy, dx, w in ((0, 1, 1.0), (1, 0, 1.0), (1, 1, _SQRT2), (1, -1, _SQRT2)):   # 방향 4개 (양방향 그래프)
+            y0, y1 = max(0, -dy), n - max(0, dy)
+            x0, x1 = max(0, -dx), n - max(0, dx)
+            both = free[y0:y1, x0:x1] & free[y0 + dy:y1 + dy, x0 + dx:x1 + dx]   # 두 칸 다 지나갈 수 있으면 연결
+            if both.any():
+                rows.append(idx[y0:y1, x0:x1][both])
+                cols.append(idx[y0 + dy:y1 + dy, x0 + dx:x1 + dx][both])
+                weights.append(np.full(rows[-1].size, w))
+        if not rows:
+            dist = np.full((n, n), np.inf)
+            dist[gy, gx] = 0.0
+            return dist
+        graph = _coo_matrix((np.concatenate(weights), (np.concatenate(rows), np.concatenate(cols))),
+                            shape=(n * n, n * n))
+        return _csgraph_dijkstra(graph, directed=False, indices=gy * n + gx).reshape(n, n)
+    d = np.full((n + 2, n + 2), np.inf)             # 테두리 1칸을 inf로 둘러 경계 검사 없이 계산
+    d[1 + gy, 1 + gx] = 0.0
+    for _ in range(2 * n):
+        card = np.minimum(np.minimum(d[:-2, 1:-1], d[2:, 1:-1]), np.minimum(d[1:-1, :-2], d[1:-1, 2:])) + 1.0
+        diag = np.minimum(np.minimum(d[:-2, :-2], d[:-2, 2:]), np.minimum(d[2:, :-2], d[2:, 2:])) + _SQRT2
+        cur = d[1:-1, 1:-1]
+        nxt = np.where(free, np.minimum(cur, np.minimum(card, diag)), cur)
+        if np.array_equal(nxt, cur):
+            break
+        d[1:-1, 1:-1] = nxt
+    return d[1:-1, 1:-1]
+
 
 def wrap(a):
     """각도를 -π ~ π 범위로 맞춘다 (350° → -10°). 회전할 때 짧은 쪽으로 돌게 하려고.
@@ -105,14 +153,12 @@ class MotionMixin:
         return self.drive(*self.ramp(0.0, w))
 
     def obstacles(self):
-        """지금 피해야 할 장애물 점 = 라이다 점 + depth_keep(1 s) 안의 바닥 물체 점.
-        받음: (scan_pts, floor_pts, floor_time)
+        """지금 피해야 할 장애물 점 = 라이다 점만.
+        OAK-D depth 바닥 점은 뺐다 (2026-11-18, free_tracking 9715cbf): 관람객이 멀면 빈 바닥이 장애물로 잡혀
+        DWA가 목표까지 길이 없다고 보고 조용히 멈춤 (docs/troubleshooting/follow/2026-11-18-far-visitor-stall-depth-floor.md)
+        받음: (scan_pts)
         돌려줌: 장애물 점 (N, 2) odom"""
-        # depth(바닥 물체)는 초당 약 3번만 와서, 마지막으로 받은 걸 depth_keep(1 s) 동안 기억해서 쓴다.
-        # 1 s 넘게 안 왔으면 오래된 점이라 버린다 (이미 치운 물체를 계속 피하지 않게).
-        fresh = self.now() - self.floor_time < self.p['depth_keep']
-        # 라이다 점(벽·기둥) + (최근이면) 바닥 물체 점을 한 배열로 합친다 → dwa·field가 장애물로 씀
-        return np.concatenate([self.scan_pts] + ([self.floor_pts] if fresh else []))
+        return self.scan_pts
 
     def dwa(self, pose, goal, face):
         """(v, w) 후보를 굴려 보고, 안 부딪히면서 목표까지 '돌아가는 거리'가 가장 줄어드는 것을 고른다 (DWA).
@@ -124,6 +170,8 @@ class MotionMixin:
         # self.cmd  → v0 [m/s], w0 [rad/s]    지난번 보낸 명령 = 지금 속도로 가정  예) 0.20, 0.0
         p, (x0, y0, th0), (v0, w0) = self.p, pose, self.cmd
         dt = p['control_period']
+        self.path_dist = None                       # 이번에 못 구하면(전부 막힘) None
+
         # ── ① 후보 만들기 ──────────────────────────────────────────────────────────
         # 입력: v0, w0, 가속 한계(linear_accel 0.5, angular_accel 3.0), 최대 속도(0.3, 1.5)
         # 출력: vs (7,)  0.1 s 안에 낼 수 있는 전진 속도 7개   예) 0.15 ~ 0.25
@@ -132,6 +180,8 @@ class MotionMixin:
                          min(p['max_linear'], v0 + p['linear_accel'] * dt), p['v_samples'])
         ws = np.linspace(max(-p['max_angular'], w0 - p['angular_accel'] * dt),
                          min(p['max_angular'], w0 + p['angular_accel'] * dt), p['w_samples'])
+        if ws[0] <= 0.0 <= ws[-1]:
+            ws = np.union1d(ws, [0.0])              # 정확히 0도 후보로 (없으면 0.01 같은 값이 계속 뽑혀 제자리에서 돎)
         # 출력: V, W (105,)  모든 조합을 한 줄로 편 것. 후보 i = (V[i], W[i])
         V, W = (g.ravel() for g in np.meshgrid(vs, ws))
         # ── ② 굴려 보기 (sim_time 1.5 s를 0.1 s씩 15칸) ─────────────────────────────
@@ -171,6 +221,8 @@ class MotionMixin:
         t0 = time.monotonic()
         field, origin = self.field(np.asarray(goal, float), np.array([x0, y0]), obs)
         self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
+        # 지금 로봇 자리에서 goal까지 장애물을 돌아가는 거리 [m] → SEARCH 이동의 진척 판정 (못 가면 약 50)
+        self.path_dist = float(self.sample(field, origin, np.array([x0]), np.array([y0]))[0])
         # 출력: ex, ey, eth (105,)  후보별 1.5 s 뒤 도착 위치·방향 (② 결과의 마지막 열)
         ex, ey, eth = xs[:, -1], ys[:, -1], th[:, -1]
         # 출력: cost (105,)  후보별 벌점 =
@@ -191,7 +243,7 @@ class MotionMixin:
 
     def field(self, goal, here, obs):
         """격자 칸마다 goal까지 장애물을 돌아가는 거리 [m] (dwa의 벌점용).
-        10 cm 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 BFS로 퍼져 나가며 거리 채움.
+        10 cm 격자 → 장애물 칸을 로봇 반지름+여유만큼 부풀림 → 목표에서 최단 거리(grid_distances, SciPy 다익스트라).
         받음: goal (x, y), here 로봇 (x, y), obs 장애물 점 (N, 2)
         돌려줌: (거리 지도 n×n, 지도 원점 (x, y)). 못 가는 칸은 50"""
         p = self.p
@@ -204,24 +256,12 @@ class MotionMixin:
         grid[c[:, 1], c[:, 0]] = 1
         k = int(math.ceil((p['robot_radius'] + p['safety_margin']) / res))
         raw, grid = grid, cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
-        gx, gy = np.floor((goal - origin) / res).astype(int)
-        rx, ry = np.floor((here - origin) / res).astype(int)
+        gx, gy = np.clip(np.floor((goal - origin) / res).astype(int), 0, n - 1)   # 반올림으로 격자 밖에 나가지 않게
+        rx, ry = np.clip(np.floor((here - origin) / res).astype(int), 0, n - 1)
         grid[max(gy - 1, 0):gy + 2, max(gx - 1, 0):gx + 2] = 0      # 목표 자리는 열어 둔다
         win = np.s_[max(ry - k, 0):ry + k + 1, max(rx - k, 0):rx + k + 1]
         grid[win] = raw[win]                        # 로봇 주변은 실제 장애물 칸만 막음 (붙어 있어도 출발 가능)
-        dist = np.full((n, n), np.inf)
-        dist[gy, gx] = 0.0
-        steps = [(dy, dx, math.hypot(dy, dx)) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
-        frontier = [(gy, gx)]
-        while frontier:                             # 목표에서부터 넓혀 가며 거리 채우기
-            nxt = []
-            for y, x in frontier:
-                for dy, dx, w in steps:
-                    yy, xx = y + dy, x + dx
-                    if 0 <= yy < n and 0 <= xx < n and not grid[yy, xx] and dist[y, x] + w < dist[yy, xx]:
-                        dist[yy, xx] = dist[y, x] + w
-                        nxt.append((yy, xx))
-            frontier = nxt
+        dist = grid_distances(grid == 0, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]
         dist *= res
         dist[~np.isfinite(dist)] = 50.0
         return dist, origin
@@ -250,11 +290,44 @@ class MotionMixin:
         w = w0 + float(np.clip(w - w0, -p['angular_accel'] * dt, p['angular_accel'] * dt))
         return v, w
 
+    def go_to(self, pose, goal):
+        """정해진 지점(odom)으로 이동 (SEARCH에서 마지막 위치로 갈 때).
+        목표 방향이 turn_first_angle(약 57°)보다 틀어져 있으면 먼저 제자리 회전, 아니면 DWA.
+        DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈추기 때문.
+        받음: pose (x, y, yaw) odom, goal (x, y) odom
+        내보냄: drive(...)"""
+        err = float(wrap(math.atan2(goal[1] - pose[1], goal[0] - pose[0]) - pose[2]))
+        if abs(err) > self.p['turn_first_angle']:
+            self.dbg['turn_first'] = True
+            w = float(np.clip(1.5 * err, -self.p['max_angular'], self.p['max_angular']))
+            return self.drive(*self.ramp(0.0, w))
+        return self.drive(*self.dwa(pose, goal, goal))
+
+    def predict_yaw(self, yaw, age, now):
+        """늦게 온 odom yaw에 아직 반영되지 않은 회전 명령을 더해 지금 yaw를 추정한다 (Wi-Fi 지연 보정).
+        cmd_vel도 로봇까지 늦게 가므로(오는 지연 ≈ 가는 지연으로 봄) 최근 2×age 초 동안 보낸 명령이
+        odom에 아직 안 들어 있다고 보고 Σ w·dt 를 더한다. 명령 기록은 drive()가 남김 (최근 약 6 s).
+        받음: yaw  odom이 준 값 [rad], age  그 값이 몇 초 전 것인지 [s], now
+        돌려줌: 추정한 지금 yaw [rad]"""
+        if age <= 0.0 or not np.isfinite(age):
+            return yaw
+        since, add = now - 2.0 * age, 0.0
+        hist = list(self.cmd_hist)
+        for (t0, _, w), nxt in zip(hist, hist[1:] + [(now, 0.0, 0.0)]):
+            a, b = max(t0, since), min(nxt[0], now)
+            if b > a:
+                add += w * (b - a)
+        return yaw + add
+
     def drive(self, v, w):
         """속도 명령을 로봇에 보낸다. enabled가 false면 보내지 않음. 보낸 값을 self.cmd에 기억 (ramp·dwa가 '지금 속도'로 씀).
+        서 있을 때(v≈0) min_spin_cmd보다 작은 회전은 0으로: Create 3는 아주 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림.
         받음: v  전진 속도 [m/s], w  회전 속도 [rad/s] (+ 왼쪽)
         내보냄: cmd_vel (TwistStamped: twist.linear.x = v, twist.angular.z = w)"""
+        if abs(v) < 0.01 and abs(w) < self.p['min_spin_cmd']:
+            w = 0.0
         self.cmd = (v, w)
+        self.cmd_hist.append((self.now(), v, w))    # odom 지연 보정용 (predict_yaw)
         if not self.enabled:
             self.cmd = (0.0, 0.0)
             return

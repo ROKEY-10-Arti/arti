@@ -1,23 +1,25 @@
-import os
-import threading
-import time
-from typing import Dict, List, Optional, Tuple, Union
+"""
+제스처 기반 타겟 등록 및 ReID 추적/위치 추정 테스트·실행 노드 (gesture_test_node.py)
 
-from person_tracker.env_bootstrap import bootstrap_venv, resolve_image_topic
+`BaseTrackerNode`를 상속받아 공용 영상 입력·추적·위치추정·오버레이·선택적 상태 저장소
+(`TrackerStateStore`, 테스트 노드 기본 ON) 위에 아래 제스처 특화 기능을 추가합니다:
+1. 미등록(`target_id is None`) 시 사람별 손목 우선 ROI 생성 -> MediaPipe 21관절 검출 ->
+   얼굴 오검출 제외 + Pose 손목 1:1 매칭 -> `주먹(4f) -> 손바닥 펴기(4f)` 타겟 잠금
+2. `gesture/status` 토픽 발행 및 `TrackerStateStore` 스냅샷·이벤트 콜백 갱신
+3. 상단 제스처 제어 바, 손 스켈레톤/진행도 배지, 별도 `ReID Monitor` 창·트랙바 제공
+"""
+
+import time
+from typing import Dict, List, Optional, Tuple
+
+from person_tracker.env_bootstrap import bootstrap_venv
 bootstrap_venv()
 
 import cv2
-from cv_bridge import CvBridge
 import numpy as np
-import psutil
-import rclpy
-from rcl_interfaces.msg import ParameterDescriptor
-from rclpy.executors import ExternalShutdownException
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
+from person_tracker.base_tracker_node import BaseTrackerNode, run_tracker_node
 from person_tracker.gesture_core import (
     GESTURE_FIST,
     GESTURE_OPEN_PALM,
@@ -29,34 +31,32 @@ from person_tracker.gesture_core import (
     HandGestureObservation,
     MultiTargetGestureManager,
     build_person_hand_rois,
-    find_best_hand_owner,
+    find_best_hand_owner_slot,
+    infer_fallback_hand_slot,
 )
-from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.multi_tracker_core import UnifiedTrackedPerson
+from person_tracker.reid_visualizer import ReIDDebugVisualizer
 
 
-class GestureTestNode(Node):
+class GestureTestNode(BaseTrackerNode):
     """
     손 제스처('주먹 -> 손바닥 펴기') 기반 타겟 지정 테스트·튜닝용 노드.
     - use_yolo_roi=True : YOLO로 사람 추적 후, 미등록 상태일 때만 각 사람 상반신/손 ROI에서 제스처 판별 -> 자동 타겟 잠금
     - use_yolo_roi=False: YOLO 없이 전체 화면에서 순수 MediaPipe 손 검출·제스처 상태머신만 단독 테스트
-    - video_source 지정 시 ROS 카메라 토픽 대신 로컬 웹캠을 직접 열어 단독 테스트 가능
+    - enable_state_store=True (기본): 동일 프로세스 `import` 모듈용 상태 스냅샷·콜백 활성화
     """
 
     BAR_HEIGHT = 38
 
     def __init__(self):
-        super().__init__('gesture_test_node')
-
-        self.declare_parameter('use_compressed', True)
-        self.declare_parameter('image_topic', '')
-        self.declare_parameter(
-            'video_source',
-            '',
-            ParameterDescriptor(dynamic_typing=True),
+        super().__init__(
+            'gesture_test_node',
+            default_enable_state_store=True,
+            win_name='Arti Gesture Test (Fist -> Open Palm)',
+            create_tracker_on_init=False,
         )
+
         self.declare_parameter('use_yolo_roi', True)
-        self.declare_parameter('imgsz', 320)
-        self.declare_parameter('device', '')
         self.declare_parameter('fist_hold_frames', 4)
         self.declare_parameter('open_hold_frames', 4)
         self.declare_parameter('grace_frames', 3)
@@ -65,12 +65,9 @@ class GestureTestNode(Node):
         self.declare_parameter('min_palm_scale_px', 12.0)
         self.declare_parameter('min_person_width_px', 44)
         self.declare_parameter('require_pose_wrist', False)
-        self.declare_parameter('show_gui', True)
+        self.declare_parameter('show_reid_viz', True)
 
         self.use_yolo_roi = bool(self.get_parameter('use_yolo_roi').value)
-        self.show_gui = bool(self.get_parameter('show_gui').value)
-        imgsz = int(self.get_parameter('imgsz').value)
-        device = str(self.get_parameter('device').value)
         fist_hold = int(self.get_parameter('fist_hold_frames').value)
         open_hold = int(self.get_parameter('open_hold_frames').value)
         grace = int(self.get_parameter('grace_frames').value)
@@ -79,7 +76,7 @@ class GestureTestNode(Node):
         self.min_palm_scale_px = float(self.get_parameter('min_palm_scale_px').value)
         self.min_person_width_px = int(self.get_parameter('min_person_width_px').value)
         self.require_pose_wrist = bool(self.get_parameter('require_pose_wrist').value)
-        raw_source = str(self.get_parameter('video_source').value).strip()
+        self.show_reid_viz = bool(self.get_parameter('show_reid_viz').value)
 
         self.gesture_detector = HandGestureDetector(
             num_hands=2,
@@ -92,189 +89,119 @@ class GestureTestNode(Node):
             grace_frames=grace,
             armed_timeout_sec=armed_timeout,
         )
-        self.tracker: Optional[MultiModelTrackerCore] = None
-        self.tracker_imgsz = imgsz
-        self.tracker_device = device
         if self.use_yolo_roi:
             self._ensure_tracker()
 
-        self.bridge = CvBridge()
-        self.frame_width = 640
-        self.prev_time = time.time()
-        self.fps = 0.0
         self.gesture_ms = 0.0
-        self.total_ms = 0.0
-        self.process = psutil.Process(os.getpid())
-        self.cpu_percent = 0.0
-        self.last_sys_check = 0.0
-
-        self.last_frame_wall_time = 0.0
-        self.last_display_frame: Optional[np.ndarray] = None
         self.last_status_str = 'IDLE'
-
         self.status_pub = self.create_publisher(String, 'gesture/status', 10)
 
-        self._cap = None
-        self._cap_lock = threading.Lock()
-        self._latest_cam_frame: Optional[np.ndarray] = None
-        self._stop_event = threading.Event()
-        self._cap_thread: Optional[threading.Thread] = None
-        self._cam_timer = None
-        self.sub = None
-        self.image_source_label = ''
-
-        if raw_source:
-            src: Union[int, str] = int(raw_source) if raw_source.isdigit() else raw_source
-            self.image_source_label = f'webcam:{src}'
-            self._start_local_capture(src)
-        else:
-            ns = self.get_namespace()
-            use_compressed = bool(self.get_parameter('use_compressed').value)
-            custom_topic = str(self.get_parameter('image_topic').value)
-            image_topic = resolve_image_topic(ns, use_compressed, custom_topic)
-            self.image_source_label = image_topic
-            if use_compressed:
-                self.sub = self.create_subscription(
-                    CompressedImage, image_topic, self._compressed_cb, qos_profile_sensor_data
-                )
-            else:
-                self.sub = self.create_subscription(
-                    Image, image_topic, self._raw_cb, qos_profile_sensor_data
-                )
-
-        self.win_name = 'Arti Gesture Test (Fist -> Open Palm)'
-        if self.show_gui:
-            cv2.namedWindow(self.win_name)
-            cv2.setMouseCallback(self.win_name, self._on_mouse_click)
+        self.reid_win_name = 'ReID Similarity & 304D HSV Vector'
+        self.reid_viz = ReIDDebugVisualizer()
+        if self.show_gui and self.show_reid_viz:
+            self._ensure_reid_window()
 
         self.get_logger().info(
             f'GestureTestNode 시작 | 소스: {self.image_source_label} | '
-            f'YOLO+ROI: {self.use_yolo_roi} | fist={fist_hold}, open={open_hold} | '
-            f'모델: {self.gesture_detector.model_path}'
+            f'YOLO+ROI: {self.use_yolo_roi} | StateStore: {self.enable_state_store} | '
+            f'fist={fist_hold}, open={open_hold} | 모델: {self.gesture_detector.model_path}'
         )
 
-    def _ensure_tracker(self):
-        if self.tracker is None:
-            self.tracker = MultiModelTrackerCore(
-                family_idx=3,
-                task_idx=3,
-                mode=5,
-                imgsz=self.tracker_imgsz,
-                device=self.tracker_device,
-            )
+    def _ensure_reid_window(self):
+        """ReID 모니터 창과 4개 실시간 튜닝 트랙바(Match%, Coex%, Margin%, ConfirmF)를 생성·연동합니다."""
+        cv2.namedWindow(self.reid_win_name)
+        cfg = self._tracker_cfg
+        m_val = int(round((self.tracker.reid_match_thresh if self.tracker else float(cfg['reid_match_thresh'])) * 100))
+        c_val = int(round((self.tracker.coexist_min_sim if self.tracker else float(cfg['coexist_min_sim'])) * 100))
+        g_val = int(round((self.tracker.recover_margin if self.tracker else float(cfg['recover_margin'])) * 100))
+        f_val = int(self.tracker.recover_confirm_frames if self.tracker else int(cfg['recover_confirm_frames']))
 
-    def _start_local_capture(self, src: Union[int, str]):
-        cap = cv2.VideoCapture(src, cv2.CAP_V4L2) if isinstance(src, int) else cv2.VideoCapture(src)
-        if not cap.isOpened():
-            cap.release()
-            cap = cv2.VideoCapture(src)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        else:
-            self.get_logger().error(f'로컬 카메라를 열 수 없습니다: {src}')
-        self._cap = cap
-        self._cap_thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._cap_thread.start()
-        self._cam_timer = self.create_timer(1.0 / 20.0, self._poll_local_frame)
+        def _on_match(v):
+            if self.tracker is not None:
+                val = max(0.30, v / 100.0)
+                self.tracker.reid_match_thresh = val
+                self.tracker.search_min_sim = max(0.28, val - 0.02)
 
-    def _capture_loop(self):
-        while not self._stop_event.is_set():
-            if self._cap is None or not self._cap.isOpened():
-                time.sleep(0.2)
-                continue
-            ret, frame = self._cap.read()
-            if ret and frame is not None:
-                if frame.shape[1] != 640 or frame.shape[0] != 480:
-                    frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
-                with self._cap_lock:
-                    self._latest_cam_frame = frame
-            else:
-                time.sleep(0.02)
+        def _on_coex(v):
+            if self.tracker is not None:
+                self.tracker.coexist_min_sim = max(0.50, v / 100.0)
 
-    def _poll_local_frame(self):
-        with self._cap_lock:
-            frame = self._latest_cam_frame
-            self._latest_cam_frame = None
-        if frame is not None:
-            self.handle_frame(frame)
+        def _on_margin(v):
+            if self.tracker is not None:
+                self.tracker.recover_margin = max(0.0, v / 100.0)
 
-    def _compressed_cb(self, msg: CompressedImage):
-        try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if frame is not None:
-                self.handle_frame(frame)
-        except Exception as exc:
-            self.get_logger().warn(f'Compressed decode error: {exc}', throttle_duration_sec=5.0)
+        def _on_confirm(v):
+            if self.tracker is not None:
+                self.tracker.recover_confirm_frames = max(1, int(v))
 
-    def _raw_cb(self, msg: Image):
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.handle_frame(frame)
-        except Exception as exc:
-            self.get_logger().warn(f'Raw convert error: {exc}', throttle_duration_sec=5.0)
+        cv2.createTrackbar('Match%', self.reid_win_name, m_val, 80, _on_match)
+        cv2.createTrackbar('Coex%', self.reid_win_name, c_val, 95, _on_coex)
+        cv2.createTrackbar('Margin%', self.reid_win_name, g_val, 20, _on_margin)
+        cv2.createTrackbar('ConfirmF', self.reid_win_name, f_val, 5, _on_confirm)
 
-    def _reset_target(self):
-        if self.tracker is not None:
-            self.tracker.select_target_by_id(None)
+    def _on_tracker_reset(self, _reason: str):
         self.gesture_mgr.reset_all()
-        self.get_logger().info('[타겟/제스처 초기화] 대기 상태로 복귀합니다.')
+        self.reid_viz.reset()
+        self._publish_status('SCANNING')
 
     def _toggle_yolo_roi(self):
         self.use_yolo_roi = not self.use_yolo_roi
         if self.use_yolo_roi:
             self._ensure_tracker()
         self.gesture_mgr.reset_all()
-        self.get_logger().info(f'[모드 전환] YOLO+ROI = {self.use_yolo_roi}')
+        self.get_logger().info(f'[모드 전환] use_yolo_roi={self.use_yolo_roi}')
 
     def _adjust_thresholds(self, d_fist: int = 0, d_open: int = 0):
-        f = max(1, min(15, self.gesture_mgr.fist_hold_frames + d_fist))
-        o = max(1, min(15, self.gesture_mgr.open_hold_frames + d_open))
-        self.gesture_mgr.set_thresholds(f, o)
-        self.get_logger().info(f'[임계 프레임 변경] fist={f}, open={o}')
+        new_fist = max(1, min(15, self.gesture_mgr.fist_hold_frames + d_fist))
+        new_open = max(1, min(15, self.gesture_mgr.open_hold_frames + d_open))
+        self.gesture_mgr.set_thresholds(new_fist, new_open)
+        self.get_logger().info(
+            f'[제스처 기준] fist={self.gesture_mgr.fist_hold_frames}f, open={self.gesture_mgr.open_hold_frames}f'
+        )
 
-    def _on_mouse_click(self, event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
+    def _handle_custom_mouse(self, x: int, y: int) -> bool:
         if y <= self.BAR_HEIGHT:
             slot_w = max(1, self.frame_width // 4)
-            slot = min(3, max(0, x // slot_w))
-            if slot == 0:
+            slot_idx = min(3, max(0, x // slot_w))
+            if slot_idx == 0:
                 self._toggle_yolo_roi()
-            elif slot == 1:
+            elif slot_idx == 1:
                 self._reset_target()
-            elif slot == 2:
-                self._adjust_thresholds(d_fist=1 if x > slot_w * 2 + slot_w // 2 else -1)
+            elif slot_idx == 2:
+                self._adjust_thresholds(d_fist=1 if x >= (2 * slot_w + slot_w // 2) else -1)
             else:
-                self._adjust_thresholds(d_open=1 if x > slot_w * 3 + slot_w // 2 else -1)
-            return
+                self._adjust_thresholds(d_open=1 if x >= (3 * slot_w + slot_w // 2) else -1)
+            return True
+        if not self.use_yolo_roi:
+            return True
+        return False
 
-        if self.use_yolo_roi and self.tracker is not None:
-            selected = self.tracker.select_target_by_point(x, y)
-            if selected is not None:
-                self.gesture_mgr.reset_all()
-                self.get_logger().info(f'[수동 클릭 잠금] ID={selected}')
-            else:
-                self._reset_target()
-
-    def _process_key(self, key: int):
+    def _handle_custom_key(self, key: int) -> bool:
         if key in (ord('y'), ord('Y')):
             self._toggle_yolo_roi()
-        elif key in (ord('r'), ord('R')):
-            self._reset_target()
-        elif key == ord('1'):
+            return True
+        if key == ord('1'):
             self._adjust_thresholds(d_fist=-1)
-        elif key == ord('2'):
+            return True
+        if key == ord('2'):
             self._adjust_thresholds(d_fist=1)
-        elif key == ord('3'):
+            return True
+        if key == ord('3'):
             self._adjust_thresholds(d_open=-1)
-        elif key == ord('4'):
+            return True
+        if key == ord('4'):
             self._adjust_thresholds(d_open=1)
-        elif key in (ord('d'), ord('D')) and self.tracker is not None:
-            dev = self.tracker.toggle_device()
-            self.get_logger().info(f'[장치 전환] {dev}')
+            return True
+        if key in (ord('v'), ord('V')):
+            self.show_reid_viz = not self.show_reid_viz
+            if self.show_gui:
+                if self.show_reid_viz:
+                    self._ensure_reid_window()
+                else:
+                    cv2.destroyWindow(self.reid_win_name)
+            self.get_logger().info(f'[ReID 그래프/벡터 창] {self.show_reid_viz}')
+            return True
+        return False
 
     def _publish_status(self, status_text: str):
         if status_text != self.last_status_str:
@@ -348,10 +275,17 @@ class GestureTestNode(Node):
                 cv2.LINE_AA,
             )
 
+        adapt_str = ''
+        if self.use_yolo_roi and self.tracker is not None and self.tracker.target_id is not None:
+            adapt_str = f' | {self.tracker.metrics.adaptive_state}'
+        pub_tag = ''
+        if self.localizer is not None and not self.publish_target_topics:
+            pub_tag = ' | PUB:OFF'
+        mask_tag = '' if self.show_pose_mask else ' | MASK:OFF'
         state_txt = (
             f'FPS:{self.fps:4.1f} | Total:{self.total_ms:4.1f}ms | '
             f'Gesture:{self.gesture_ms:4.1f}ms | CPU:{self.cpu_percent:4.1f}% | '
-            f'{"SCANNING" if gesture_active else "PAUSED (Locked)"}'
+            f'{"SCANNING" if gesture_active else "LOCKED"}{adapt_str}{pub_tag}{mask_tag}'
         )
         cv2.rectangle(frame, (0, self.BAR_HEIGHT), (w, self.BAR_HEIGHT + 24), (24, 24, 24), -1)
         cv2.putText(
@@ -373,120 +307,179 @@ class GestureTestNode(Node):
         label_prefix: str = '',
     ):
         x, y = anchor_xy
-        bar_w = 120
-        bar_h = 8
-        cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (40, 40, 40), -1)
-        fill_w = int(bar_w * max(0.0, min(1.0, prog.progress)))
+        hand_tag = f'({prog.hand_label}) ' if prog.hand_label else ''
+        prefix = f'{label_prefix.rstrip()} {hand_tag}' if label_prefix else hand_tag
         if prog.state == STATE_TRIGGERED:
-            bar_color = (60, 255, 80)
+            txt = f'{prefix}TARGET LOCKED!'
+            col = (80, 255, 80)
         elif prog.state == STATE_FIST_ARMED:
-            bar_color = (0, 200, 255)
+            txt = f'{prefix}OPEN PALM ({prog.open_count}/{prog.open_target})'
+            col = (0, 255, 255)
         else:
-            bar_color = (200, 200, 200)
-        if fill_w > 0:
-            cv2.rectangle(frame, (x, y), (x + fill_w, y + bar_h), bar_color, -1)
-        cv2.rectangle(frame, (x, y), (x + bar_w, y + bar_h), (120, 120, 120), 1)
+            txt = f'{prefix}Fist ({prog.fist_count}/{prog.fist_target})'
+            col = (200, 200, 200) if prog.fist_count == 0 else (0, 180, 255)
 
-        if prog.state == STATE_FIST_ARMED:
-            txt = f'{label_prefix}ARMED! Open ({prog.open_count}/{prog.open_target})'
-        elif prog.state == STATE_TRIGGERED:
-            txt = f'{label_prefix}TRIGGERED!'
-        else:
-            txt = f'{label_prefix}Fist ({prog.fist_count}/{prog.fist_target})'
         cv2.putText(
             frame,
             txt,
-            (x, max(78, y - 5)),
+            (max(8, x), max(74, y)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            bar_color,
-            1,
+            0.48,
+            col,
+            2,
             cv2.LINE_AA,
         )
 
-    def handle_frame(self, frame: np.ndarray):
+    def _scan_person_gestures(
+        self,
+        frame: np.ndarray,
+        detections: List[UnifiedTrackedPerson],
+        now_wall: float,
+    ) -> Tuple[
+        Optional[UnifiedTrackedPerson],
+        Dict[int, List[Tuple[Tuple[int, int, int, int], str]]],
+        List[HandGestureObservation],
+        Dict[int, GestureProgress],
+        bool,
+        float,
+    ]:
+        t_g0 = time.perf_counter()
+        rois: Dict[int, List[Tuple[Tuple[int, int, int, int], str]]] = {}
+        observations: List[HandGestureObservation] = []
+        progresses: Dict[int, GestureProgress] = {}
+        target: Optional[UnifiedTrackedPerson] = None
+        registered_now = False
+
+        active_ids = [p.track_id for p in detections]
+        person_tuples = [(p.track_id, p.bbox, p.keypoints) for p in detections]
+        assigned_slot_obs: Dict[int, Dict[str, List[HandGestureObservation]]] = {
+            p.track_id: {} for p in detections
+        }
+        for person in detections:
+            if (person.bbox[2] - person.bbox[0]) < self.min_person_width_px:
+                continue
+            person_rois = build_person_hand_rois(person.bbox, person.keypoints, frame.shape)
+            rois[person.track_id] = person_rois
+            for roi_box, _ in person_rois:
+                for obs in self.gesture_detector.detect_in_roi(frame, roi=roi_box):
+                    owner = find_best_hand_owner_slot(
+                        obs,
+                        person_tuples,
+                        min_palm_scale_px=self.min_palm_scale_px,
+                        min_person_width_px=self.min_person_width_px,
+                        require_pose_wrist=self.require_pose_wrist,
+                    )
+                    if owner is not None:
+                        owner_id, hand_slot, _ = owner
+                        assigned_slot_obs[owner_id].setdefault(hand_slot, []).append(obs)
+
+        for person in detections:
+            per_slot_primary: Dict[str, HandGestureObservation] = {}
+            for hand_slot, slot_list in assigned_slot_obs.get(person.track_id, {}).items():
+                chosen = self.gesture_detector.pick_primary_observation(slot_list)
+                if chosen is not None:
+                    per_slot_primary[hand_slot] = chosen
+                    observations.append(chosen)
+
+            slot_progs = self.gesture_mgr.update_person_hands(
+                person.track_id, per_slot_primary, now=now_wall
+            )
+            prog = self.gesture_mgr.pick_best_progress(
+                slot_progs, fallback_subject_id=person.track_id
+            )
+            progresses[person.track_id] = prog
+            triggered_prog = next((sp for sp in slot_progs if sp.just_triggered), None)
+            if triggered_prog is not None:
+                locked_id = self.tracker.select_target_by_id(person.track_id)
+                person.is_target = True
+                target = person
+                registered_now = True
+                progresses[person.track_id] = triggered_prog
+                self.get_logger().info(
+                    f'[제스처 타겟 등록] ID={locked_id} hand={triggered_prog.hand_label} (주먹->펴기 완료)'
+                )
+                self._publish_status(f'TRIGGERED:id={locked_id}')
+                break
+
+        self.gesture_mgr.prune_stale(active_ids, now=now_wall)
+        t_gesture_ms = (time.perf_counter() - t_g0) * 1000.0
+        return target, rois, observations, progresses, registered_now, t_gesture_ms
+
+    def handle_frame(self, frame: np.ndarray, frame_stamp=None):
+        """프레임 1장을 추적 -> 제스처 등록 -> 3D 위치추정 -> 선택적 상태 갱신 -> GUI 출력합니다."""
         t_start = time.perf_counter()
         now_wall = time.time()
         self.last_frame_wall_time = now_wall
-
-        dt = now_wall - self.prev_time
-        self.prev_time = now_wall
-        if dt > 0:
-            inst = 1.0 / dt
-            self.fps = 0.9 * self.fps + 0.1 * inst if self.fps > 0 else inst
-
-        if now_wall - self.last_sys_check >= 0.5:
-            self.last_sys_check = now_wall
-            self.cpu_percent = psutil.cpu_percent(interval=None)
+        self._current_frame_stamp = frame_stamp
+        self._update_perf_metrics(now_wall)
 
         detections: List[UnifiedTrackedPerson] = []
+        target: Optional[UnifiedTrackedPerson] = None
         rois: Dict[int, List[Tuple[Tuple[int, int, int, int], str]]] = {}
         observations: List[HandGestureObservation] = []
         progresses: Dict[int, GestureProgress] = {}
         gesture_active = True
+        registered_now = False
+        phase = 'SCANNING'
+        loc_res = None
         t_gesture_ms = 0.0
 
         if self.use_yolo_roi and self.tracker is not None:
-            detections, target = self.tracker.process_frame(frame, auto_lock_first=False)
+            want_all_sims = self.show_gui and self.show_reid_viz
+            detections, target = self.tracker.process_frame(
+                frame,
+                auto_lock_first=False,
+                spatial_estimator=(
+                    self._estimate_candidate_spatial if self.localizer is not None else None
+                ),
+                compute_all_sims=want_all_sims,
+            )
             if self.tracker.target_id is not None:
                 gesture_active = False
-                self._publish_status(f'LOCKED:id={self.tracker.target_id}')
+                phase = 'LOCKED' if target is not None else 'LOST_WAIT'
+                self._publish_status(
+                    f'LOCKED:id={self.tracker.target_id}' if target is not None else 'LOST_WAIT'
+                )
             else:
-                t_g0 = time.perf_counter()
-                active_ids = [p.track_id for p in detections]
-                person_tuples = [(p.track_id, p.bbox, p.keypoints) for p in detections]
-                assigned_obs: Dict[int, List[HandGestureObservation]] = {
-                    p.track_id: [] for p in detections
-                }
-                for person in detections:
-                    if (person.bbox[2] - person.bbox[0]) < self.min_person_width_px:
-                        continue
-                    person_rois = build_person_hand_rois(
-                        person.bbox, person.keypoints, frame.shape
-                    )
-                    rois[person.track_id] = person_rois
-                    for roi_box, _ in person_rois:
-                        for obs in self.gesture_detector.detect_in_roi(frame, roi=roi_box):
-                            owner = find_best_hand_owner(
-                                obs,
-                                person_tuples,
-                                min_palm_scale_px=self.min_palm_scale_px,
-                                min_person_width_px=self.min_person_width_px,
-                                require_pose_wrist=self.require_pose_wrist,
-                            )
-                            if owner is not None:
-                                assigned_obs[owner[0]].append(obs)
-
-                for person in detections:
-                    primary = self.gesture_detector.pick_primary_observation(
-                        assigned_obs.get(person.track_id, [])
-                    )
-                    if primary is not None:
-                        observations.append(primary)
-                    prog = self.gesture_mgr.update(person.track_id, primary, now=now_wall)
-                    progresses[person.track_id] = prog
-                    if prog.just_triggered:
-                        locked_id = self.tracker.select_target_by_id(person.track_id)
-                        self.get_logger().info(
-                            f'[제스처 타겟 등록] ID={locked_id} (주먹->펴기 완료)'
-                        )
-                        self._publish_status(f'TRIGGERED:id={locked_id}')
-                        break
-                self.gesture_mgr.prune_stale(active_ids, now=now_wall)
-                t_gesture_ms = (time.perf_counter() - t_g0) * 1000.0
-                if self.tracker.target_id is None:
-                    armed = [p.subject_id for p in progresses.values() if p.state == STATE_FIST_ARMED]
+                (
+                    target,
+                    rois,
+                    observations,
+                    progresses,
+                    registered_now,
+                    t_gesture_ms,
+                ) = self._scan_person_gestures(frame, detections, now_wall)
+                if registered_now:
+                    gesture_active = False
+                    phase = 'TRIGGERED'
+                else:
+                    armed = [
+                        p.subject_id for p in progresses.values() if p.state == STATE_FIST_ARMED
+                    ]
+                    phase = 'FIST_ARMED' if armed else 'SCANNING'
                     self._publish_status(f'FIST_ARMED:ids={armed}' if armed else 'SCANNING')
+
+            loc_res = self._localize_and_log_target(target, frame.shape, frame_stamp, now_wall)
         else:
             t_g0 = time.perf_counter()
             obs_list = self.gesture_detector.detect_in_roi(frame, roi=None)
-            observations.extend(obs_list)
-            primary = self.gesture_detector.pick_primary_observation(obs_list)
-            prog = self.gesture_mgr.update(0, primary, now=now_wall)
+            slot_lists: Dict[str, List[HandGestureObservation]] = {}
+            mid_x = frame.shape[1] * 0.5
+            for obs in obs_list:
+                slot_lists.setdefault(infer_fallback_hand_slot(obs, mid_x), []).append(obs)
+            per_slot_primary = {}
+            for hand_slot, s_list in slot_lists.items():
+                chosen = self.gesture_detector.pick_primary_observation(s_list)
+                if chosen is not None:
+                    per_slot_primary[hand_slot] = chosen
+                    observations.append(chosen)
+            slot_progs = self.gesture_mgr.update_person_hands(0, per_slot_primary, now=now_wall)
+            prog = self.gesture_mgr.pick_best_progress(slot_progs, fallback_subject_id=0)
             progresses[0] = prog
             t_gesture_ms = (time.perf_counter() - t_g0) * 1000.0
             if prog.just_triggered:
                 self.get_logger().info('[단독 제스처 트리거] 주먹 -> 손바닥 펴기 감지됨')
+            phase = 'HAND_ONLY'
             self._publish_status(f'HAND_ONLY:{prog.state}:{prog.last_gesture}')
 
         total_ms = (time.perf_counter() - t_start) * 1000.0
@@ -495,24 +488,58 @@ class GestureTestNode(Node):
         )
         self.total_ms = 0.85 * self.total_ms + 0.15 * total_ms if self.total_ms > 0 else total_ms
 
+        self._update_state_store(
+            phase=phase,
+            target=target,
+            loc_res=loc_res,
+            registered_now=registered_now,
+        )
+
         if self.show_gui:
-            vis = frame.copy()
-            for p in detections:
-                x1, y1, x2, y2 = p.bbox
-                if p.is_target:
-                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            self._render_gui(
+                frame, detections, rois, observations, progresses, gesture_active
+            )
+
+    def _render_gui(
+        self,
+        frame: np.ndarray,
+        detections: List[UnifiedTrackedPerson],
+        rois: Dict[int, List[Tuple[Tuple[int, int, int, int], str]]],
+        observations: List[HandGestureObservation],
+        progresses: Dict[int, GestureProgress],
+        gesture_active: bool,
+    ):
+        vis = frame.copy()
+        self._draw_pose_and_mask_overlays(vis, frame, detections)
+        for p in detections:
+            x1, y1, x2, y2 = p.bbox
+            if p.is_target:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    vis,
+                    f'TARGET ID:{p.track_id} (Gesture PAUSED)',
+                    (x1, max(78, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                self._draw_target_loc_text(vis, p.bbox, self.last_loc_result)
+            else:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (170, 170, 170), 1)
+                if self.tracker is not None and self.tracker.target_id is not None:
                     cv2.putText(
                         vis,
-                        f'TARGET ID:{p.track_id} (Gesture PAUSED)',
+                        f'ID:{p.track_id} sim:{p.similarity:.2f}',
                         (x1, max(78, y1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.50,
-                        (0, 255, 0),
-                        2,
+                        0.44,
+                        (180, 180, 180),
+                        1,
                         cv2.LINE_AA,
                     )
                 else:
-                    cv2.rectangle(vis, (x1, y1), (x2, y2), (170, 170, 170), 1)
                     for roi_box, roi_kind in rois.get(p.track_id, []):
                         roi_color = (255, 220, 40) if roi_kind == 'wrist' else (40, 160, 220)
                         cv2.rectangle(vis, (roi_box[0], roi_box[1]), (roi_box[2], roi_box[3]), roi_color, 1)
@@ -525,69 +552,29 @@ class GestureTestNode(Node):
                             label_prefix=f'ID:{p.track_id} ',
                         )
 
-            if not self.use_yolo_roi and 0 in progresses:
-                self._draw_progress_badge(vis, (12, 92), progresses[0], label_prefix='Hand ')
+        if not self.use_yolo_roi and 0 in progresses:
+            self._draw_progress_badge(vis, (12, 92), progresses[0], label_prefix='Hand ')
 
-            for obs in observations:
-                self._draw_hand_skeleton(vis, obs)
+        for obs in observations:
+            self._draw_hand_skeleton(vis, obs)
 
-            self._draw_top_bar(vis, gesture_active=gesture_active)
-            self.last_display_frame = vis
-            cv2.imshow(self.win_name, vis)
-            key = cv2.waitKey(1) & 0xFF
-            if key != 255:
-                self._process_key(key)
-
-    def refresh_idle_gui(self):
-        if not self.show_gui:
-            return
-        if time.time() - self.last_frame_wall_time < 0.4:
-            return
-        if self.last_display_frame is not None:
-            idle = self.last_display_frame.copy()
-        else:
-            idle = np.zeros((480, 640, 3), dtype=np.uint8)
-        h, w = idle.shape[:2]
-        cv2.rectangle(idle, (0, h - 32), (w, h), (20, 20, 20), -1)
-        cv2.putText(
-            idle,
-            f'WAITING FOR SOURCE: {self.image_source_label}',
-            (10, h - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
-            (0, 220, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.imshow(self.win_name, idle)
+        self._draw_top_bar(vis, gesture_active=gesture_active)
+        self.last_display_frame = vis
+        cv2.imshow(self.win_name, vis)
+        if self.show_reid_viz and self.use_yolo_roi and self.tracker is not None:
+            reid_panel = self.reid_viz.render(self.tracker, detections)
+            cv2.imshow(self.reid_win_name, reid_panel)
         key = cv2.waitKey(1) & 0xFF
         if key != 255:
             self._process_key(key)
 
     def destroy_node(self):
-        self._stop_event.set()
-        if self._cap_thread is not None and self._cap_thread.is_alive():
-            self._cap_thread.join(timeout=1.0)
-        if self._cap is not None and self._cap.isOpened():
-            self._cap.release()
         self.gesture_detector.close()
         super().destroy_node()
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = GestureTestNode()
-    try:
-        while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.05)
-            node.refresh_idle_gui()
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass
-    finally:
-        cv2.destroyAllWindows()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    run_tracker_node(GestureTestNode, args=args)
 
 
 if __name__ == '__main__':

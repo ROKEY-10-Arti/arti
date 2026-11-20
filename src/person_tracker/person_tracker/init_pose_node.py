@@ -87,9 +87,16 @@ class InitialPoseNode(Node):
 
     def _load_yaml_defaults(self) -> dict:
         candidates = [
-            os.path.expanduser('~/turtlebot4_ws/src/person_tracker/config/phone_camera.yaml'),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
         ]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            candidates.insert(
+                0,
+                os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
+            )
+        except Exception:
+            pass
         for path in candidates:
             if os.path.isfile(path):
                 try:

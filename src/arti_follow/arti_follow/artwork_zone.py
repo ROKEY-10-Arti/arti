@@ -7,6 +7,8 @@
                                                             (좌표 기록, 설명한 작품, 안내 구역 기록, 진행 중 설명 취소)
 출력  explain_artwork (arti_interfaces/action/ExplainArtwork)  액션 클라이언트 → arti_audio guide_audio_node
       guide_message (std_msgs/String)                         안내 구역(출구·키오스크) 안내 키
+      artwork_zone/entered (std_msgs/String)                  관람객이 들어간 안내 구역 zone_id (들어갈 때마다 한 번)
+                                                            → visitor_follower: end_zone(exit)이면 안내 뒤 관람 끝·도킹
       artwork_zone/state (std_msgs/String)                    지금 판단 (바뀔 때만): idle, dwell 1, explaining 1 ...
       artwork_zone/explaining (std_msgs/Int32, latched)       설명 중인 작품 번호 (시작할 때), 끝나면 0 → visitor_follower feedback
       artwork_zone/explained (std_msgs/Int32)                 끝까지 설명한 작품 번호 (한 번씩) → visitor_follower feedback ARTWORK_COMPLETED
@@ -15,7 +17,7 @@
 구역은 arti_common/config/artworks.yaml (map 좌표 반원). 코드에 좌표를 두지 않는다.
 
 작품 구역
-  관람객이 dwell_time(5 s) 동안 dwell_radius(0.6 m) 안에 머무름 (is_dwelling)
+  관람객이 dwell_time(3 s) 동안 dwell_radius(0.6 m) 안에 머무름 (is_dwelling)
   → 그 위치가 작품 반원 안이면 (여럿이면 중심이 가장 가까운 작품, find_artwork_zone)
   → 이미 끝까지 설명한 작품이 아니면 explain_artwork goal
   설명 중 처음 위치에서 leave_distance(1 m) 넘게 벗어나거나 lost_timeout(1 s) 동안 좌표가 없으면 취소
@@ -36,12 +38,13 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Empty, Int32, String
-import yaml
+
+from arti_common.zones import load_zones   # 구역 읽기·판정 (두 로봇 공통)
 
 PARAMS = {
     'zones_file': '',              # '' = 설치된 share/arti_common/config/artworks.yaml
     'map_frame': 'map',
-    'dwell_time': 5.0,             # 이만큼 머물러야 설명 [s] (T32)
+    'dwell_time': 3.0,             # 이만큼 머물러야 설명 [s] (T32)
     'dwell_radius': 0.6,           # 머무름 판정 반경 [m] (T32)
     'leave_distance': 1.0,         # 설명 중 이만큼 벗어나면 취소 [m] (T32)
     'lost_timeout': 1.0,           # 좌표가 이만큼 안 오면 머무름 초기화·설명 취소 [s]
@@ -51,45 +54,6 @@ PARAMS = {
 }
 
 TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')    # visitor_follower follow/state 중 관람객이 등록돼 추종 중인 상태
-
-
-class Zone:
-    """구역 하나. shape: semicircle(기본) 또는 rect.
-
-    semicircle  x, y(중심), facing_deg(정면, 방 쪽), radius
-    rect        x_min, x_max, y_min, y_max (map 축에 나란한 직사각형). 중심 = 가운데, 정면 없음
-    """
-
-    def __init__(self, zid, row):
-        self.id, self.name = zid, row.get('name', str(zid))
-        self.shape = row.get('shape', 'semicircle')
-        self.guide = row.get('guide')
-        if self.shape == 'rect':
-            self.box = tuple(float(row[k]) for k in ('x_min', 'x_max', 'y_min', 'y_max'))
-            self.x, self.y = (self.box[0] + self.box[1]) / 2, (self.box[2] + self.box[3]) / 2
-            self.r, self.fx, self.fy = None, 0.0, 0.0
-            return
-        self.x, self.y, self.r = float(row['x']), float(row['y']), float(row['radius'])
-        a = math.radians(float(row['facing_deg']))
-        self.fx, self.fy = math.cos(a), math.sin(a)
-
-    def dist(self, p):
-        return math.hypot(p[0] - self.x, p[1] - self.y)
-
-    def contains(self, p):
-        if self.shape == 'rect':
-            x0, x1, y0, y1 = self.box
-            return x0 <= p[0] <= x1 and y0 <= p[1] <= y1
-        dx, dy = p[0] - self.x, p[1] - self.y
-        return math.hypot(dx, dy) <= self.r and dx * self.fx + dy * self.fy >= 0.0
-
-
-def load_zones(path):
-    with open(path, encoding='utf-8') as f:
-        data = yaml.safe_load(f) or {}
-    arts = [Zone(int(r['artwork_id']), r) for r in data.get('artworks') or []]   # 작품 번호 (int)
-    guides = [Zone(str(r['zone_id']), r) for r in data.get('guide_zones') or []]
-    return arts, guides
 
 
 class ArtworkZone(Node):
@@ -115,6 +79,7 @@ class ArtworkZone(Node):
 
         self.explain = ActionClient(self, ExplainArtwork, 'explain_artwork')
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
+        self.entered_pub = self.create_publisher(String, 'artwork_zone/entered', 10)
         self.state_pub = self.create_publisher(String, 'artwork_zone/state', 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.explaining_pub = self.create_publisher(Int32, 'artwork_zone/explaining', latched)   # 0 = 설명 안 함
@@ -214,6 +179,7 @@ class ArtworkZone(Node):
             if z.id in self.inside:
                 continue
             self.inside.add(z.id)
+            self.entered_pub.publish(String(data=z.id))     # 들어갈 때마다 (안내 음성 반복 제한과 별개)
             if now - self.guided_at.get(z.id, -1e9) < self.p['guide_rearm_time']:
                 continue
             self.guided_at[z.id] = now

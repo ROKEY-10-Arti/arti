@@ -1,3 +1,29 @@
+"""
+다중 YOLO 모델 + ByteTrack/BoT-SORT + Adaptive ReID 오인식 방지 추적 코어 (multi_tracker_core.py)
+
+[전체 프레임 처리 흐름 (`MultiModelTrackerCore.process_frame`)]
+1. 1차 다중 객체 탐지·추적 (`self.model.track`):
+   - 선택된 YOLO 버전(v8n/11n/26n)과 태스크(Det/Seg/Pose)에 ByteTrack 또는 BoT-SORT를 결합해
+     프레임 내 모든 사람의 `track_id`, `bbox`, `keypoints`/`mask_poly`를 획득합니다.
+2. 외형 특징 추출 및 유사도 산출 (`current_extractor.extract` -> `compute_dual_similarity_detail`):
+   - 타겟 `anchor_bank`가 고정된 상태에서 REID 활성 모드이거나 시각화 요청(`compute_all_sims=True`) 시
+     모든 검출 인원의 304D HSV `PartFeatureBank`와 Anchor/Recent 최고 유사도(`similarity`, `part_sims`)를 계산합니다.
+3. 모델/트래커 전환 시 타겟 승계 (`pending_tracker_rebind`):
+   - 모델/모드 전환 직후 1프레임에 한해 직전 BBox와의 IoU(0.65) + 외형 유사도(0.35)로 동일 인물을 재연결합니다.
+4. MODE_ADAPTIVE (모드 5) 상태 머신 — 오인식 방지 및 타겟 복구:
+   - [COEX 기록]: 현재 타겟과 충분히 떨어져(`abs(dx) > 0.9 * tw`, `IoU < 0.05`) 공존 중인 다른 ID를
+     `coexisting_non_target_ids`에 등록해 복귀 시 동일인 오인을 막습니다.
+   - [SAFE 상태]: 타겟 주변이 한산할 때 외형을 검사하며, 다수 인원(`len >= 2`) 상황에서
+     유사도가 `id_switch_thresh`(0.48) 미만인 프레임이 `safe_mismatch_limit`(4회) 연속 발생하면
+     ByteTrack ID 탈취로 간주하고 `target_id = -1`로 조기 이탈해 `SEARCH`로 전환합니다.
+   - [GUARD 상태]: 타겟 주변이 혼잡(`_is_crowded_near_target`)하면 타인 박스를 마스킹(`exclude_boxes`)한 뒤
+     외형(0.60) + 3D LiDAR 공간 점수(0.40) + 관성 보너스(+0.04)로 즉시 교차 ID를 재판별합니다.
+   - [SEARCH -> RECOVERED 상태]: 타겟 유실 시 전체 검출 후보를 점수화(`_score_candidate`)한 뒤,
+     `COEX` 차단(`>= coexist_min_sim`일 때만 `eligible`), 최소 유사도/점수, 1-2위 격차(`recover_margin`),
+     연속 확인(`recover_confirm_frames=2`)을 모두 통과한 후보만 타겟으로 복귀시킵니다.
+5. 결과 조립 및 EMA 성능 통계 갱신 (`UnifiedTrackedPerson`, `MultiTrackerMetrics`).
+"""
+
 from dataclasses import dataclass
 import math
 import os
@@ -31,6 +57,13 @@ class UnifiedTrackedPerson:
     mask_poly: Optional[np.ndarray] = None
     keypoints: Optional[np.ndarray] = None  # (17, 3) [x, y, conf]
     visible_parts: Tuple[bool, bool, bool] = (True, True, True)
+    part_sims: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]] = (
+        None,
+        None,
+        None,
+        None,
+    )
+    feature_bank: Optional[PartFeatureBank] = None
 
 
 @dataclass
@@ -45,6 +78,8 @@ class MultiTrackerMetrics:
     total_ms: float = 0.0
     max_infer_fps: float = 0.0
     adaptive_state: str = 'IDLE'
+    search_reason: str = ''
+    ema_status: str = 'IDLE'
 
 
 class MultiModelTrackerCore:
@@ -91,13 +126,23 @@ class MultiModelTrackerCore:
         device: str = '',
         conf: float = 0.15,
         iou: float = 0.55,
+        reid_match_thresh: float = 0.50,
+        search_min_sim: float = 0.48,
+        coexist_min_sim: float = 0.74,
+        recover_margin: float = 0.06,
+        recover_confirm_frames: int = 2,
+        id_switch_thresh: float = 0.48,
+        safe_mismatch_limit: int = 4,
+        ema_min_sim: float = 0.60,
+        ema_alpha: float = 0.04,
+        ema_require_single: bool = True,
     ):
         self.family_idx = family_idx if family_idx in self.FAMILIES else 3
         self.task_idx = task_idx if task_idx in self.TASKS else 3
         self.mode = mode if mode in self.MODE_NAMES else 5
         self.imgsz = imgsz
-        self.conf = conf
-        self.iou = iou
+        self.conf = float(conf)
+        self.iou = float(iou)
 
         if not device:
             self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -123,13 +168,31 @@ class MultiModelTrackerCore:
         self.last_detections: List[UnifiedTrackedPerson] = []
         self.last_frame: Optional[np.ndarray] = None
 
+        # 오인식 예방 상태 (SAFE 이탈 검사 + COEX 공존 비타겟 + SEARCH 연속 확정)
+        self.safe_mismatch_count: int = 0
+        self.safe_mismatch_limit: int = max(1, int(safe_mismatch_limit))
+        self.coexisting_non_target_ids: set[int] = set()
+        self.recover_candidate_id: Optional[int] = None
+        self.recover_confirm_count: int = 0
+        self.recover_confirm_frames: int = max(1, int(recover_confirm_frames))
+        self.last_search_reason: str = ''
+
         # 라이다/맵 3D 위치 기반 타겟 기억 상태 (다른 사람과 혼동 방지용)
         self.last_target_world_xy: Optional[Tuple[float, float]] = None
         self.last_target_world_frame: str = ''
         self.last_target_seen_time: float = 0.0
 
-        self.reid_match_thresh = 0.52
-        self.id_switch_thresh = 0.50
+        self.reid_match_thresh = float(reid_match_thresh)
+        self.search_min_sim = float(search_min_sim)
+        self.coexist_min_sim = float(coexist_min_sim)
+        self.recover_margin = float(recover_margin)
+        self.id_switch_thresh = float(id_switch_thresh)
+        self.ema_min_sim = float(ema_min_sim)
+        self.ema_alpha = float(ema_alpha)
+        self.ema_require_single = bool(ema_require_single)
+        self.backfill_confirm_frames: int = 2
+        self._fallback_upgrade_streak: int = 0
+        self._backfill_streaks: Dict[str, int] = {'upper': 0, 'mid': 0, 'lower': 0}
 
         self.current_model_name = self._build_model_filename(self.family_idx, self.task_idx)
         self.model = self._get_or_load_model(self.current_model_name)
@@ -234,6 +297,7 @@ class MultiModelTrackerCore:
     def _is_crowded_near_target(
         cls, target: UnifiedTrackedPerson, detections: List[UnifiedTrackedPerson]
     ) -> bool:
+        """타겟 주변 혼잡 여부 판별: 타인과 IoU > 0.02 또는 중심 거리가 BBox 폭 1.2배/높이 0.8배 이내면 True."""
         tx1, ty1, tx2, ty2 = target.bbox
         tw = max(1, tx2 - tx1)
         tcx, tcy = target.center
@@ -259,6 +323,12 @@ class MultiModelTrackerCore:
         """
         직전 확인된 타겟의 3D(map 또는 base_link) 위치와 경과 시간을 바탕으로
         후보가 물리적 이동 반경 안에 있는지 [0.0 ~ 1.0] 공간 점수와 거리(m)를 반환.
+
+        [알고리즘 원리]
+        - 보행 속도(1.35 m/s)와 센서 오차 여유(0.65 m)를 합산해 허용 반경
+          `allowed_radius = 0.65 + 1.35 * min(dt, 6.0)`을 구합니다.
+        - 3D 유클리드 거리 `dist_m`를 가우시안 감쇠 `exp(-0.5 * (dist_m / sigma)^2)`로 변환하며,
+          LiDAR 실측 거리가 허용 반경의 1.4배를 초과하면 순간이동 불가능으로 보고 0.20배 패널티를 줍니다.
         """
         if (
             spatial_estimator is None
@@ -301,10 +371,89 @@ class MultiModelTrackerCore:
         frame_h: int,
         spatial_estimator,
     ) -> float:
+        """SEARCH 복귀 후보 종합 점수: 3D 위치 정보가 있으면 `0.65 * 외형유사도 + 0.35 * 공간점수`, 없으면 외형유사도 단독 사용."""
         sp_score, _ = self._compute_spatial_score(person, frame_w, frame_h, spatial_estimator)
         if self.last_target_world_xy is None or spatial_estimator is None:
             return person.similarity
         return 0.65 * person.similarity + 0.35 * sp_score
+
+    def _reset_bank_completion_streaks(self):
+        self._fallback_upgrade_streak = 0
+        for part in ('upper', 'mid', 'lower'):
+            self._backfill_streaks[part] = 0
+
+    def _update_target_banks_safely(
+        self,
+        extractor: BaseFeatureExtractor,
+        current_target: UnifiedTrackedPerson,
+        t_bank: Optional[PartFeatureBank],
+        detections: List[UnifiedTrackedPerson],
+    ) -> str:
+        """
+        안전 추적 구간에서 `recent_bank` EMA 갱신, BBox 폴백 승격(`UPGRADE`),
+        초기 미관측(`None`) 부위 보충(`BACKFILL`)을 수행하고 `ema_status` 문자열을 반환합니다.
+        """
+        single_ok = (not self.ema_require_single) or (len(detections) == 1)
+        if not single_ok:
+            self._reset_bank_completion_streaks()
+            return f'HOLD({len(detections)}P)'
+
+        # 1. 등록 시 Pose 관절 미검출로 BBox 폴백 잠금된 경우 -> 정상 Pose 관절 2프레임 연속 검출 시 1회 승격
+        if (
+            self.anchor_bank is not None
+            and self.anchor_bank.is_fallback
+            and t_bank is not None
+            and not t_bank.is_fallback
+        ):
+            self._fallback_upgrade_streak += 1
+            if self._fallback_upgrade_streak >= self.backfill_confirm_frames:
+                self.anchor_bank = t_bank.copy()
+                self.recent_bank = t_bank.copy()
+                self._reset_bank_completion_streaks()
+                current_target.similarity, current_target.part_sims = (
+                    extractor.compute_dual_similarity_detail(
+                        self.anchor_bank, self.recent_bank, t_bank
+                    )
+                )
+                return 'UPGRADE'
+            return f'HOLD(UPG {self._fallback_upgrade_streak}/{self.backfill_confirm_frames})'
+
+        self._fallback_upgrade_streak = 0
+        if current_target.similarity < self.ema_min_sim:
+            for part in ('upper', 'mid', 'lower'):
+                self._backfill_streaks[part] = 0
+            return 'HOLD(sim)'
+
+        extractor.update_recent_bank(self.recent_bank, t_bank, alpha=self.ema_alpha)
+
+        # 2. 등록 시 가려짐/화면 잘림으로 None이었던 부위가 안전 구간에서 연속 관측되면 1회 보충
+        backfilled = False
+        if t_bank is not None and not t_bank.is_fallback:
+            for part in ('upper', 'mid', 'lower'):
+                need_recent = self.recent_bank is not None and getattr(self.recent_bank, part) is None
+                need_anchor = self.anchor_bank is not None and getattr(self.anchor_bank, part) is None
+                cand_hist = getattr(t_bank, part)
+                if (need_recent or need_anchor) and cand_hist is not None:
+                    self._backfill_streaks[part] += 1
+                    if self._backfill_streaks[part] >= self.backfill_confirm_frames:
+                        if extractor.backfill_part(self.recent_bank, part, cand_hist):
+                            backfilled = True
+                        if extractor.backfill_part(self.anchor_bank, part, cand_hist):
+                            backfilled = True
+                        self._backfill_streaks[part] = 0
+                else:
+                    self._backfill_streaks[part] = 0
+            if backfilled:
+                current_target.similarity, current_target.part_sims = (
+                    extractor.compute_dual_similarity_detail(
+                        self.anchor_bank, self.recent_bank, t_bank
+                    )
+                )
+        else:
+            for part in ('upper', 'mid', 'lower'):
+                self._backfill_streaks[part] = 0
+
+        return 'BACKFILL' if backfilled else 'ACTIVE'
 
     def _lock_target_bank(self, frame: np.ndarray, person: UnifiedTrackedPerson):
         bank = self.current_extractor.extract(
@@ -321,17 +470,30 @@ class MultiModelTrackerCore:
         self.recent_bank = None
         self.last_target_bbox = None
         self.pending_tracker_rebind = False
+        self.safe_mismatch_count = 0
+        self.coexisting_non_target_ids.clear()
+        self.recover_candidate_id = None
+        self.recover_confirm_count = 0
+        self.last_search_reason = ''
         self.last_target_world_xy = None
         self.last_target_world_frame = ''
         self.last_target_seen_time = 0.0
+        self._reset_bank_completion_streaks()
 
     def _activate_target(self, person: UnifiedTrackedPerson) -> int:
+        """새 타겟 ID와 Anchor 특징 뱅크를 잠그고 SAFE/COEX/SEARCH 카운터를 초기 상태로 리셋합니다."""
         self.target_id = person.track_id
         self.last_target_bbox = person.bbox
         self.pending_tracker_rebind = False
+        self.safe_mismatch_count = 0
+        self.coexisting_non_target_ids.clear()
+        self.recover_candidate_id = None
+        self.recover_confirm_count = 0
+        self.last_search_reason = ''
         self.last_target_world_xy = None
         self.last_target_world_frame = ''
         self.last_target_seen_time = 0.0
+        self._reset_bank_completion_streaks()
         if self.last_frame is not None:
             self._lock_target_bank(self.last_frame, person)
         return self.target_id
@@ -363,7 +525,21 @@ class MultiModelTrackerCore:
         spatial_estimator: Optional[
             Callable[[UnifiedTrackedPerson, int, int], Optional[Tuple[Tuple[float, float], str, str]]]
         ] = None,
+        compute_all_sims: bool = False,
     ) -> Tuple[List[UnifiedTrackedPerson], Optional[UnifiedTrackedPerson]]:
+        """
+        단일 프레임을 추적·ReID 재식별 처리하고 검출 인원 리스트 및 현재 확정 타겟을 반환합니다.
+
+        [모드 5 (Adaptive ReID) 핵심 동작 원리]
+        1. `COEX` 등록: 타겟이 확실히 보일 때 멀리 떨어져 공존 중인 타 ID를 `coexisting_non_target_ids`에 기억.
+        2. `SAFE`: 한산한 장면에서 `len(detections) >= 2`이고 유사도가 `id_switch_thresh`(0.48) 미만인 프레임이
+           4회 연속되면 ByteTrack ID 탈취로 판단해 `target_id = -1`로 조기 이탈 후 `SEARCH` 진입.
+           (단독 1인 추적 중 유사도 >= 0.72일 때만 `recent_bank` EMA 갱신)
+        3. `GUARD`: 타겟 주변이 혼잡할 때 겹친 타인 박스를 제외한 특징 + 공간 점수(`0.60*sim + 0.40*spatial`)로
+           즉시 교차 ID를 보정(+0.04 현재 ID 관성 보너스).
+        4. `SEARCH`: 타겟 유실 시 `COEX` 차단(`>= coexist_min_sim`일 때만 `eligible`), 최소 유사도/점수,
+           1-2위 격차(`recover_margin`), 연속 프레임 확정(`recover_confirm_frames`) 통과 시에만 `RECOVERED`.
+        """
         t_start = time.perf_counter()
         self.last_frame = frame
         h, w = frame.shape[:2]
@@ -411,8 +587,10 @@ class MultiModelTrackerCore:
             )
 
             person_banks: Dict[int, Optional[PartFeatureBank]] = {}
+            ema_status = 'IDLE'
             compute_all_now = (
-                self.anchor_bank is not None and self.mode in self.REID_ACTIVE_MODES
+                self.anchor_bank is not None
+                and (self.mode in self.REID_ACTIVE_MODES or compute_all_sims)
             )
 
             for (x1, y1, x2, y2), track_id, poly, kp in zip(boxes, ids, polys, kpts):
@@ -425,12 +603,19 @@ class MultiModelTrackerCore:
 
                 sim = 1.0
                 vis_parts = (True, True, True)
+                part_sims: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]] = (
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                bank: Optional[PartFeatureBank] = None
                 if compute_all_now:
                     bank = extractor.extract(frame, bbox, poly, kp)
                     person_banks[track_id] = bank
                     if bank is not None:
                         vis_parts = bank.visible_parts
-                    sim = extractor.compute_dual_similarity(
+                    sim, part_sims = extractor.compute_dual_similarity_detail(
                         self.anchor_bank, self.recent_bank, bank
                     )
 
@@ -446,6 +631,8 @@ class MultiModelTrackerCore:
                     mask_poly=poly,
                     keypoints=kp,
                     visible_parts=vis_parts,
+                    part_sims=part_sims,
+                    feature_bank=bank,
                 )
                 detections.append(person)
 
@@ -522,40 +709,166 @@ class MultiModelTrackerCore:
                             best_candidate.is_target = True
                             current_target = best_candidate
 
-                    if current_target is not None and current_target.similarity >= 0.62:
-                        extractor.update_recent_bank(
-                            self.recent_bank, person_banks.get(current_target.track_id)
+                    if current_target is not None:
+                        ema_status = self._update_target_banks_safely(
+                            extractor,
+                            current_target,
+                            person_banks.get(current_target.track_id),
+                            detections,
                         )
 
                 # 3. 모드 5 (Adaptive 스위칭)
                 elif self.mode == self.MODE_ADAPTIVE and self.anchor_bank is not None:
+                    # [COEX 등록] 타겟과 동시 존재하며 겹치지 않고 멀리 떨어진 ID는 비타겟(COEX)으로 기억
+                    if current_target is not None:
+                        tx1, _, tx2, _ = current_target.bbox
+                        tw = max(1, tx2 - tx1)
+                        tcx, _ = current_target.center
+                        for other in detections:
+                            if other.track_id == current_target.track_id:
+                                continue
+                            if self._bbox_iou(current_target.bbox, other.bbox) >= 0.05:
+                                # 타겟과 BBox가 겹치면 ID 교차 가능성이 있으므로 COEX 고정 목록에서 해제
+                                self.coexisting_non_target_ids.discard(other.track_id)
+                            elif abs(tcx - other.center[0]) > tw * 0.9:
+                                self.coexisting_non_target_ids.add(other.track_id)
+
+                    if current_target is not None and not self._is_crowded_near_target(
+                        current_target, detections
+                    ):
+                        t_bank = person_banks.get(current_target.track_id)
+                        if t_bank is None:
+                            t_bank = extractor.extract(
+                                frame,
+                                current_target.bbox,
+                                current_target.mask_poly,
+                                current_target.keypoints,
+                            )
+                        current_target.feature_bank = t_bank
+                        if t_bank is not None:
+                            current_target.visible_parts = t_bank.visible_parts
+                        current_target.similarity, current_target.part_sims = (
+                            extractor.compute_dual_similarity_detail(
+                                self.anchor_bank, self.recent_bank, t_bank
+                            )
+                        )
+                        # [SAFE 이탈 검사] 다수 인원(len>=2)일 때 외형 불일치가 4프레임 누적되면
+                        # anchor_bank는 유지한 채 target_id=-1로 해제하여 SEARCH 복귀 루프로 강제 진입
+                        if len(detections) >= 2 and current_target.similarity < self.id_switch_thresh:
+                            self.safe_mismatch_count += 1
+                            if self.safe_mismatch_count >= self.safe_mismatch_limit:
+                                self.target_id = -1
+                                current_target.is_target = False
+                                current_target = None
+                                self.safe_mismatch_count = 0
+                            else:
+                                adaptive_state = 'SAFE'
+                        else:
+                            adaptive_state = 'SAFE'
+                            self.safe_mismatch_count = 0
+                            self.recover_candidate_id = None
+                            self.recover_confirm_count = 0
+                            # 안전 추적 구간에서 EMA 갱신 + 빈 부위(None) 보충 + BBox 폴백 승격 처리
+                            ema_status = self._update_target_banks_safely(
+                                extractor, current_target, t_bank, detections
+                            )
+
                     if current_target is None:
                         adaptive_state = 'SEARCH'
+                        ema_status = 'HOLD(SEARCH)'
+                        scored_search: List[Tuple[float, UnifiedTrackedPerson]] = []
                         for p in detections:
-                            b = extractor.extract(frame, p.bbox, p.mask_poly, p.keypoints)
+                            b = person_banks.get(p.track_id)
+                            if b is None:
+                                b = extractor.extract(frame, p.bbox, p.mask_poly, p.keypoints)
+                            p.feature_bank = b
                             if b is not None:
                                 p.visible_parts = b.visible_parts
-                            p.similarity = extractor.compute_dual_similarity(
+                            p.similarity, p.part_sims = extractor.compute_dual_similarity_detail(
                                 self.anchor_bank, self.recent_bank, b
                             )
-                        if len(detections) > 0:
-                            best_candidate = max(
-                                detections,
-                                key=lambda p: self._score_candidate(p, w, h, spatial_estimator),
-                            )
-                            cand_score = self._score_candidate(
-                                best_candidate, w, h, spatial_estimator
-                            )
-                            if (
-                                best_candidate.similarity >= self.reid_match_thresh * 0.85
-                                and cand_score >= self.reid_match_thresh
-                            ):
-                                self.target_id = best_candidate.track_id
-                                best_candidate.is_target = True
-                                current_target = best_candidate
-                                adaptive_state = 'RECOVERED'
+                            sc = self._score_candidate(p, w, h, spatial_estimator)
+                            scored_search.append((sc, p))
+
+                        if scored_search:
+                            scored_search.sort(key=lambda item: item[0], reverse=True)
+                            # [eligible 필터] 비공존(CAND)은 통과, 공존 비타겟(COEX)은 매우 높은 확신(>=coexist_min_sim)일 때만 허용
+                            eligible = [
+                                (sc, p) for sc, p in scored_search
+                                if (p.track_id not in self.coexisting_non_target_ids)
+                                or (p.similarity >= self.coexist_min_sim and sc >= self.coexist_min_sim)
+                            ]
+                            if not eligible:
+                                top_sc, top_p = scored_search[0]
+                                self.recover_candidate_id = None
+                                self.recover_confirm_count = 0
+                                self.last_search_reason = (
+                                    f'COEX ID:{top_p.track_id} {top_p.similarity:.2f}<{self.coexist_min_sim:.2f}'
+                                )
+                            else:
+                                cand_score, best_candidate = eligible[0]
+                                second_score = eligible[1][0] if len(eligible) >= 2 else 0.0
+                                is_coexist = best_candidate.track_id in self.coexisting_non_target_ids
+                                # COEX 예외 통과자와 일반 CAND 후보에 서로 다른 복귀 문턱값 적용
+                                min_sim_req = self.coexist_min_sim if is_coexist else self.search_min_sim
+                                min_score_req = (
+                                    self.coexist_min_sim if is_coexist else self.reid_match_thresh
+                                )
+                                # 1·2위 점수 차(margin_val)가 recover_margin 이상이어야 쌍둥이/모호한 복귀 방지
+                                margin_val = cand_score - second_score
+                                margin_ok = len(eligible) < 2 or margin_val >= self.recover_margin
+
+                                if best_candidate.similarity < min_sim_req:
+                                    self.recover_candidate_id = None
+                                    self.recover_confirm_count = 0
+                                    self.last_search_reason = (
+                                        f'ID:{best_candidate.track_id} sim {best_candidate.similarity:.2f}<{min_sim_req:.2f}'
+                                    )
+                                elif cand_score < min_score_req:
+                                    self.recover_candidate_id = None
+                                    self.recover_confirm_count = 0
+                                    self.last_search_reason = (
+                                        f'ID:{best_candidate.track_id} score {cand_score:.2f}<{min_score_req:.2f}'
+                                    )
+                                elif not margin_ok:
+                                    self.recover_candidate_id = None
+                                    self.recover_confirm_count = 0
+                                    self.last_search_reason = (
+                                        f'Ambiguous ID:{best_candidate.track_id} gap {margin_val:.2f}<{self.recover_margin:.2f}'
+                                    )
+                                else:
+                                    # 동일 후보가 recover_confirm_frames(기본 2프레임) 연속 1위를 유지해야 최종 복구 확정
+                                    if self.recover_candidate_id == best_candidate.track_id:
+                                        self.recover_confirm_count += 1
+                                    else:
+                                        self.recover_candidate_id = best_candidate.track_id
+                                        self.recover_confirm_count = 1
+                                    if self.recover_confirm_count >= self.recover_confirm_frames:
+                                        self.target_id = best_candidate.track_id
+                                        best_candidate.is_target = True
+                                        current_target = best_candidate
+                                        self.coexisting_non_target_ids.discard(best_candidate.track_id)
+                                        self.recover_candidate_id = None
+                                        self.recover_confirm_count = 0
+                                        self.safe_mismatch_count = 0
+                                        self.last_search_reason = f'RECOVERED ID:{best_candidate.track_id}'
+                                        adaptive_state = 'RECOVERED'
+                                    else:
+                                        self.last_search_reason = (
+                                            f'Confirm ID:{best_candidate.track_id} '
+                                            f'({self.recover_confirm_count}/{self.recover_confirm_frames})'
+                                        )
+                        else:
+                            self.recover_candidate_id = None
+                            self.recover_confirm_count = 0
+                            self.last_search_reason = 'No person in frame'
+
                     elif self._is_crowded_near_target(current_target, detections):
                         adaptive_state = 'GUARD'
+                        ema_status = 'HOLD(GUARD)'
+                        self.safe_mismatch_count = 0
+                        self.recover_candidate_id = None
+                        self.recover_confirm_count = 0
                         scored_list = []
                         for p in detections:
                             other_boxes = [o.bbox for o in detections if o.track_id != p.track_id]
@@ -563,9 +876,10 @@ class MultiModelTrackerCore:
                                 frame, p.bbox, p.mask_poly, p.keypoints, exclude_boxes=other_boxes
                             )
                             person_banks[p.track_id] = b
+                            p.feature_bank = b
                             if b is not None:
                                 p.visible_parts = b.visible_parts
-                            p.similarity = extractor.compute_dual_similarity(
+                            p.similarity, p.part_sims = extractor.compute_dual_similarity_detail(
                                 self.anchor_bank, self.recent_bank, b
                             )
                             sp_score, sp_dist = self._compute_spatial_score(
@@ -585,26 +899,11 @@ class MultiModelTrackerCore:
                         best_comb, best_candidate = scored_list[0]
                         if (
                             best_candidate.track_id != current_target.track_id
-                            and best_candidate.similarity >= self.reid_match_thresh * 0.85
+                            and best_candidate.similarity >= self.search_min_sim
                             and best_comb >= self.reid_match_thresh
                         ):
                             self.target_id = best_candidate.track_id
                             current_target = best_candidate
-                    else:
-                        adaptive_state = 'SAFE'
-                        t_bank = extractor.extract(
-                            frame,
-                            current_target.bbox,
-                            current_target.mask_poly,
-                            current_target.keypoints,
-                        )
-                        if t_bank is not None:
-                            current_target.visible_parts = t_bank.visible_parts
-                        current_target.similarity = extractor.compute_dual_similarity(
-                            self.anchor_bank, self.recent_bank, t_bank
-                        )
-                        if len(detections) == 1 and current_target.similarity >= 0.72:
-                            extractor.update_recent_bank(self.recent_bank, t_bank)
 
             for p in detections:
                 p.is_target = (p.track_id == self.target_id)
@@ -617,8 +916,16 @@ class MultiModelTrackerCore:
                             self.last_target_world_xy, self.last_target_world_frame, _ = est
                             self.last_target_seen_time = time.time()
         else:
+            ema_status = (
+                'HOLD(EMPTY)'
+                if (self.mode == self.MODE_ADAPTIVE and self.target_id is not None)
+                else 'IDLE'
+            )
             if self.mode == self.MODE_ADAPTIVE and self.target_id is not None:
                 adaptive_state = 'SEARCH'
+                self.recover_candidate_id = None
+                self.recover_confirm_count = 0
+                self.last_search_reason = 'No person in frame'
 
         t_end = time.perf_counter()
 
@@ -641,6 +948,10 @@ class MultiModelTrackerCore:
         m.total_ms = (1 - alpha) * m.total_ms + alpha * total_ms if m.total_ms > 0 else total_ms
         m.max_infer_fps = 1000.0 / max(0.1, m.total_ms)
         m.adaptive_state = adaptive_state
+        if adaptive_state == 'SAFE' or adaptive_state == 'GUARD' or adaptive_state == 'IDLE':
+            self.last_search_reason = ''
+        m.search_reason = self.last_search_reason
+        m.ema_status = ema_status
 
         self.last_detections = detections
         return detections, target_person

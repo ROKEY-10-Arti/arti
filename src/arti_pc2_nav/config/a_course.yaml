@@ -8,30 +8,30 @@
 kiosk:
   goal_pose: {x: -1.032, y: 0.0668, yaw: -1.5472}
   zone: {cx: -1.0225, cy: -0.3345, radius: 0.6176, direction: 1.5944}
-# 작품 목록: 이 순서대로 방문. 반원 진입 -> 정지 -> TTS 해설 -> 다음 작품
-# artwork_id 는 hardcoded_explanations.py 의 키와 같아야 함
+# 작품 목록: 이 순서대로 방문. 반원 진입 -> 정지 -> 해설(explain_artwork) -> 다음 작품
+# artwork_id = 작품 번호(int) = PC3 DB 번호. 이 번호로 /arti/description 조회, StartTour artwork_ids도 이 번호
 artworks:
-  - artwork_id: '1'
-    explanation_id: 'art_01'
+  - artwork_id: 1
     goal_pose: {x: -2.204, y: 1.235, yaw: 3.1416}
     zone: {cx: -2.62, cy: 1.235, radius: 0.64, direction: 0.0}
-  - artwork_id: '2'
-    explanation_id: 'art_02'
+  - artwork_id: 2
     goal_pose: {x: -2.104, y: 3.255, yaw: 3.1416}
     zone: {cx: -2.52, cy: 3.255, radius: 0.64, direction: 0.0}
-  - artwork_id: '3'
-    explanation_id: 'art_03'
+  - artwork_id: 3
     goal_pose: {x: -1.2565, y: 4.7291, yaw: 1.5912}
     zone: {cx: -1.265, cy: 5.145, radius: 0.64, direction: -1.5504}
-  - artwork_id: '4'
-    explanation_id: 'art_04'
+  - artwork_id: 4
     goal_pose: {x: -0.2146, y: 3.6897, yaw: -0.0893}
     zone: {cx: 0.0616, cy: 3.665, radius: 0.4267, direction: 3.0523}
 # --- 실물 로봇 추가 (2026-11-18) ---
 # 작품4 이후 출구 목표점(반원 판정 없음, 0.30m 이내 정지 시 도착) -> 인사 -> 도킹
 exit:
-  goal_pose: {x: -0.04, y: 2.04, yaw: -1.4111}   # 정지구역(장애물 회피 위치). yaw: 충전 스테이션 방향 (원래 0.185,0.835는 지도상 벽)
-  farewell: '안녕히가세요'
+  goal_pose: {x: -0.345, y: 1.635, yaw: -1.4111}   # 2026-11-19: 공통 출구 직사각형(arti_common artworks.yaml exit, x -0.82~0.13, y 1.36~1.91)의 중심.
+                                                   #   지도 빈칸, 벽까지 0.50 m. yaw: 충전 스테이션 방향 (이전 -0.04, 2.04는 직사각형 밖)
+  farewell: 'tour_end'   # 출구 도착 안내 키 (arti_audio/config/guide_lines.yaml의 guides)
+  # 출구 구역 = arti_common/config/artworks.yaml guide_zones의 exit (follow 팀과 같은 직사각형, 같은 판정 코드).
+  #   이 구역 안에 들어와 멈추면 출구 도착. RViz에도 이 직사각형을 그린다. goal_pose는 이 구역 안이어야 함.
+  zone: arti_common
 dock:
   station: {x: 0.304, y: -0.0957}                 # 충전 스테이션 실측 위치
   approach_pose: {x: -0.35, y: -0.0957, yaw: 0.0}  # 스테이션 정면 약 0.65m 앞(0.5m는 costmap 팽창 때문에 도달 불가), 스테이션(+X)을 바라봄
