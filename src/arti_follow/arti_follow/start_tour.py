@@ -13,7 +13,7 @@ from irobot_create_msgs.action import Dock
 import numpy as np
 from std_msgs.msg import Empty
 
-from arti_follow.motion import wrap
+from arti_follow.motion import apply, wrap
 
 RETURNING = ('RETURN', 'DOCK_FACE', 'DOCK')   # 관람 끝 → 도크 복귀 중
 TRACKING = ('FOLLOW', 'SEARCH', 'WAIT')     # 관람 중 = 관람객을 따라가거나 찾는 상태 (start_tour 뒤)
@@ -197,16 +197,20 @@ class TourMixin:
         self.set_state(state)
 
     def go_home(self, now, pose):
-        """[RETURN → DOCK_FACE → DOCK] step [3-1]: 관람이 끝난 뒤 도크로 돌아간다 (map·AMCL 안 씀, odom만).
-        RETURN     언독이 끝난 곳(home, odom)까지 go_to (return_timeout 넘으면 그 자리에서 다음)
-        DOCK_FACE  도크 쪽으로 제자리 회전 (도크는 언독 지점에서 등 뒤 = home yaw + 180°)
+        """[RETURN → DOCK_FACE → DOCK] step [3-1]: 관람이 끝난 뒤 도크로 돌아간다.
+        목표는 return_target(): 지도의 언독 지점·도크(init_pose.yaml)를 지금 AMCL(map→odom)로 odom 좌표로 바꾼 값.
+        AMCL이 없으면 예전처럼 언독 때 기록한 odom 값 (관람 중 바퀴 오차가 쌓여 20~30 cm 어긋남, 2026-11-20).
+        RETURN     언독 지점까지 go_to (return_timeout 넘으면 그 자리에서 다음)
+        DOCK_FACE  언독 지점에서 도크 쪽으로 제자리 회전
         DOCK       Create 3 dock 액션 (Create 3가 IR로 도크를 찾아 스스로 올라감) → 끝나면 finish_return()
         받음: now, pose (x, y, yaw) odom, (home, ret_at, dock_future)
         내보냄: drive(...), dock 액션, 끝나면 active = False, state = final_state"""
         p = self.p
-        hx, hy, hyaw = self.home
+        hx, hy, face_yaw, src = self.return_target()  # 매 주기 다시 계산 (AMCL이 보정하는 만큼 따라감)
         if self.ret_at is None:
             self.ret_at = now
+            self.get_logger().info(f'도크 복귀 목표: 언독 지점 ({src} 기준) odom ({hx:.2f}, {hy:.2f}), '
+                                   f'지금 {math.hypot(hx - pose[0], hy - pose[1]):.2f} m')
         if self.state == 'RETURN':
             dist = math.hypot(hx - pose[0], hy - pose[1])
             if dist > p['return_arrive'] and now - self.ret_at < p['return_timeout']:
@@ -217,7 +221,7 @@ class TourMixin:
             self.ret_at = now
             self.set_state('DOCK_FACE')
         if self.state == 'DOCK_FACE':
-            err = float(wrap(hyaw + math.pi - pose[2]))
+            err = float(wrap(face_yaw - pose[2]))
             if abs(err) > p['face_tolerance'] and now - self.ret_at < p['face_timeout']:
                 self.dbg['reason'] = 'dock_face'
                 w = float(np.clip(1.5 * err, -p['max_angular'], p['max_angular']))
@@ -248,6 +252,20 @@ class TourMixin:
             return self.finish_return('docked' if res.result.is_docked or self.docked else f'dock_status_{res.status}')
         if now - self.ret_at > p['dock_timeout']:
             return self.finish_return('dock_timeout')
+
+    def return_target(self):
+        """도크 복귀 목표 (odom): 언독 지점 (x, y)과 거기서 도크를 바라볼 방향 yaw.
+        return_use_map이고 AMCL TF(map→odom)가 있으면 init_pose.yaml의 언독 지점(face_from)·도크(start)를
+        지도 좌표 → odom으로 바꿔 쓴다 (AMCL이 라이다로 보정한 위치라 바퀴 오차가 쌓이지 않음).
+        없으면 언독 때 기록한 odom 위치(home)와 그 반대 방향.
+        돌려줌: (x, y, yaw, 'map' 또는 'odom')"""
+        if self.p['return_use_map'] and self.face_from is not None and self.start is not None:
+            f = self.lookup(self.p['odom_frame'], self.p['map_frame'])
+            if f is not None:
+                (ux, uy), (dx, dy) = apply(f, np.array([self.face_from[:2], self.start[:2]], float))
+                return float(ux), float(uy), math.atan2(dy - uy, dx - ux), 'map'
+        hx, hy, hyaw = self.home
+        return hx, hy, hyaw + math.pi, 'odom'
 
     def finish_return(self, how):
         """도크 복귀 끝: 로그 → active = False (액션 result가 나감) → final_state.

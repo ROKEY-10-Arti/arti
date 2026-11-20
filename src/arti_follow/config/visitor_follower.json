@@ -28,7 +28,8 @@
       "end_min_time": "start_tour 뒤 이 시간 안의 출구 진입은 무시 (시작하자마자 끝나지 않게) [s]",
       "return_to_dock": "관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)",
       "return_timeout": "언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]",
-      "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]"
+      "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]",
+      "return_use_map": "도크 복귀 목표를 지도의 언독 지점(init_pose.yaml)으로 (AMCL map→odom 사용). false면 언독 때 기록한 odom 위치 (바퀴 오차가 쌓임)"
     },
     "auto_start": false,
     "start_enabled": true,
@@ -43,6 +44,7 @@
     "end_guide_wait": 3.0,
     "end_min_time": 10.0,
     "return_to_dock": true,
+    "return_use_map": true,
     "return_timeout": 60.0,
     "return_arrive": 0.15
   },
@@ -138,14 +140,14 @@
     "_설명": {
       "_묶음": "관람객 좌표 거르기 (인식 모듈이 다른 사람·벽을 잡은 좌표 버림, 2026-11-20)",
       "map_file": "벽 검사에 쓸 지도 yaml ('' = 환경 변수 $ARTI_MAP = 저장소 maps/gallery.yaml). 못 읽으면 검사 안 함",
-      "person_wall_margin": "벽을 이만큼 넓혀서 그 안의 좌표도 버림 [m] (오인식은 벽 표면 라이다 점 + AMCL 오차. 사람 라이다 점은 벽에서 15 cm 이상)",
+      "person_wall_margin": "벽을 이만큼 넓혀서 그 안의 좌표도 버림 [m] (0.1 → 0.0, 2026-11-20: 키오스크 앞에 바짝 선 진짜 관람객(벽선에서 10 cm)을 버림. 0 = 벽 칸·지도 밖만 버림)",
       "reacquire_radius": "놓친 뒤 다시 잡을 때, 마지막으로 확인한 위치에서 기본 허용 거리 [m]",
       "reacquire_speed": "다시 잡을 때 허용 거리가 지난 시간만큼 늘어나는 속도 [m/s] (사람 걷는 속도)",
       "reacquire_max": "다시 잡을 때 허용 거리 상한 [m] (오래 놓쳐도 이보다 먼 좌표는 버림 → 결국 LOST)",
       "search_confirm_time": "탐색 중(SEARCH·WAIT) 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW로 돌아감 [s]"
     },
     "map_file": "",
-    "person_wall_margin": 0.1,
+    "person_wall_margin": 0.0,
     "reacquire_radius": 1.0,
     "reacquire_speed": 1.0,
     "reacquire_max": 4.0,
@@ -154,14 +156,14 @@
   "motion": {
     "_설명": {
       "_묶음": "속도·가감속 (cmd_vel)",
-      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31). 0.3 → 0.2 (2026-11-20: 현장에서 너무 빠름)",
+      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31). 0.3 → 0.2 → 0.25 (2026-11-20: 0.2면 약 0.4 m/s로 걷는 관람객과 거리가 벌어져 놓침)",
       "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24). 2026-11-20 현장: 0.8 → 0.5 (빠르게 돌아 인식을 놓침)",
       "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8 → 0.3, 2026-11-20: 부드럽게 출발. 0.3 m/s까지 1 s)",
       "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8 → 0.3, 2026-11-20: 부드럽게 정지. 0.3 m/s에서 1 s·약 15 cm 더 감 — 0.8일 때는 약 6 cm)",
       "angular_accel": "회전 가속 [rad/s^2] (3.0 → 1.5: 회전이 덜 들쑥날쑥)",
       "min_spin_cmd": "서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s] Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림"
     },
-    "max_linear": 0.2,
+    "max_linear": 0.25,
     "max_angular": 0.5,
     "linear_accel": 0.3,
     "linear_decel": 0.3,

@@ -481,7 +481,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         here = np.array(pose[:2])
 
         # [3-1] 관람이 끝나 돌아가는 중인가? (RETURN·DOCK_FACE·DOCK) → 예: go_home() (start_tour.py) / 아니오: 아래로
-        # 언독 지점(odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
+        # 언독 지점(지도 좌표 → AMCL로 odom, 없으면 언독 때 odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
         if self.state in RETURNING:
             return self.go_home(now, pose)
         # [3-2] 관람객이 출구에 들어갔나? (end_at) → 예: end_guide_wait 동안 서서 관람객 쪽을 봄 → 관람 끝(completed) → RETURN
