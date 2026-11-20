@@ -11,7 +11,7 @@ import time
 from arti_interfaces.action import StartTour
 from irobot_create_msgs.action import Dock
 import numpy as np
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 
 from arti_follow.motion import apply, wrap
 
@@ -76,14 +76,16 @@ class TourMixin:
             state='EXPLAINING' if explaining else 'FOLLOW', artwork_id=explaining))
 
     def follow(self, now, pose, here):
-        """[FOLLOW] step [6]에서: 관람객 위치를 알고 마지막으로 본 지 lost_timeout(3 s) 안 → 0.8 m 유지하며 따라간다.
+        """[FOLLOW] step [6]에서: 관람객 위치를 알고 마지막으로 본 지 lost_timeout(2.5 s) 안 → target_distance(0.8 m) 유지하며 따라간다.
         멀면 dwa로 이동, 0.85 m 안이면 서서 몸만 돌림 (0.95 m 밖이 되면 다시 출발).
         받음: now, pose (x, y, yaw), here (x, y), (kf.x·kf.t, holding)
         내보냄: set_state(FOLLOW), drive(dwa(...)) 또는 face()"""
         p = self.p
         self.set_state('FOLLOW')
         last, vel = self.person()
-        person = last + vel * (now - self.kf.t)     # 마지막 좌표 뒤 흐른 시간만큼 → 지금 위치
+        # 마지막 좌표 뒤 흐른 시간만큼 → 지금 위치. 좌표가 끊긴 동안은 predict_max까지만 앞으로 밀어 봄
+        # (lost_timeout 2.5 s 동안 오래된 속도로 엉뚱한 곳까지 쫓아가지 않게)
+        person = last + vel * min(now - self.kf.t, p['predict_max'])
         ahead = person + vel * p['lead_time']       # 0.5 s 뒤 위치: 인식·통신·가속이 늦는 만큼 미리 향함
         to = ahead - here
         d = np.linalg.norm(to)
@@ -101,7 +103,7 @@ class TourMixin:
         if not self.holding:
             goal = ahead - to / d * p['target_distance']
             self.dbg['reason'] = 'follow'
-            return self.drive(*self.dwa(pose, goal, ahead))
+            return self.drive(*self.dwa(pose, goal, ahead, keep_view=True))
         # 가까우면: 앞으로는 안 가고 사람 쪽으로 몸만 돌림 (작품 감상 중 등)
         self.dbg['reason'] = 'hold'
         return self.face(pose, here, person)
@@ -124,7 +126,22 @@ class TourMixin:
             self.search_goal = last.copy()          # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4)
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
-            self.get_logger().info(f'관람객 놓침 → 마지막 위치까지 이동 ({float(np.linalg.norm(last - here)):.2f} m)')
+            # 먼저 돌아볼 곳 = 사람이 가던 쪽 (마지막 위치 + 속도 × search_look_ahead).
+            # 놓친 이유는 대부분 사람이 탑캠 화면 옆으로 빠진 것 → 마지막 자리로 직진하면 카메라는 '있던 곳'을 봄
+            # (2026-11-20: 다시 찾는 데 9~23 s). 서 있다 놓쳤으면(속도≈0) 마지막 자리 쪽을 본다
+            self.look_at = last + vel * p['search_look_ahead']
+            self.get_logger().info(f'관람객 놓침 → 가던 쪽으로 먼저 돌아봄, 그다음 마지막 위치까지 이동 '
+                                   f'({float(np.linalg.norm(last - here)):.2f} m)')
+        # [11-1] 가던 쪽을 아직 안 돌아봤나? (look_at != None) → 제자리 회전, 그쪽을 보거나 search_look_time 지나면 끝
+        if self.look_at is not None and self.spin_at is None:
+            off = wrap(math.atan2(self.look_at[1] - here[1], self.look_at[0] - here[0]) - pose[2])
+            if abs(off) > p['face_deadband'] and now - self.lost_at < p['search_look_time']:
+                self.set_state('SEARCH')
+                self.dbg['reason'] = 'search_look'
+                return self.face(pose, here, self.look_at)
+            self.look_at = None
+            self.progress_at = now                  # 돌아보는 동안은 이동 막힘 판정에 넣지 않음
+            self.get_logger().info(f'가던 쪽 돌아보기 끝 ({now - self.lost_at:.1f} s) → 마지막 위치까지 이동')
         # [12] 아직 회전 탐색 전인가? (spin_at == None) → 예: 마지막 위치로 이동 또는 회전 준비 / 아니오: 아래로
         # 1) 마지막으로 본 곳(last, 관람객 위치)까지 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다).
         #    끝나는 조건 셋 중 하나: 도착(직선거리 search_arrive 안) / 막힘(search_stall_time 동안 경로 거리가
@@ -169,6 +186,8 @@ class TourMixin:
             self.get_logger().info(f'회전 탐색 끝: {math.degrees(self.spun):.0f}° / {now - self.spin_at:.1f} s → 정지 대기')
         # [14] 정지 대기 wait_time이 지났나? → 예: 관람 끝 LOST / 아니오: 아래 WAIT
         if now - self.wait_at >= p['wait_time']:
+            if p['lost_guide']:                     # "관람객님을 찾지 못해 안내를 마칩니다" (요구사항: 분실 → 대기 → 안내)
+                self.guide_pub.publish(String(data=p['lost_guide']))
             return self.end_tour('LOST', 'lost')
         # 3) 회전으로도 못 찾음 → 멈춰서 기다림 (관람객이 로봇 쪽으로 와 주길). 좌표가 다시 오면 위 FOLLOW로 돌아감
         self.set_state('WAIT')

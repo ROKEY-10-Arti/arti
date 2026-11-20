@@ -73,6 +73,7 @@
     "_설명": {
       "_묶음": "관람객 등록 (WAIT_VISITOR)",
       "recognized_guide": "관람객 인식 때 guide_message로 보낼 키 (arti_audio guide_lines.yaml, '' = 말 안 함)",
+      "lost_guide": "분실(LOST)로 관람이 끝날 때 guide_message로 보낼 키 ('' = 말 안 함, 2026-11-20 추가)",
       "auto_register": "WAIT_VISITOR에서 인식 모듈에 바로 앞 사람 등록 요청 (false면 인식 창 클릭으로만)",
       "register_period": "등록될 때까지 요청을 다시 보내는 주기 [s] (앞에 아무도 없으면 계속)",
       "register_settle": "첫 요청 뒤 이 시간 전 좌표는 예전 대상일 수 있어 버림 [s]",
@@ -80,6 +81,7 @@
       "register_gap": "등록 확인 중 좌표 간격이 이보다 길면 끊긴 것 → 다시 기다림 [s]"
     },
     "recognized_guide": "recognized",
+    "lost_guide": "register_failed",
     "auto_register": true,
     "register_period": 1.0,
     "register_settle": 0.5,
@@ -89,10 +91,11 @@
   "follow": {
     "_설명": {
       "_묶음": "추종 (FOLLOW): 거리·예측·칼만 필터",
-      "target_distance": "유지 거리 [m] (요구사항 약 80cm. 2026-11-20 현장에서 1.2도 시험했다가 0.8로 되돌림)",
+      "target_distance": "유지 거리 [m] (요구사항 약 80cm. 2026-11-20 현장에서 1.2도 시험했다가 0.8로 되돌림 → 1.0 시험 → 0.8로 되돌림 (2026-11-20 저녁))",
       "distance_tolerance": "이 안이면 전진 안 함 [m]",
       "restart_margin": "멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)",
       "lead_time": "관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐) 0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)",
+      "predict_max": "좌표가 끊긴 동안 마지막 속도로 앞으로 밀어 보는 최대 시간 [s] (2026-11-20 저녁: lost_timeout 2.5로 늘리며 추가. 오래된 속도로 엉뚱한 곳까지 쫓아가지 않게)",
       "kf_accel_std": "칼만: 관람객 가속도 잡음 (클수록 빨리 따라가고 덜 매끄러움) [m/s^2] (1.0 → 2.0: 걷기 시작·멈춤에 빨리 반응)",
       "kf_meas_std": "칼만: 인식 좌표 잡음 (클수록 더 매끄럽고 느림) [m] (0.15 → 0.2: 이상값으로 버리는 좌표 4.7 % → 3.2 %)",
       "kf_gate": "칼만: 예측과 이만큼(마할라노비스 거리^2, 2차원 99 %) 넘게 다르면 이상값으로 버림",
@@ -104,6 +107,7 @@
     "distance_tolerance": 0.05,
     "restart_margin": 0.15,
     "lead_time": 0.3,
+    "predict_max": 1.0,
     "kf_accel_std": 2.0,
     "kf_meas_std": 0.2,
     "kf_gate": 9.21,
@@ -114,7 +118,9 @@
   "search": {
     "_설명": {
       "_묶음": "놓침 → 탐색 (SEARCH → WAIT → LOST)",
-      "lost_timeout": "좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)",
+      "lost_timeout": "좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하 → 2.5, 2026-11-20 저녁: 탑캠이 2~3 s 끊겼다 바로 다시 잡는데도 SEARCH로 가서 멀어짐. 끊긴 동안 예측은 predict_max까지)",
+      "search_look_ahead": "놓친 직후 먼저 돌아볼 곳 = 마지막 위치 + 속도 × 이 시간 [s] (사람이 가던 쪽, 2026-11-20 저녁 추가)",
+      "search_look_time": "가던 쪽 돌아보기 시간 상한 [s]. 그쪽을 보거나(face_deadband 안) 이 시간이 지나면 마지막 위치로 이동",
       "search_move_time": "최종 좌표로 이동하는 안전 시간 상한. 0이면 상한 없음 [s] (5 → 20, 2026-11-20: 5 s면 1 m 남짓밖에 못 가서 먼 곳에서 놓치면 도착 전에 회전. 막힘은 search_stall_time이 따로 끊음)",
       "search_stall_time": "최종 좌표로 가는 중 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 search_stall_dist만큼도 안 줄면 막힌 것으로 보고 그 자리에서 회전 탐색 [s] (길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음. 먼저 제자리 회전하는 동안은 셈하지 않음)",
       "search_stall_dist": "막힘 판정에서 '경로 거리가 줄었다'로 치는 최소 거리 [m]",
@@ -125,7 +131,9 @@
       "search_spin_extra": "한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]",
       "wait_time": "회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]"
     },
-    "lost_timeout": 1.5,
+    "lost_timeout": 2.5,
+    "search_look_ahead": 2.0,
+    "search_look_time": 3.0,
     "search_move_time": 20.0,
     "search_stall_time": 3.0,
     "search_stall_dist": 0.05,
@@ -135,6 +143,35 @@
     "search_spin": 0.2,
     "search_spin_extra": 3.0,
     "wait_time": 10.0
+  },
+  "lidar_people": {
+    "_설명": {
+      "_묶음": "라이다 사람 후보로 추종 이어 가기 (2026-11-20 저녁 추가). 지도 벽이 아닌 다리 모양 묶음 = 사람 후보. 누가 관람객인지는 카메라만 정하고 라이다는 끊긴 동안 이어 주기만",
+      "lidar_assist": "라이다 사람 후보 쓰기 (false = 카메라 좌표만)",
+      "lidar_assist_after": "카메라 좌표가 이만큼 안 오면 라이다로 이어 감 [s]",
+      "lidar_assist_max": "카메라를 마지막으로 받은 지 이만큼 지나면 라이다로 잇기 그만 → lost_timeout 뒤 SEARCH [s] (다른 물체를 오래 따라가지 않게)",
+      "lidar_gate": "칼만 예측 위치에서 이 거리 안의 후보만 [m]",
+      "lidar_ambiguity": "두 번째로 가까운 후보가 첫 번째보다 이만큼도 안 멀면 애매 → 안 씀 [m]",
+      "person_map_clear": "지도 벽에서 이 거리 안의 후보는 벽으로 보고 버림 [m] (AMCL 오차 포함)",
+      "person_obstacle_clear": "추종 중 관람객 추정 위치에서 이 거리 안의 라이다 점은 장애물에서 뺌 [m] (0 = 안 뺌)",
+      "seg_gap": "scan 이웃 점 사이가 이보다 멀면 다른 묶음 [m]",
+      "leg_min_points": "다리 묶음 최소 점 수",
+      "leg_min_width": "다리 묶음 최소 폭 [m]",
+      "leg_max_width": "다리 묶음 최대 폭 [m] (이보다 길면 벽·가구)",
+      "leg_pair_max": "다리 둘을 한 사람으로 묶는 최대 거리 [m]"
+    },
+    "lidar_assist": true,
+    "lidar_assist_after": 0.3,
+    "lidar_assist_max": 3.0,
+    "lidar_gate": 0.5,
+    "lidar_ambiguity": 0.3,
+    "person_map_clear": 0.15,
+    "person_obstacle_clear": 0.3,
+    "seg_gap": 0.1,
+    "leg_min_points": 2,
+    "leg_min_width": 0.03,
+    "leg_max_width": 0.25,
+    "leg_pair_max": 0.45
   },
   "person_filter": {
     "_설명": {
@@ -173,33 +210,47 @@
   "avoid": {
     "_설명": {
       "_묶음": "장애물 회피 (LiDAR, DWA + 격자 길 찾기)",
-      "robot_radius": "로봇 반지름 [m] (TurtleBot 4 실제 0.171). 0.20 → 0.18 (2026-11-19: 좁은 통로)",
-      "safety_margin": "반지름 밖 여유 [m]. 이 합(0.20) 안을 지나는 궤적은 금지, 길 찾기는 합/grid_resolution 칸만큼 부풀림. 0.05 → 0.02: 통과 가능 최소 폭 약 0.85 m → 0.65 m (시뮬레이션)",
+      "robot_radius": "로봇 반지름 [m] (TurtleBot 4 실제 0.171). 0.20 → 0.18 (2026-11-19: 좁은 통로) → 0.28 (2026-11-20: 위에 올린 노트북이 장애물에 부딪힘)",
+      "safety_margin": "반지름 밖 여유 [m]. 이 합(0.30) 안을 지나는 궤적은 금지, 길 찾기는 합/grid_resolution 칸만큼 부풀림. 0.05 → 0.02: 통과 가능 최소 폭 약 0.85 m → 0.65 m (시뮬레이션)",
       "grid_resolution": "길 찾기 격자 칸 [m]",
-      "clearance_zone": "이 거리 [m] 안으로 장애물에 가까워지면 벌점",
+      "clear_resolution": "장애물 거리(안전 판정) 격자 칸 [m]. 로봇 주변만 거리 변환으로 계산, 격자 오차(칸 × 1.42)는 가까운 쪽으로 잡음 (2026-11-20: 궤적 점 × 장애물 점 직접 계산 대신)",
+      "field_reuse_dist": "목표·로봇이 이보다 덜 움직였으면 지난 길 찾기 거리 지도를 다시 씀 [m] (2026-11-20: 제어 밀림 줄이기)",
+      "field_max_age": "길 찾기 거리 지도를 다시 쓰는 최대 시간 [s] (안전 판정은 매 주기 새로)",
+      "clearance_zone": "이 거리 [m] 안으로 장애물에 가까워지면 벌점 (0.4 → 0.5, 2026-11-20: robot_radius 0.28로 키워 금지선 0.30과의 완충 0.2 m 유지)",
       "w_clearance": "비용: 장애물 근접 (clearance_zone 안)",
       "w_heading": "비용: 목표 근처에서 관람객을 바라보는 방향",
+      "w_view": "비용: 추종 중 관람객이 탑캠 화면 가장자리(view_half_angle) 밖으로 나간 각도 [rad]당 (2026-11-20 저녁 추가: 이동 중 화면 밖으로 빠져 인식을 놓침)",
+      "view_half_angle": "로봇 정면에서 이 각도 [rad] 안이면 관람객이 화면 안에 있다고 봄 (0.4 = 약 23°, 노트북 웹캠 화각 절반보다 조금 작게)",
       "w_turn": "비용: 회전 (같은 조건이면 직진)",
       "control_period": "제어 주기 [s] (2026-11-20: 0.2도 시험했으나 개선 없어 0.1 유지)",
       "sim_time": "DWA 후보를 굴려 볼 시간 [s]",
       "v_samples": "DWA 전진 속도 후보 수",
       "w_samples": "DWA 회전 속도 후보 수",
       "scan_min_range": "이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]",
-      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s] (0.5 → 0.8, 2026-11-20: Wi-Fi로 scan이 0.5~0.6 s씩 끊겨 자주 멈춤)"
+      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s] (0.5 → 0.8, 2026-11-20: Wi-Fi로 scan이 0.5~0.6 s씩 끊겨 자주 멈춤)",
+      "map_obstacles": "지도(map_file)의 벽 칸도 장애물로 피함 (AMCL map→odom이 있을 때). 라이다(약 20 cm 높이)가 못 보는 높은 물체·유리는 지도에 벽으로 그려 둔다 (2026-11-20 저녁 추가). false = 라이다만",
+      "map_obstacle_dock_clear": "도크·언독 지점(init_pose.yaml)에서 이 거리 [m] 안의 지도 벽 점은 뺌 (지도에서 도크가 벽에 붙어 있어 출발·복귀가 막히지 않게)"
     },
-    "robot_radius": 0.18,
+    "robot_radius": 0.28,
     "safety_margin": 0.02,
     "grid_resolution": 0.1,
-    "clearance_zone": 0.4,
+    "clear_resolution": 0.01,
+    "field_reuse_dist": 0.1,
+    "field_max_age": 0.5,
+    "clearance_zone": 0.5,
     "w_clearance": 1.0,
     "w_heading": 0.3,
+    "w_view": 0.5,
+    "view_half_angle": 0.4,
     "w_turn": 0.02,
     "control_period": 0.1,
     "sim_time": 1.5,
     "v_samples": 7,
     "w_samples": 15,
     "scan_min_range": 0.2,
-    "scan_timeout": 0.8
+    "scan_timeout": 0.8,
+    "map_obstacles": true,
+    "map_obstacle_dock_clear": 0.5
   },
   "diag": {
     "_설명": {

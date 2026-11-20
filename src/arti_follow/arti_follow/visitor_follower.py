@@ -73,7 +73,7 @@ import time
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from arti_interfaces.action import PrepareTour, StartTour
 import cv2
-from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
+from geometry_msgs.msg import Point, PointStamped, PoseWithCovarianceStamped, TwistStamped
 from irobot_create_msgs.action import Dock, Undock
 from irobot_create_msgs.msg import DockStatus
 import numpy as np
@@ -89,9 +89,10 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Empty, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
+from visualization_msgs.msg import Marker
 import yaml
 
-from arti_follow.motion import apply, MotionMixin, PersonKF, yaw_of
+from arti_follow.motion import apply, find_people, MotionMixin, PersonKF, yaw_of
 from arti_follow.prepare_tour import PrepareMixin
 from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
 
@@ -152,6 +153,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
         self.best_dist, self.progress_at = None, 0.0                # SEARCH 이동: 가장 짧았던 경로 거리, 그때 시각
         self.path_dist = None                                       # dwa가 구한 로봇 → 목표 경로 거리 [m]
+        self.field_cache = None                                     # dwa: 지난 거리 지도 (시각, 목표, 로봇, field, origin)
+        self.look_at = None                                         # SEARCH: 먼저 돌아볼 곳 (사람이 가던 쪽, odom)
+        self.cam_seen = -1e9                        # 카메라(인식 모듈) 좌표를 마지막으로 받아들인 시각 (라이다 보조와 구분)
+        self.people, self.people_time, self.people_used = np.zeros((0, 2)), -1e9, -1e9   # 라이다 사람 후보 (odom)
+        self.map_dt = None                          # 지도 벽까지 거리 [m] 격자 (map 좌표, 라이다 사람 후보에서 벽 빼기)
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
         self.scan_rx = -1e9                         # scan을 받은 시각 (TF 변환 실패로 버려도)
         self.sensor_stop_at = self.sensor_log_at = None   # 센서 때문에 정지 시작한 시각, 마지막 경고 로그 시각
@@ -187,11 +193,13 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.guide_pub = self.create_publisher(String, 'guide_message', 10)
         self.tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)
         self.register_pub = self.create_publisher(Empty, 'target_person/register_front', 10)
+        self.people_pub = self.create_publisher(Marker, 'follow/lidar_people', 10)   # RViz: 라이다 사람 후보 (odom)
         self.reg_first = self.reg_last = None       # 이번 관람에서 등록 요청을 처음·마지막으로 보낸 시각
         self.start = self.load_start_point(self.p['start_point'])          # AMCL 초기 위치 = 도크 (x, y, yaw) map
         self.face_from = self.load_start_point(self.p['face_from_point'])  # 언독 끝 자리 = 시작 회전 기준
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
         self.map_bad = self.load_map()              # 사람이 있을 수 없는 칸 (A1, 없으면 None)
+        self.map_obs = self.load_map_obstacles()    # 지도 벽 점 (map 좌표, 회피용. 없으면 None)
         self.anchor = None                          # 마지막으로 확인한 관람객 위치 (odom xy, 시각) — 다시 잡을 때 기준 (A2)
         self.run_since = None                       # 관람객 좌표가 끊김 없이 오기 시작한 시각 (A4)
         self.search_goal = None                     # 놓친 순간의 마지막 위치 (odom xy) — 탐색 목표
@@ -352,7 +360,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
         else:
             self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
-        self.seen = now
+        self.seen = self.cam_seen = now
         if self.state in ('FOLLOW', 'REGISTERED'):  # 확인된 관람객 위치 = 다음에 다시 잡을 때의 기준
             self.anchor = (self.kf.x[:2].copy(), now)
 
@@ -388,6 +396,37 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             return None
         self.get_logger().info(f'관람객 좌표 벽 검사: {path} ({img.shape[1]}×{img.shape[0]}, 벽 {self.p["person_wall_margin"]} m 넓혀 봄)')
         return bad.astype(bool), float(m['resolution']), (float(m['origin'][0]), float(m['origin'][1]))
+
+    def load_map_obstacles(self):
+        """지도의 벽 칸(occupied_thresh 넘는 검은 칸, '모르는 곳'은 뺌) 중심을 장애물 점으로 만든다 (회피용).
+        라이다는 약 20 cm 높이 한 면만 봐서 그보다 높은 물체(책상·받침대 모서리, 위에 올린 노트북 높이)나
+        유리를 못 본다 → 그런 곳을 지도에 벽으로 그려 두면 피한다 (2026-11-20).
+        도크·언독 지점에서 map_obstacle_dock_clear 안의 벽 점은 뺀다 (지도에 도크가 벽으로 붙어 있어
+        언독 지점이 벽에서 7 cm → 반지름 0.28로는 출발도 복귀도 막힘).
+        돌려줌: 점 (N, 2) map 좌표, 안 쓰거나 못 읽으면 None"""
+        path = self.p['map_file'] or os.environ.get('ARTI_MAP', '')
+        try:
+            with open(path, encoding='utf-8') as f:
+                m = yaml.safe_load(f)
+            img = cv2.imread(os.path.join(os.path.dirname(path), m['image']), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise OSError(f'지도 그림 {m["image"]}을 못 읽음')
+        except (OSError, KeyError, TypeError, yaml.YAMLError) as e:
+            self.get_logger().warn(f'지도를 못 읽음 ({path}: {e!r}) → 회피는 라이다만')
+            return None
+        occ = img / 255.0 if m.get('negate', 0) else (255 - img.astype(np.float32)) / 255.0
+        rows, cols = np.nonzero(occ > m.get('occupied_thresh', 0.65))
+        res, (ox, oy) = float(m['resolution']), (float(m['origin'][0]), float(m['origin'][1]))
+        free = (occ <= m.get('occupied_thresh', 0.65)).astype(np.uint8)   # 벽 칸 = 0 → 칸마다 벽까지 거리
+        self.map_dt = (cv2.distanceTransform(free, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) * res, res, (ox, oy))
+        pts = np.stack([ox + (cols + 0.5) * res, oy + (img.shape[0] - 1 - rows + 0.5) * res], 1)
+        for pose in (self.start, self.face_from):   # 도크, 언독 지점 (map)
+            if pose is not None:
+                pts = pts[np.hypot(pts[:, 0] - pose[0], pts[:, 1] - pose[1]) > self.p['map_obstacle_dock_clear']]
+        if not self.p['map_obstacles']:            # 지도 거리(map_dt)는 라이다 사람 후보용으로 남김
+            return None
+        self.get_logger().info(f'회피에 지도 벽 {len(pts)}점 추가 (도크·언독 {self.p["map_obstacle_dock_clear"]} m 안은 뺌)')
+        return pts
 
     def in_wall(self, x, y):
         """map 좌표 (x, y)가 벽 안·지도 밖이면 True (지도가 없으면 늘 False)."""
@@ -437,6 +476,59 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         ok = np.isfinite(r) & (r > self.p['scan_min_range']) & (r < msg.range_max)
         self.scan_pts = apply(f, np.stack([r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])], 1))
         self.scan_time = self.now()
+        if self.p['lidar_assist']:
+            self.update_people(apply(f, find_people(r, a, ok, self.p)), msg.header.stamp)
+
+    def update_people(self, cand, stamp):
+        """라이다 사람 후보(odom)에서 지도 벽 근처(person_map_clear 안)를 빼고 저장 + RViz 마커.
+        지도(AMCL map→odom)가 없으면 벽과 구분할 수 없어 후보를 쓰지 않는다 (빈 목록).
+        받음: cand 후보 (K, 2) odom, stamp scan 시각
+        바뀜: people, people_time"""
+        f = self.lookup(self.p['map_frame'], self.p['odom_frame'])
+        if self.map_dt is None or f is None:
+            cand = np.zeros((0, 2))
+        elif len(cand):
+            dt, res, (ox, oy) = self.map_dt
+            m = apply(f, cand)
+            c = np.clip(((m[:, 0] - ox) / res).astype(int), 0, dt.shape[1] - 1)
+            rr = np.clip(dt.shape[0] - 1 - ((m[:, 1] - oy) / res).astype(int), 0, dt.shape[0] - 1)
+            cand = cand[dt[rr, c] > self.p['person_map_clear']]
+        self.people, self.people_time = cand, self.now()
+        mk = Marker(type=Marker.SPHERE_LIST, action=Marker.ADD, ns='lidar_people', id=0)
+        mk.header.frame_id, mk.header.stamp = self.p['odom_frame'], stamp
+        mk.scale.x = mk.scale.y = mk.scale.z = 0.15
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.1, 0.9, 0.3, 0.8
+        mk.pose.orientation.w = 1.0
+        mk.points = [Point(x=float(x), y=float(y), z=0.1) for x, y in cand]
+        self.people_pub.publish(mk)
+
+    def lidar_assist(self, now):
+        """[FOLLOW] 카메라 좌표가 lidar_assist_after 넘게 안 오면(가림·화면 밖·벽 좌표로 버림), 칼만 예측 위치에서
+        lidar_gate 안의 라이다 사람 후보로 이어서 따라간다. 카메라를 마지막으로 받은 지 lidar_assist_max가 지나면 그만
+        (그 뒤는 lost_timeout → SEARCH). 누가 관람객인지는 카메라(재식별)만 정한다: 라이다는 이어 주기만.
+        애매하면(두 번째 후보가 lidar_ambiguity 안으로 비슷하게 가까움) 쓰지 않는다.
+        받음: now, (people, people_time, kf, cam_seen)
+        바뀜: kf (update), seen (라이다로 이어 본 시각)"""
+        p = self.p
+        if not p['lidar_assist'] or self.kf.x is None or len(self.people) == 0:
+            return
+        if now - self.cam_seen < p['lidar_assist_after'] or now - self.cam_seen > p['lidar_assist_max']:
+            return
+        if self.people_time <= self.people_used or now - self.people_time > p['scan_timeout']:
+            return                                  # 새 scan의 후보만 한 번씩 씀
+        self.people_used = self.people_time
+        last, vel = self.person()
+        pred = last + vel * min(now - self.kf.t, p['predict_max'])
+        d = np.hypot(self.people[:, 0] - pred[0], self.people[:, 1] - pred[1])
+        order = np.argsort(d)
+        if d[order[0]] > p['lidar_gate']:
+            return
+        if len(d) > 1 and d[order[1]] < d[order[0]] + p['lidar_ambiguity']:
+            self.dbg['lidar_ambiguous'] = True
+            return
+        if self.kf.update(self.people[order[0]], now):
+            self.seen = now
+            self.dbg['lidar_assist'] = True
 
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:
@@ -506,6 +598,9 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 등록은 끝났지만 키오스크가 아직 관람 시작(start_tour)을 안 보냄: 사람 때문에 움직이지 않고 서서 기다린다
         if self.state == 'REGISTERED':
             return self.registered_wait(now)
+        # [5-2] 추종 중 카메라 좌표가 잠깐 안 오면 라이다 사람 후보(다리 모양, 지도 벽 아님)로 이어 감 → lidar_assist()
+        if self.state == 'FOLLOW':
+            self.lidar_assist(now)
         # [6] 관람객 위치 수신 중인가? (kf.x가 있고 now - seen < 3 s) → 예: FOLLOW / 아니오: 아래로(놓침)
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
@@ -628,6 +723,14 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.diag.add('control.ms', step_ms)
         if 'field_ms' in d:
             self.diag.add('field.ms', d['field_ms'])
+        if 'clear_ms' in d:
+            self.diag.add('clear.ms', d['clear_ms'])
+        if d.get('field_reused'):
+            self.diag.add('field.reused')
+        if d.get('lidar_assist'):
+            self.diag.add('lidar.assist')
+        if d.get('lidar_ambiguous'):
+            self.diag.add('lidar.ambiguous')
         reason = d.get('reason', '')
         if d.get('blocked'):
             reason += '+blocked'
@@ -675,9 +778,13 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             log.warn(f'[입력] {name}: {span:.1f} s 동안 한 번도 안 옴')
         n, _, gap = stat('control.gap')
         _, ms, ms_max = stat('control.ms')
-        _, fms, fms_max = stat('field.ms')
+        nf, fms, fms_max = stat('field.ms')
+        _, cms, cms_max = stat('clear.ms')
+        nr, _, _ = stat('field.reused')
         text = (f'[제어] {n / span:.1f} Hz (목표 {1 / period:.0f}), 주기 최대 {gap:.3f} s, '
-                f'계산 평균/최대 {ms:.1f}/{ms_max:.1f} ms (그중 field {fms:.1f}/{fms_max:.1f} ms)')
+                f'계산 평균/최대 {ms:.1f}/{ms_max:.1f} ms (그중 field {fms:.1f}/{fms_max:.1f} ms, '
+                f'새로 {nf}번·다시 씀 {nr}번, clear {cms:.1f}/{cms_max:.1f} ms), '
+                f'라이다로 이어 감 {stat("lidar.assist")[0]}번·애매해서 안 씀 {stat("lidar.ambiguous")[0]}번')
         self.say(gap > 1.5 * period or ms_max > 0.8 * period * 1000, text)
         nc, _, cgap = stat('cmd_vel.gap')
         reasons = {k.split(':', 1)[1]: v[0] for k, v in s.items() if k.startswith('reason:')}

@@ -83,6 +83,49 @@ def apply(f, pts):
     return np.stack([f[0] + c * pts[:, 0] - s * pts[:, 1], f[1] + s * pts[:, 0] + c * pts[:, 1]], 1)
 
 
+def find_people(r, a, ok, p):
+    """라이다 한 장에서 '사람 다리처럼 생긴 묶음'을 찾는다 (라이다 좌표). 지도 빼기는 노드가 따로 한다.
+    ① 묶기: scan 순서대로 이웃 점 사이가 seg_gap 넘게 벌어지거나 빈 ray가 2개 넘게 있으면 다른 묶음
+    ② 모양: 점 leg_min_points개 이상, 양 끝 폭 leg_min_width ~ leg_max_width (벽처럼 긴 묶음은 버림)
+    ③ 다리 둘 → 사람 하나: 다리 중심끼리 leg_pair_max 안이면 가운데 점. 짝이 없으면 다리 하나 = 사람 하나 (가려짐)
+    받음: r 거리, a 각도 (scan 전체 배열), ok 쓸 수 있는 ray (bool), p 파라미터
+    돌려줌: 사람 후보 (K, 2) 라이다 좌표"""
+    idx = np.nonzero(ok)[0]
+    if idx.size < p['leg_min_points']:
+        return np.zeros((0, 2))
+    pts = np.stack([r[idx] * np.cos(a[idx]), r[idx] * np.sin(a[idx])], 1)
+    cut = (np.diff(idx) > 2) | (np.hypot(*np.diff(pts, axis=0).T) > p['seg_gap'])
+    legs = []
+    for seg in np.split(np.arange(idx.size), np.nonzero(cut)[0] + 1):
+        if seg.size < p['leg_min_points']:
+            continue
+        width = float(np.hypot(*(pts[seg[-1]] - pts[seg[0]])))
+        if not p['leg_min_width'] <= width <= p['leg_max_width']:
+            continue
+        # 앞으로 튀어나왔나: 다리는 양옆 ray(묶음 바로 밖)가 더 멀거나 비어 있다. 다리 사이로 보이는 벽 조각은
+        # 양옆이 다리라 더 가까움 → 버림 (2026-11-20 가짜 scan 시험에서 벽 조각이 후보로 나옴)
+        i0, i1 = idx[seg[0]], idx[seg[-1]]
+        left = r[i0 - 1] if i0 > 0 and ok[i0 - 1] else np.inf
+        right = r[i1 + 1] if i1 + 1 < r.size and ok[i1 + 1] else np.inf
+        if left > r[i0] + p['seg_gap'] and right > r[i1] + p['seg_gap']:
+            legs.append(pts[seg].mean(0))
+    people, used = [], set()
+    for i in range(len(legs)):                      # 가까운 다리끼리 짝 (다리는 많아야 수십 개라 반복문으로 충분)
+        if i in used:
+            continue
+        best, best_d = None, p['leg_pair_max']
+        for j in range(i + 1, len(legs)):
+            d = float(np.hypot(*(legs[j] - legs[i])))
+            if j not in used and d <= best_d:
+                best, best_d = j, d
+        if best is None:
+            people.append(legs[i])
+        else:
+            used.add(best)
+            people.append((legs[i] + legs[best]) / 2)
+    return np.array(people).reshape(-1, 2)
+
+
 class PersonKF:
     """관람객 위치 칼만 필터 (등속 모델: 사람이 같은 속도로 걷는다고 가정).
     상태 x = [px, py, vx, vy] (odom 좌표, m · m/s). 튀는 인식 좌표를 매끄럽게 하고, 위치만 받아도 속도를 추정한다."""
@@ -152,15 +195,34 @@ class MotionMixin:
             w = 0.0
         return self.drive(*self.ramp(0.0, w))
 
-    def obstacles(self):
-        """지금 피해야 할 장애물 점 = 라이다 점만.
+    def obstacles(self, here=None):
+        """지금 피해야 할 장애물 점 = 라이다 점(관람객 다리 뺌) + 지도 벽 점 (map_obstacles, AMCL map→odom이 있을 때만).
         OAK-D depth 바닥 점은 뺐다 (2026-11-18, free_tracking 9715cbf): 관람객이 멀면 빈 바닥이 장애물로 잡혀
         DWA가 목표까지 길이 없다고 보고 조용히 멈춤 (docs/troubleshooting/follow/2026-11-18-far-visitor-stall-depth-floor.md)
-        받음: (scan_pts)
+        지도 벽 점 중 로봇에서 robot_radius 안의 것은 버린다: 로봇이 실제로 거기 있으니 AMCL 오차로 벽이 몸 안에
+        들어온 것 → 그대로 두면 모든 궤적이 금지돼 꼼짝 못 함 (라이다가 보는 진짜 벽은 그대로 피함)
+        받음: here 로봇 (x, y) odom (없으면 위 거르기 안 함), (scan_pts, map_obs)
         돌려줌: 장애물 점 (N, 2) odom"""
-        return self.scan_pts
+        p, pts = self.p, self.scan_pts
+        # 추종 중: 관람객 본인의 다리 점은 장애물에서 뺀다 (person_obstacle_clear 안, 반지름 0.28로 커져 사람 주변이
+        # 막힌 길이 됨). 단, 로봇 몸 가까이(robot_radius + 0.15 안)의 점은 사람 추정이 틀렸을 수 있어 그대로 둔다
+        if p['person_obstacle_clear'] > 0 and here is not None and self.kf.x is not None and self.state == 'FOLLOW':
+            last, vel = self.person()
+            ps = last + vel * min(self.now() - self.kf.t, p['predict_max'])
+            drop = (np.hypot(pts[:, 0] - ps[0], pts[:, 1] - ps[1]) < p['person_obstacle_clear']) \
+                & (np.hypot(pts[:, 0] - here[0], pts[:, 1] - here[1]) > p['robot_radius'] + 0.15)
+            pts = pts[~drop]
+        if self.map_obs is None:
+            return pts
+        f = self.lookup(p['odom_frame'], p['map_frame'])
+        if f is None:                               # AMCL 전 → 라이다만
+            return pts
+        wall = apply(f, self.map_obs)
+        if here is not None:
+            wall = wall[np.hypot(wall[:, 0] - here[0], wall[:, 1] - here[1]) > p['robot_radius']]
+        return np.vstack([pts, wall])
 
-    def dwa(self, pose, goal, face):
+    def dwa(self, pose, goal, face, keep_view=False):
         """(v, w) 후보를 굴려 보고, 안 부딪히면서 목표까지 '돌아가는 거리'가 가장 줄어드는 것을 고른다 (DWA).
         ① 후보 105개 ② 1.5 s 굴려 봄 ③ 위험한 후보 버림 ④ 벌점 최소 — 단계별 입출력은 본문 주석.
         받음: pose (x, y, yaw) odom, goal 목표 (x, y), face 바라볼 곳 (x, y), (self.cmd: 지난 명령 = 지금 속도로 가정)
@@ -195,14 +257,22 @@ class MotionMixin:
         # ── ③ 위험한 후보 버리기 ────────────────────────────────────────────────────
         # 입력: obstacles() → obs (N, 2)  라이다 + 바닥 물체 점 (odom)
         # 출력: near (M, 2)  로봇에서 1.05 m(0.3 × 1.5 + 0.6) 안의 점만 (먼 점은 궤적과 상관없어 계산 줄임)
-        obs = self.obstacles()
-        near = obs[np.hypot(obs[:, 0] - x0, obs[:, 1] - y0) < p['max_linear'] * p['sim_time'] + 0.6]
+        obs = self.obstacles((x0, y0))
+        reach = p['max_linear'] * p['sim_time'] + 0.6
+        near = obs[np.hypot(obs[:, 0] - x0, obs[:, 1] - y0) < reach]
         # 출력: clear (105,)   후보별로 궤적 15점 중 장애물에 가장 가까이 간 거리 [m] (장애물 없으면 inf)
         #       here_clear     지금 로봇 위치에서 가장 가까운 장애물 거리 [m]
+        # 거리 변환(clearance_grid)으로 한 번에: 궤적 점 1575개 × 장애물 점 M개를 다 재던 것(지도 벽을 더해 M이 늘어
+        # 느려짐)을 '격자 한 번 + 점 1575개 읽기'로 바꿈 (2026-11-20)
         clear, here_clear = np.full(V.size, np.inf), np.inf
         if len(near):
-            clear = np.hypot(xs[..., None] - near[:, 0], ys[..., None] - near[:, 1]).min((1, 2))
-            here_clear = np.hypot(near[:, 0] - x0, near[:, 1] - y0).min()
+            t0 = time.monotonic()
+            cgrid, corigin = self.clearance_grid(near, x0, y0, reach)
+            clear = self.sample(cgrid, corigin, xs.ravel(), ys.ravel(), p['clear_resolution']) \
+                .reshape(xs.shape).min(1)
+            here_clear = float(self.sample(cgrid, corigin, np.array([x0]), np.array([y0]),
+                                           p['clear_resolution'])[0])
+            self.dbg['clear_ms'] = (time.monotonic() - t0) * 1000
         # 여유를 지키는 경로, 또는 이미 붙어 있을 때 더 가까워지지 않는 경로(빠져나오기). 로봇 반지름 안은 금지
         # 출력: safe (105,) True/False  통과 조건 둘 중 하나
         #   - clear > 0.25 (로봇 반지름 0.2 + 여유 0.05): 여유 있게 지나감
@@ -218,9 +288,19 @@ class MotionMixin:
         # ── ④ 점수(벌점) 매기고 고르기 — 작을수록 좋음 ─────────────────────────────
         # 입력: goal, 로봇 위치, obs
         # 출력: field (n, n)  칸마다 goal까지 장애물을 돌아가는 거리 [m],  origin 격자 원점 (x, y)
+        # 목표·로봇이 field_reuse_dist(10 cm) 넘게 안 움직였고 field_max_age(0.5 s) 안이면 지난 거리 지도를 다시 씀
+        # (제어 밀림 줄이기, 2026-11-20). 안전 판정(③ clear)은 매번 새 장애물로 하므로 길 안내만 조금 늦게 바뀜
         t0 = time.monotonic()
-        field, origin = self.field(np.asarray(goal, float), np.array([x0, y0]), obs)
-        self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
+        goal_a, here_a, fc = np.asarray(goal, float), np.array([x0, y0]), self.field_cache
+        if fc is not None and t0 - fc[0] < p['field_max_age'] \
+                and np.linalg.norm(goal_a - fc[1]) < p['field_reuse_dist'] \
+                and np.linalg.norm(here_a - fc[2]) < p['field_reuse_dist']:
+            field, origin = fc[3], fc[4]
+            self.dbg['field_reused'] = True
+        else:
+            field, origin = self.field(goal_a, here_a, obs)
+            self.field_cache = (t0, goal_a, here_a, field, origin)
+            self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
         # 지금 로봇 자리에서 goal까지 장애물을 돌아가는 거리 [m] → SEARCH 이동의 진척 판정 (못 가면 약 50)
         self.path_dist = float(self.sample(field, origin, np.array([x0]), np.array([y0]))[0])
         # 출력: ex, ey, eth (105,)  후보별 1.5 s 뒤 도착 위치·방향 (② 결과의 마지막 열)
@@ -233,8 +313,12 @@ class MotionMixin:
         cost = self.sample(field, origin, ex, ey) \
             + p['w_clearance'] * np.clip(p['clearance_zone'] - clear, 0, None) \
             + p['w_turn'] * np.abs(W)                       # 비용이 같으면 덜 도는 쪽
+        off = np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))   # 후보별 도착 때 사람 쪽과 어긋난 각도 [rad]
         if math.hypot(goal[0] - x0, goal[1] - y0) < 0.3:   # 거의 도착 → 관람객 쪽을 바라봄
-            cost += p['w_heading'] * np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))
+            cost += p['w_heading'] * off
+        if keep_view:                                       # 추종 중: 사람이 탑캠 화면 밖으로 나가는 궤적에 벌점
+            # + w_view × max(어긋난 각도 - view_half_angle, 0)  (2026-11-20: 이동 중 화면 밖으로 빠져 인식을 놓침)
+            cost += p['w_view'] * np.clip(off - p['view_half_angle'], 0, None)
         cost[~safe] = np.inf
         # 출력: i  벌점이 가장 작은 후보 번호 (0 ~ 104). 위험한 후보는 cost = inf라 절대 안 뽑힘
         # 결과: (v [m/s], w [rad/s])  예) (0.25, 0.3) → drive()가 cmd_vel로 보냄. 다음 0.1 s만 쓰고 다시 계산
@@ -266,12 +350,30 @@ class MotionMixin:
         dist[~np.isfinite(dist)] = 50.0
         return dist, origin
 
-    def sample(self, field, origin, x, y):
+    def clearance_grid(self, near, x0, y0, reach):
+        """로봇 주변(±reach) 칸마다 '가장 가까운 장애물 점까지 거리' [m] (dwa의 안전 판정·벌점용).
+        clear_resolution(1 cm) 격자에 장애물 점을 찍고 cv2.distanceTransform 한 번.
+        격자 오차 = 장애물 점이 칸 안 어디든 있을 수 있음(최대 res × 0.71) + 칸 사이를 섞어 읽음(bilinear, 최대 res × 0.71)
+        → res × 1.42를 빼서 실제보다 멀게 나오지 않게 한다
+        (안전 판정이 예전 정확한 계산보다 느슨해지지 않음. 대신 최대 약 1.4 cm 보수적).
+        받음: near 장애물 점 (M, 2) odom (로봇에서 reach 안), x0, y0 로봇 위치, reach 반경 [m]
+        돌려줌: (거리 지도 n×n [m], 지도 원점 (x, y))"""
+        res = self.p['clear_resolution']
+        n = int(math.ceil(2 * reach / res)) + 2
+        origin = np.array([x0 - n * res / 2, y0 - n * res / 2])
+        img = np.ones((n, n), np.uint8)             # 1 = 빈칸, 0 = 장애물 (distanceTransform은 0까지 거리를 잰다)
+        c = np.floor((near - origin) / res).astype(int)
+        c = c[((c >= 0) & (c < n)).all(1)]
+        img[c[:, 1], c[:, 0]] = 0
+        dist = cv2.distanceTransform(img, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) * res
+        return np.maximum(dist - res * 1.42, 0.0), origin
+
+    def sample(self, field, origin, x, y, res=None):
         """거리 지도에서 점들의 값을 읽는다. 칸 사이는 주변 4칸을 섞어서(bilinear) → 후보끼리 점수가 같아지지 않게.
-        받음: field 거리 지도, origin 지도 원점, x, y 점들 (배열)
+        받음: field 거리 지도, origin 지도 원점, x, y 점들 (배열), res 칸 크기 (없으면 grid_resolution)
         돌려줌: 점마다 거리 [m]"""
         n = field.shape[0]
-        g = (np.stack([x, y], 1) - origin) / self.p['grid_resolution'] - 0.5
+        g = (np.stack([x, y], 1) - origin) / (res or self.p['grid_resolution']) - 0.5
         i = np.clip(np.floor(g).astype(int), 0, n - 2)
         t = np.clip(g - i, 0.0, 1.0)
         f = [field[i[:, 1] + dy, i[:, 0] + dx] for dy in (0, 1) for dx in (0, 1)]
