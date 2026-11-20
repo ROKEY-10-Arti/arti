@@ -7,8 +7,8 @@
 | 장비 | 담당 역할 | 네임스페이스 |
 |---|---|---|
 | PC3 | 키오스크 UI, 중앙 관제, SQLite DB | `/arti` |
-| PC1 | Robot1 제어, 자유관람·관람객 추종 | `/robot1` |
-| PC2 | Robot4 제어, 코스관람·자율주행 | `/robot4` |
+| PC1 | Robot1 제어, 자유 관람·관람객 추종 | `/robot1` |
+| PC2 | Robot4 제어, 코스 관람·자율주행 | `/robot4` |
 
 **설계 원칙**
 - PC3는 로봇 호출·관람 시작 명령을 전송하고 진행 상태를 수신한다.
@@ -24,8 +24,8 @@
 |---|---|---|---|
 | Robot1 호출·등록 | `/robot1/arti/prepare_tour` | Action | PC3 → PC1 |
 | Robot4 호출·등록 | `/robot4/arti/prepare_tour` | Action | PC3 → PC2 |
-| Robot1 자유관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 |
-| Robot4 코스관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 |
+| Robot1 자유 관람 시작 | `/robot1/arti/start_tour` | Action | PC3 → PC1 |
+| Robot4 코스 관람 시작 | `/robot4/arti/start_tour` | Action | PC3 → PC2 |
 | 작품 설명 조회 | `/arti/description` | Service | PC1·PC2 → PC3 |
 
 Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한다.
@@ -35,7 +35,7 @@ Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한
 두 로봇 모두 `prepare_tour` → `start_tour` 순서. 차이는 `start_tour`를 보내는 때.
 
 ```
- robot1 (자유관람)                                robot4 (코스관람)
+ robot1 (자유 관람)                                robot4 (코스 관람)
  [호출] ─▶ /robot1/arti/prepare_tour              [호출] ─▶ /robot4/arti/prepare_tour
           ◀─ success                                       ◀─ success
  [관람 시작] 버튼 ─▶ /robot1/arti/start_tour {[]}   바로 자동 ─▶ /robot4/arti/start_tour {[1, 3, 4]}
@@ -70,8 +70,8 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 
 | 관람 방식 | 대상 | artwork_ids |
 |---|---|---|
-| 자유관람 | Robot1 | `[]` |
-| 코스관람 | Robot4 | `[1, 3, 4]` |
+| 자유 관람 | Robot1 | `[]` |
+| 코스 관람 | Robot4 | `[1, 3, 4]` |
 
 | state | 의미 |
 |---|---|

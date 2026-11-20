@@ -28,7 +28,8 @@
       "end_min_time": "start_tour 뒤 이 시간 안의 출구 진입은 무시 (시작하자마자 끝나지 않게) [s]",
       "return_to_dock": "관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)",
       "return_timeout": "언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]",
-      "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]"
+      "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]",
+      "return_use_map": "도크 복귀 목표를 지도의 언독 지점(init_pose.yaml)으로 (AMCL map→odom 사용). false면 언독 때 기록한 odom 위치 (바퀴 오차가 쌓임)"
     },
     "auto_start": false,
     "start_enabled": true,
@@ -43,6 +44,7 @@
     "end_guide_wait": 3.0,
     "end_min_time": 10.0,
     "return_to_dock": true,
+    "return_use_map": true,
     "return_timeout": 60.0,
     "return_arrive": 0.15
   },
@@ -87,7 +89,7 @@
   "follow": {
     "_설명": {
       "_묶음": "추종 (FOLLOW): 거리·예측·칼만 필터",
-      "target_distance": "유지 거리 [m]",
+      "target_distance": "유지 거리 [m] (요구사항 약 80cm. 2026-11-20 현장에서 1.2도 시험했다가 0.8로 되돌림)",
       "distance_tolerance": "이 안이면 전진 안 함 [m]",
       "restart_margin": "멈춘 뒤에는 target_distance + 이만큼 멀어져야 다시 출발 [m] (섰다 갔다 방지)",
       "lead_time": "관람객 속도로 이만큼 앞을 보고 목표를 잡음 [s] (길면 좌표 잡음이 커짐) 0.5 → 0.3 (2026-11-18 bag: 0.5 s 앞 예측 오차 p90 0.74 m → 0.3 s 0.58 m, 멈출 때 덜 다가옴)",
@@ -113,7 +115,9 @@
     "_설명": {
       "_묶음": "놓침 → 탐색 (SEARCH → WAIT → LOST)",
       "lost_timeout": "좌표가 이만큼 안 오면 분실 → SEARCH [s] (3.0 → 1.5: 추종 중 정상 끊김은 1.2 s 이하)",
-      "search_move_time": "최종 좌표로 이동하는 시간 상한. 0이면 도착할 때까지 [s] (0 → 5: 사람이 그 자리에 서 있으면 영원히 못 도착)",
+      "search_move_time": "최종 좌표로 이동하는 안전 시간 상한. 0이면 상한 없음 [s] (5 → 20, 2026-11-20: 5 s면 1 m 남짓밖에 못 가서 먼 곳에서 놓치면 도착 전에 회전. 막힘은 search_stall_time이 따로 끊음)",
+      "search_stall_time": "최종 좌표로 가는 중 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 search_stall_dist만큼도 안 줄면 막힌 것으로 보고 그 자리에서 회전 탐색 [s] (길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음. 먼저 제자리 회전하는 동안은 셈하지 않음)",
+      "search_stall_dist": "막힘 판정에서 '경로 거리가 줄었다'로 치는 최소 거리 [m]",
       "search_arrive": "최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)",
       "turn_first_angle": "SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°) DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤",
       "search_time": "최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 → 2π/20 = 0.31 rad/s [s] 10 → 20 (2026-11-19: 0.63 rad/s는 너무 빨라 탑캠이 다시 못 잡음)",
@@ -122,7 +126,9 @@
       "wait_time": "회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]"
     },
     "lost_timeout": 1.5,
-    "search_move_time": 5.0,
+    "search_move_time": 20.0,
+    "search_stall_time": 3.0,
+    "search_stall_dist": 0.05,
     "search_arrive": 0.35,
     "turn_first_angle": 1.0,
     "search_time": 20.0,
@@ -130,20 +136,37 @@
     "search_spin_extra": 3.0,
     "wait_time": 10.0
   },
+  "person_filter": {
+    "_설명": {
+      "_묶음": "관람객 좌표 거르기 (인식 모듈이 다른 사람·벽을 잡은 좌표 버림, 2026-11-20)",
+      "map_file": "벽 검사에 쓸 지도 yaml ('' = 환경 변수 $ARTI_MAP = 저장소 maps/gallery.yaml). 못 읽으면 검사 안 함",
+      "person_wall_margin": "벽을 이만큼 넓혀서 그 안의 좌표도 버림 [m] (0.1 → 0.0, 2026-11-20: 키오스크 앞에 바짝 선 진짜 관람객(벽선에서 10 cm)을 버림. 0 = 벽 칸·지도 밖만 버림)",
+      "reacquire_radius": "놓친 뒤 다시 잡을 때, 마지막으로 확인한 위치에서 기본 허용 거리 [m]",
+      "reacquire_speed": "다시 잡을 때 허용 거리가 지난 시간만큼 늘어나는 속도 [m/s] (사람 걷는 속도)",
+      "reacquire_max": "다시 잡을 때 허용 거리 상한 [m] (오래 놓쳐도 이보다 먼 좌표는 버림 → 결국 LOST)",
+      "search_confirm_time": "탐색 중(SEARCH·WAIT) 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW로 돌아감 [s]"
+    },
+    "map_file": "",
+    "person_wall_margin": 0.0,
+    "reacquire_radius": 1.0,
+    "reacquire_speed": 1.0,
+    "reacquire_max": 4.0,
+    "search_confirm_time": 0.5
+  },
   "motion": {
     "_설명": {
       "_묶음": "속도·가감속 (cmd_vel)",
-      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31)",
-      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24)",
-      "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8: 빨리 0.3 m/s까지)",
-      "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8: 0.3 m/s에서 약 6 cm만 더 감, 너무 가까이 가는 것 줄임)",
+      "max_linear": "최대 전진 속도 [m/s] (TurtleBot 4 최대 약 0.31). 0.3 → 0.2 → 0.25 (2026-11-20: 0.2면 약 0.4 m/s로 걷는 관람객과 거리가 벌어져 놓침)",
+      "max_angular": "최대 회전 속도 [rad/s]. 1.5 → 0.8: 0.6 rad/s 넘게 돌면 탑캠 영상이 흔들려 인식을 놓침 (bag: 놓침 직전 빠른 회전 5/24). 2026-11-20 현장: 0.8 → 0.5 (빠르게 돌아 인식을 놓침)",
+      "linear_accel": "전진 가속 [m/s^2] (0.5 → 0.8 → 0.3, 2026-11-20: 부드럽게 출발. 0.3 m/s까지 1 s)",
+      "linear_decel": "멈출 때 감속 [m/s^2] (0.4 → 0.8 → 0.3, 2026-11-20: 부드럽게 정지. 0.3 m/s에서 1 s·약 15 cm 더 감 — 0.8일 때는 약 6 cm)",
       "angular_accel": "회전 가속 [rad/s^2] (3.0 → 1.5: 회전이 덜 들쑥날쑥)",
       "min_spin_cmd": "서 있을 때(v≈0) 이보다 작은 회전 명령은 0으로 [rad/s] Create 3는 0 < |w| < 0.05 같은 작은 제자리 회전을 0.25~0.3 rad/s로 돌아 버림"
     },
-    "max_linear": 0.3,
-    "max_angular": 0.8,
-    "linear_accel": 0.8,
-    "linear_decel": 0.8,
+    "max_linear": 0.25,
+    "max_angular": 0.5,
+    "linear_accel": 0.3,
+    "linear_decel": 0.3,
     "angular_accel": 1.5,
     "min_spin_cmd": 0.1
   },
@@ -157,12 +180,12 @@
       "w_clearance": "비용: 장애물 근접 (clearance_zone 안)",
       "w_heading": "비용: 목표 근처에서 관람객을 바라보는 방향",
       "w_turn": "비용: 회전 (같은 조건이면 직진)",
-      "control_period": "제어 주기 [s]",
+      "control_period": "제어 주기 [s] (2026-11-20: 0.2도 시험했으나 개선 없어 0.1 유지)",
       "sim_time": "DWA 후보를 굴려 볼 시간 [s]",
       "v_samples": "DWA 전진 속도 후보 수",
       "w_samples": "DWA 회전 속도 후보 수",
       "scan_min_range": "이보다 가까운 LiDAR 점은 로봇 몸체(상판 기둥) [m]",
-      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s]"
+      "scan_timeout": "scan이 이보다 오래 안 오면 정지 [s] (0.5 → 0.8, 2026-11-20: Wi-Fi로 scan이 0.5~0.6 s씩 끊겨 자주 멈춤)"
     },
     "robot_radius": 0.18,
     "safety_margin": 0.02,
@@ -176,7 +199,7 @@
     "v_samples": 7,
     "w_samples": 15,
     "scan_min_range": 0.2,
-    "scan_timeout": 0.5
+    "scan_timeout": 0.8
   },
   "diag": {
     "_설명": {

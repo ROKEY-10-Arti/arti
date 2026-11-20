@@ -73,7 +73,7 @@ REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 �
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
   │ 좌표가 1.5 s(lost_timeout) 안 옴
   ▼
-SEARCH        마지막 좌표까지 이동(최대 5 s, 뒤쪽이면 먼저 제자리 회전) → 거기서 odom 기준 한 바퀴(약 20 s, 0.31 rad/s) 회전 탐색
+SEARCH        마지막 좌표까지 이동(도착할 때까지. 3 s 동안 안 가까워지면 막힘, 상한 20 s. 뒤쪽이면 먼저 제자리 회전) → 거기서 odom 기준 한 바퀴(약 20 s, 0.31 rad/s) 회전 탐색
   ▼
 WAIT          정지 대기 10 s
   ▼
@@ -143,7 +143,7 @@ run_tour                                                                  └ 0.
 목표   관람객이 0.3 s 뒤 있을 곳에서 0.8 m 앞 지점
 멈춤   0.85 m 안이면 감속해 서서 관람객 쪽으로 돎, 0.95 m 밖이 되면 다시 출발 (섰다 갔다 방지)
 회피   LiDAR(벽·기둥)만으로 10 cm 격자 (OAK-D depth는 2026-11-18에 뺌: 빈 바닥이 장애물로 잡혀 멀리 있는 관람객을 못 따라감)
-       → 칸마다 목표까지 돌아가는 거리(BFS) → (v, w) 후보를 1.5 s 굴려 보고 안 부딪히며 가장 가까워지는 것 (DWA)
+       → 칸마다 목표까지 돌아가는 거리(최단 거리, SciPy 다익스트라 `grid_distances`) → (v, w) 후보를 1.5 s 굴려 보고 안 부딪히며 가장 가까워지는 것 (DWA)
 속도   최대 0.3 m/s, 0.8 rad/s. 후진하지 않음. 서 있을 때 0.1 rad/s보다 작은 회전은 0 (Create 3가 작은 회전을 크게 돎)
 안전   TF(odom→base_link)가 없거나 scan이 0.5 s 넘게 안 오면 정지
 ```
@@ -220,13 +220,17 @@ ros2 topic echo /robot1/follow/state
 
 | 이름 | 기본값 | 뜻 |
 |---|---|---|
-| `target_distance` | 0.8 | 유지 거리 [m] |
+| `target_distance` | 0.8 | 유지 거리 [m] (0.85 m 안이면 서고 0.95 m 밖이면 다시 출발) |
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 등록 확인 시간 / 끊김으로 보는 간격 [s] |
 | `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
-| `search_move_time` / `search_arrive` | 5 / 0.35 | 마지막 위치로 이동하는 시간 상한 [s] / 도착 거리 [m] |
+| `search_move_time` / `search_arrive` | 20 / 0.35 | 마지막 위치로 이동하는 안전 시간 상한 [s] / 도착 거리 [m] |
+| `person_wall_margin` / `map_file` | 0.0 / '' | 관람객 좌표가 지도의 벽(이만큼 넓혀 봄)·지도 밖이면 버림 [m] / 지도 yaml ('' = $ARTI_MAP) |
+| `reacquire_radius` / `reacquire_speed` / `reacquire_max` | 1.0 / 1.0 / 4.0 | 놓친 뒤 다시 잡을 때 마지막 확인 위치에서 허용 거리 = radius + speed × 지난 시간 (최대 max) [m, m/s, m]. 넘으면 버림 |
+| `search_confirm_time` | 0.5 | 탐색 중 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW [s] (그동안 마지막 위치 탐색 계속) |
+| `search_stall_time` / `search_stall_dist` | 3 / 0.05 | 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 이만큼도 안 줄면 막힘 → 그 자리에서 회전 탐색 [s] / [m] |
 | `robot_radius` / `safety_margin` | 0.18 / 0.02 | 로봇 반지름 / 여유 [m]. 합 0.20 안을 지나는 궤적 금지, 통과 가능한 최소 폭 약 0.65 m (0.20/0.05일 때 약 0.85 m) |
 | `search_time` / `wait_time` | 20 / 10 | 회전 탐색 한 바퀴 시간 (속도 = 2π/search_time = 0.31 rad/s) / 정지 대기 [s] |
-| `max_linear` / `max_angular` | 0.3 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
+| `max_linear` / `max_angular` | 0.25 / 0.5 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `face_offset_deg` | -15 | 시작 때 바라볼 방향 보정 [deg] (+ 왼쪽, - 오른쪽) |
 | `undock` | true | 시작 때 undock |
@@ -241,4 +245,5 @@ ros2 topic echo /robot1/follow/state
 - 후진하지 않는다. U자 막다른 곳은 못 빠져나올 수 있다
 - LiDAR 평면보다 낮은 바닥 물체(가방 등)는 못 본다 (depth를 뺐음)
 - 등록은 "1 s 동안 계속 보임"까지만 본다. 특징 수집·한 명 확인(T13)은 아직 없다
-- 도크 복귀는 odom만 쓴다 (AMCL 없이도 동작, 대신 오래 관람하면 바퀴 미끄러짐 오차가 쌓여 언독 지점이 몇십 cm 어긋날 수 있음 → Create 3 도킹이 IR로 마지막을 맞춤)
+- 도크 복귀 목표는 지도의 언독 지점(`init_pose.yaml`)을 그때의 AMCL(map→odom)로 바꾼 값 (`return_use_map`, 2026-11-20).
+  AMCL이 없으면 언독 때 기록한 odom 위치로 돌아간다 (관람 중 바퀴 오차가 쌓여 20~30 cm 어긋나 도킹 실패가 잦았음).

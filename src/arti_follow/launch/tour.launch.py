@@ -4,7 +4,7 @@
     → <ns>/arti/prepare_tour 액션을 보내면 undock → 초기 위치 → 출발 방향 보기 → 인식 기다림 (등록),
       그다음 <ns>/arti/start_tour 액션을 보내면 따라간다.
       인식 창에서 따라갈 사람을 클릭하면 "인식되었습니다" 안내 후 로봇이 따라가고,
-      관람객이 작품 앞 반원 구역에서 5초 멈추면 설명, 출구·키오스크 구역에 들어가면 안내 음성
+      관람객이 작품 앞 반원 구역에서 3초 멈추면 설명, 출구·키오스크 구역에 들어가면 안내 음성
 
 옵션 — 이 파일은 audio·zones_file만 선언한다. 나머지는 include한 launch의 인자가 그대로 통한다
     (ros2 launch 명령줄 인자는 include된 launch까지 전달됨. 목록: ros2 launch arti_follow tour.launch.py --show-args)

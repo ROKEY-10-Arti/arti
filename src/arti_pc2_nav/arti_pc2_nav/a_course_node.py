@@ -66,7 +66,7 @@ from .guided_tour_plan import Pose2D, load_course_config, load_start_pose
 
 from arti_interfaces.action import ExplainArtwork   # 작품 해설 액션 (서버: arti_audio guide_audio_node)
 from arti_interfaces.action import PrepareTour      # 로봇 호출·등록 (클라이언트: PC3 키오스크)
-from arti_interfaces.action import StartTour        # 코스관람 시작 (클라이언트: PC3 키오스크)
+from arti_interfaces.action import StartTour        # 코스 관람 시작 (클라이언트: PC3 키오스크)
 
 # prepare_tour feedback 순서 (팀 명세서 3.1)
 PREPARE_STATES = ('UNDOCKING', 'MOVING', 'ARRIVED', 'REGISTERING', 'REGISTERED')
@@ -284,7 +284,7 @@ class ACourseNode(Node):
             self, PrepareTour, 'arti/prepare_tour', self._prepare_execute,
             goal_callback=self._prepare_goal, cancel_callback=lambda _g: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup())
-        # [PC3 -> PC2] 코스관람 시작 액션. 같은 방식: 판단은 _update_tour(_tick), 실행 함수는 중계만.
+        # [PC3 -> PC2] 코스 관람 시작 액션. 같은 방식: 판단은 _update_tour(_tick), 실행 함수는 중계만.
         self._tour = None          # 진행 중인 start_tour: dict(ids, started, feedback(deque), outcome, cancel)
         self._tour_server = ActionServer(
             self, StartTour, 'arti/start_tour', self._tour_execute,
@@ -660,7 +660,7 @@ class ACourseNode(Node):
         self._tour_end_pub.publish(Empty())
 
     # ------------------------------------------------------------
-    # [PC3 -> PC2] start_tour 액션 (코스관람 시작)
+    # [PC3 -> PC2] start_tour 액션 (코스 관람 시작)
     # ------------------------------------------------------------
 
     def _tour_goal(self, goal_request):

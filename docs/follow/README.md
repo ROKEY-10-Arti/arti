@@ -11,7 +11,7 @@
 ## 범위
 
 관람객을 추적 대상으로 등록하고, 지도 위 위치를 계속 추정해서 약 0.8 m 거리를 유지하며 따라간다.
-작품 반원 구역에서 5초 멈추면 해설하고, 대상을 놓치면 분실 처리, 배터리 부족·종료 구역이면 도킹한다.
+작품 반원 구역에서 3초 멈추면 해설하고, 대상을 놓치면 분실 처리, 배터리 부족·종료 구역이면 도킹한다.
 상태는 중앙 서버가 아니라 **로봇 노드가 직접** 관리한다. 웹(Flask)은 다른 팀이고 ROS 2로 데이터만 주고받는다.
 
 ## 추종 주행 노드: `visitor_follower` (노드 하나, 파일 넷: 본체·`prepare_tour.py`·`start_tour.py`·`motion.py`)
@@ -29,7 +29,7 @@
 | 입력 | `tf`, `tf_static` | | odom, base_link, 센서 좌표계 |
 | 입력 | `dock_status` | irobot_create_msgs/DockStatus | 도크에 붙어 있을 때만 undock |
 | 액션 서버 | `arti/prepare_tour` | arti_interfaces/PrepareTour | 호출·등록: undock → 위치 → 키오스크 보기 → 관람객 등록. feedback `state`(UNDOCKING·MOVING·ARRIVED·REGISTERING·REGISTERED), result `success`(등록 완료)·`message`(registered / not_docked·undock_failed·no_localization·canceled …). 관람 중 호출은 키오스크가 막음(dock_status) |
-| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유관람 시작 (`artwork_ids: []`). 키오스크가 prepare_tour 성공 뒤 한 번만 보내므로 검사하지 않음. 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
+| 액션 서버 | `arti/start_tour` | arti_interfaces/StartTour | 자유 관람 시작 (`artwork_ids: []`). 키오스크가 prepare_tour 성공 뒤 한 번만 보내므로 검사하지 않음. 취소하면 관람 끝. feedback `state`(FOLLOW·EXPLAINING·ARTWORK_COMPLETED) + `artwork_id`. result `success`(취소로 끝남), `message`(끝난 이유). 명세 `docs/common/ros2_interfaces.md` |
 | 입력 | `artwork_zone/explaining`, `artwork_zone/explained` | Int32 (작품 번호, 0 = 없음) | `artwork_zone`이 알려 주는 설명 중 작품(latched) → feedback EXPLAINING / 끝까지 설명한 작품 → feedback ARTWORK_COMPLETED 한 번 |
 | 액션 클라이언트 | `undock` | irobot_create_msgs/Undock | Create 3 언독 |
 | 출력 | `initialpose` | PoseWithCovarianceStamped | AMCL 초기 위치 = `arti_common/config/init_pose.yaml`의 undock 지점 |
@@ -61,7 +61,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 ```
 좌표: 칼만 필터(등속)로 위치·속도를 매끄럽게, 예측에서 너무 먼 좌표는 버림
 목표: 관람객이 0.5 s 뒤 있을 곳에서 0.8 m 앞 지점
-회피: LiDAR + Depth 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(BFS)
+회피: LiDAR 장애물로 10 cm 격자 → 칸마다 목표까지 "돌아가는 거리"(최단 거리, SciPy 다익스트라)
       → (v, w) 후보를 1.5 s 굴려 보고, 안 부딪히면서(로봇 반지름 0.2 + 여유 0.05) 끝점의 그 거리가 가장 작은 것 (DWA)
 ```
 
@@ -79,7 +79,7 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
   → `follow_test.launch.py` 전부 + `artwork_zone`(작품 구역 판정, T32) + `guide_audio_node`(arti_audio, 음성).
   옵션은 follow_test와 같고 `audio:=false`(음성 노드 따로), `player_cmd:=`, `zones_file:=` 추가.
   구역은 `arti_common/config/artworks.yaml`(map 좌표 반원: 중심·정면 방향·반지름 0.7 m).
-  관람객이 작품 반원 안에서 5초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
+  관람객이 작품 반원 안에서 3초간 0.6 m 안에 머무르면 `explain_artwork`, 1 m 벗어나거나 1초 끊기면 취소, 끝까지 들은 작품은 다시 안 함
   (관람이 끝나면 `arti/tour_end`로 비움). 출구·키오스크 구역은 들어가면 바로 `guide_message`(`tour_end`, `kiosk`).
   `artwork_zone`은 `follow/state`가 FOLLOW·SEARCH·WAIT(등록 뒤 추종 중)일 때만 판정한다 (그 밖에는 `off (follow ...)`, 단독 테스트는 `need_follow:=false`).
   확인: `ros2 topic echo /robot1/artwork_zone/state`

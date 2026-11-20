@@ -1,4 +1,4 @@
-# arti_pc2_nav — robot4 코스관람 (PC2)
+# arti_pc2_nav — robot4 코스 관람 (PC2)
 
 키오스크(PC3)에서 **로봇 호출**과 **관람 시작**을 받아, robot4가 관람객을 등록하고 선택한 작품을 차례로 안내한 뒤 도킹한다.
 이동은 전부 **Nav2**(`navigate_to_pose`)가 하고, 이 패키지는 `cmd_vel`을 보내지 않는다 (arti_follow는 `cmd_vel` 직접 제어 — 방식이 다름).

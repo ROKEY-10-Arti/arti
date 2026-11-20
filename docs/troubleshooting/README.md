@@ -54,6 +54,7 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-16 | follow | [사람 좌표는 오는데 로봇이 안 움직임 (localization 꺼져서 map→odom 없음)](follow/2026-11-16-no-map-odom-follower-idle.md) | 해결 | jsy0605 |
 | 2026-11-18 | follow | [제자리에서 저절로 돌고 회전이 들쑥날쑥, 빨리 걸으면 놓침 (Create 3 작은 회전 명령, DWA w=0 후보 없음)](follow/2026-11-18-search-spin-tiny-w-create3.md) | 확인 중 | jsy0605 |
 | 2026-11-18 | follow | [관람객이 1.5 m 넘게 멀어지면 로봇이 서 버리고 최종 인식 지점으로도 안 감 (depth 바닥 점 → DWA 경로 없음)](follow/2026-11-18-far-visitor-stall-depth-floor.md) | 확인 중 | jsy0605 |
+| 2026-11-20 | follow | [관람 중 로봇이 뚝뚝 멈춤 (라이다 scan이 Wi-Fi로 0.5~0.8 s씩 끊김, scan_timeout 0.5 s)](follow/2026-11-20-scan-gap-wifi-stutter.md) | 우회 | 이정욱 |
 | 2026-11-17 | env | [localization이 "Configuring amcl"에서 멈춤 (Discovery Server 연결 안 됨)](env/2026-11-17-localization-stuck-discovery.md) | 해결 | jsy0605 |
 | 2026-11-17 | env | [nav2가 활성화되지 않음 (lifecycle 서비스 응답이 Discovery Server 지연으로 사라짐)](env/2026-11-17-nav2-lifecycle-stuck-discovery.md) | 확인 중 | jsy0605 |
 | 2026-11-20 | course | [도킹 중 호출 거절·2D Pose 안 먹음·Nav2 "Aborting bringup" (도킹 중 LiDAR 꺼짐)](course/2026-11-20-docked-lidar-off-prepare-fails.md) | 해결 | flypig341 |
@@ -65,3 +66,4 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-20 | course | [Nav2가 장애물을 거의 피해 가지 않음](course/2026-11-20-nav2-weak-obstacle-avoidance.md) | 미해결 | flypig341 |
 | 2026-11-20 | robot | [robot4 OAK-D 끄기 (standard.launch.py)](robot/2026-11-20-robot4-oakd-disabled.md) | 해결 | flypig341 |
 | 2026-11-20 | env | [RTPS_TRANSPORT_SHM Error: open_and_lock_file failed](env/2026-11-20-fastdds-shm-open-and-lock.md) | 해결 | flypig341 |
+| 2026-11-20 | env | [prepare_tour가 dock_status_unavailable로 실패 (같은 때 /arti/description도 못 받음, Discovery 일시 끊김 의심)](env/2026-11-20-dock-status-unavailable-discovery.md) | 미해결 | 이정욱 |

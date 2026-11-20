@@ -14,7 +14,7 @@
       arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
                                   feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
                                   result: success(등록 완료), message(실패 이유)
-      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
+      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유 관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
                                   취소하면 관람 끝. feedback: state(FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
       artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id
@@ -49,7 +49,7 @@
               ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
   ── 여기부터 = start_tour ──
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
-  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지(search_move_time 상한) 이동
+  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 (막히면 search_stall_time 뒤, 상한 search_move_time)
           → 거기서 2π/search_time 일정 속도로 odom 기준 한 바퀴(360°) 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
   LOST    wait_time 지남 → 정지, 액션 끝 (reason lost). 다시 시작하려면 액션을 새로 보냄
@@ -59,7 +59,7 @@
 관람객 좌표: 인식 좌표는 튀므로 칼만 필터(등속 모델)로 위치·속도를 매끄럽게 추정하고,
       예측에서 너무 먼 좌표(이상값)는 버린다. 연속으로 버려지면 사람이 정말 옮긴 것으로 보고 다시 시작.
 멈춤: 0.85 m 안에서 서고 0.95 m 밖에서 다시 출발 (경계를 둘로 나눠 섰다 갔다 방지), 감속은 linear_decel로 부드럽게.
-주행: 장애물로 격자를 만들어 칸마다 목표까지 '돌아가는 거리'를 구하고(BFS),
+주행: 장애물로 격자를 만들어 칸마다 목표까지 '돌아가는 거리'를 구하고(최단 거리, motion.grid_distances = SciPy 다익스트라),
       (v, w) 후보를 sim_time 동안 굴려 보며 안 부딪히고 끝점의 그 거리가 가장 작은 것을 고른다(DWA).
 """
 import collections
@@ -72,6 +72,7 @@ import time
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from arti_interfaces.action import PrepareTour, StartTour
+import cv2
 from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped, TwistStamped
 from irobot_create_msgs.action import Dock, Undock
 from irobot_create_msgs.msg import DockStatus
@@ -81,7 +82,7 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
@@ -149,7 +150,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
         self.lost_at, self.turn, self.spin_at, self.spin_speed, self.holding = 0.0, 1.0, None, 0.0, False
         self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
+        self.best_dist, self.progress_at = None, 0.0                # SEARCH 이동: 가장 짧았던 경로 거리, 그때 시각
+        self.path_dist = None                                       # dwa가 구한 로봇 → 목표 경로 거리 [m]
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
+        self.scan_rx = -1e9                         # scan을 받은 시각 (TF 변환 실패로 버려도)
+        self.sensor_stop_at = self.sensor_log_at = None   # 센서 때문에 정지 시작한 시각, 마지막 경고 로그 시각
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
         self.cmd_hist = collections.deque(maxlen=60)  # 최근 cmd_vel (시각, v, w) 약 6 s → odom 지연 보정 (predict_yaw)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
@@ -163,7 +168,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         def sub(kind, topic, fn, qos):               # 진단 켜면 수신 간격·지연·콜백 시간을 잰다
             return self.create_subscription(kind, topic, self.timed(topic, fn), qos)
         # tf는 네임스페이스 안(/robot1/tf)에 있으므로 상대 이름으로 받아 Buffer에 넣는다
-        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], 100)
+        # tf(약 37 Hz)는 BEST_EFFORT: Wi-Fi에서 잃은 조각을 재전송하느라 뒤 메시지까지 밀리지 않게 (곧 새 값이 옴).
+        # RELIABLE이던 2026-11-20 진단에서 [늦음] tf 204번(최대 3 s). 팀원 브랜치 fix/follow-stability-perf와 같은 설정.
+        # tf_static은 한 번만 오므로 아래처럼 RELIABLE + TRANSIENT_LOCAL 그대로
+        tf_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT)
+        sub(TFMessage, 'tf', lambda m: [self.tf.set_transform(t, 'tf') for t in m.transforms], tf_qos)
         sub(TFMessage, 'tf_static', lambda m: [self.tf.set_transform_static(t, 'tf') for t in m.transforms],
             QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         sub(PointStamped, 'target_person/point_map', self.on_person, 10)
@@ -182,6 +191,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.start = self.load_start_point(self.p['start_point'])          # AMCL 초기 위치 = 도크 (x, y, yaw) map
         self.face_from = self.load_start_point(self.p['face_from_point'])  # 언독 끝 자리 = 시작 회전 기준
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
+        self.map_bad = self.load_map()              # 사람이 있을 수 없는 칸 (A1, 없으면 None)
+        self.anchor = None                          # 마지막으로 확인한 관람객 위치 (odom xy, 시각) — 다시 잡을 때 기준 (A2)
+        self.run_since = None                       # 관람객 좌표가 끊김 없이 오기 시작한 시각 (A4)
+        self.search_goal = None                     # 놓친 순간의 마지막 위치 (odom xy) — 탐색 목표
+        self.reject_log_at = None
 
         # 관람 (prepare_tour → start_tour 액션). 액션 처리는 다른 스레드에서 기다리므로 제어 주기와 겹치는 상태 변경은 lock으로 막는다
         self.lock = threading.Lock()
@@ -193,15 +207,18 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
         self.face_until = self.loc_at = self.pose_sent = self.face_goal = self.face_log_at = self.loc_log_at = None
+        self.shutting_down = False                  # 노드가 꺼지는 중 (shutdown_tour) → 대기 루프·제어 멈춤
+        self.goals_running = 0                      # 실행 중인 액션 수 (꺼질 때 결과가 나갈 때까지 기다리려고)
+        self.goals_lock = threading.Lock()
         group = ReentrantCallbackGroup()
         self.undock_client = ActionClient(self, Undock, 'undock', callback_group=group)
         self.dock_client = ActionClient(self, Dock, 'dock', callback_group=group)
         self.home = None                            # 언독이 끝난 곳 (x, y, yaw) odom = 돌아올 곳. 도크는 그 뒤쪽
         self.final_state, self.ret_at, self.dock_future, self.dock_result = 'READY', None, None, None
         self.tour_at = self.end_at = None           # start_tour 시작 시각, 출구 종료 예정 시각
-        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
+        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.counted(self.run_prepare), callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
-        ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
+        ActionServer(self, StartTour, 'arti/start_tour', self.counted(self.run_tour), callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.set_state('READY')
         if self.p['auto_start']:
@@ -312,15 +329,73 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
+        p = self.p
+        # [A1] 지도 검사: 벽 안·지도 밖 좌표는 사람일 수 없음 (인식 모듈이 벽 점을 사람으로 고른 경우)
+        if msg.header.frame_id == p['map_frame'] and self.in_wall(msg.point.x, msg.point.y):
+            return self.reject_person('wall', f'벽 안·지도 밖 ({msg.point.x:.2f}, {msg.point.y:.2f})')
         q = apply(f, np.array([[msg.point.x, msg.point.y]]))[0]
         now = self.now()
-        if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > self.p['register_gap']):
+        # [A2] 다시 잡을 때 거리 검사: 놓친 뒤(또는 탐색 중) 들어온 좌표가 마지막으로 확인한 위치(anchor)에서
+        # 사람이 그동안 걸어갈 수 있는 거리(reacquire_radius + reacquire_speed × 지난 시간, 최대 reacquire_max)보다 멀면
+        # 다른 사람·오인식으로 보고 버린다 (2026-11-20: 1초 만에 2~3 m 튄 좌표로 엉뚱한 곳을 따라감)
+        reacquire = self.kf.x is not None and (now - self.seen >= p['lost_timeout'] or self.state in ('SEARCH', 'WAIT'))
+        if reacquire and self.anchor is not None:
+            dist = float(np.linalg.norm(q - self.anchor[0]))
+            allowed = min(p['reacquire_radius'] + p['reacquire_speed'] * (now - self.anchor[1]), p['reacquire_max'])
+            if dist > allowed:
+                return self.reject_person('far', f'마지막 위치에서 {dist:.1f} m (허용 {allowed:.1f} m)')
+        if self.run_since is None or now - self.seen > p['register_gap']:
+            self.run_since = now                    # 끊김 없이 보이기 시작한 시각 (탐색 중 확인용, A4)
+        if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > p['register_gap']):
             self.seen_since = now                   # 등록 확인 시작 (처음이거나 끊겼다 다시 보임)
-        if self.kf.x is None or now - self.seen >= self.p['lost_timeout']:
+        if self.kf.x is None or now - self.seen >= p['lost_timeout']:
             self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
         else:
             self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
         self.seen = now
+        if self.state in ('FOLLOW', 'REGISTERED'):  # 확인된 관람객 위치 = 다음에 다시 잡을 때의 기준
+            self.anchor = (self.kf.x[:2].copy(), now)
+
+    def reject_person(self, key, why):
+        """관람객 좌표를 버릴 때: 1 s에 한 번 WARN (diag면 종류별로 셈).
+        받음: key ('wall' / 'far'), why 로그 문장"""
+        if self.diag is not None:
+            self.diag.add('person_reject:' + key)
+        now = self.now()
+        if self.reject_log_at is None or now - self.reject_log_at >= 1.0:
+            self.reject_log_at = now
+            self.get_logger().warn(f'관람객 좌표 버림: {why}, 상태 {self.state}')
+
+    def load_map(self):
+        """지도(map_file, 비면 $ARTI_MAP)에서 '사람이 있을 수 없는 칸'(벽 + 모르는 곳) 표를 만든다 (A1).
+        벽을 person_wall_margin만큼 넓혀서 본다: 오인식 좌표는 라이다가 벽에 맞은 점(벽 표면)에 찍히고,
+        AMCL 오차로 벽 바로 옆 빈칸에 떨어지기도 한다. 사람은 몸 두께 때문에 라이다 점이 벽에서 15 cm 이상 떨어짐.
+        돌려줌: (bad (H, W) bool, 해상도, 원점 (x, y)), 못 읽으면 None (검사 안 함)"""
+        path = self.p['map_file'] or os.environ.get('ARTI_MAP', '')
+        try:
+            with open(path, encoding='utf-8') as f:
+                m = yaml.safe_load(f)
+            img = cv2.imread(os.path.join(os.path.dirname(path), m['image']), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise OSError(f'지도 그림 {m["image"]}을 못 읽음')
+            occ = img / 255.0 if m.get('negate', 0) else (255 - img.astype(np.float32)) / 255.0
+            bad = (occ > m.get('free_thresh', 0.196)).astype(np.uint8)    # 빈칸이 아닌 곳 = 벽 + 모름
+            k = int(round(self.p['person_wall_margin'] / m['resolution']))
+            if k > 0:                                # 지도 벽은 두께 2칸(10 cm) 선 → 깎으면 사라지므로 넓히기만 한다
+                bad = cv2.dilate(bad, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        except (OSError, KeyError, TypeError, yaml.YAMLError) as e:
+            self.get_logger().warn(f'지도를 못 읽음 ({path or "map_file·$ARTI_MAP 비어 있음"}: {e!r}) → 관람객 좌표 벽 검사 안 함')
+            return None
+        self.get_logger().info(f'관람객 좌표 벽 검사: {path} ({img.shape[1]}×{img.shape[0]}, 벽 {self.p["person_wall_margin"]} m 넓혀 봄)')
+        return bad.astype(bool), float(m['resolution']), (float(m['origin'][0]), float(m['origin'][1]))
+
+    def in_wall(self, x, y):
+        """map 좌표 (x, y)가 벽 안·지도 밖이면 True (지도가 없으면 늘 False)."""
+        if self.map_bad is None:
+            return False
+        bad, res, (ox, oy) = self.map_bad
+        c, r = int((x - ox) / res), bad.shape[0] - 1 - int((y - oy) / res)
+        return not (0 <= r < bad.shape[0] and 0 <= c < bad.shape[1]) or bool(bad[r, c])
 
     def person(self):
         """칼만 필터에서 관람객 위치·속도를 꺼낸다. 속도는 max_person_speed(1.5 m/s)로 자름 (튀는 값 막기).
@@ -352,7 +427,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         """[구독] scan (LaserScan) — 라이다가 올 때마다.
         거리 → (x, y) 점, inf·nan·로봇 몸(0.2 m 안)·범위 밖은 버림 → 그 시각 TF로 odom 좌표.
         받음: msg.ranges, angle_min, angle_increment, range_max, header
-        바뀜: scan_pts (장애물 점 N×2), scan_time (받은 시각 → step이 라이다 끊김 확인)"""
+        바뀜: scan_rx (TF와 상관없이 받은 시각), scan_pts (장애물 점 N×2), scan_time (쓴 시각 → step이 라이다 끊김 확인)"""
+        self.scan_rx = self.now()
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
@@ -365,6 +441,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:
         lock을 걸어 run_tour(다른 스레드)와 동시에 상태를 바꾸지 않게 하고, (diag) 걸린 시간을 기록한다."""
+        if self.shutting_down:                      # 꺼지는 중: 정지 명령 뒤에 다른 명령을 보내지 않음
+            return
         t0 = time.monotonic()
         self.dbg = {}
         with self.lock:
@@ -395,11 +473,15 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 안전: 내 위치(TF)를 모르거나 라이다가 0.5 s 넘게 끊기면 장애물을 못 보는 상태 → 계산하지 말고 바로 정지
         if pose is None or now - self.scan_time > p['scan_timeout']: # 센서 확인
             self.dbg['reason'] = 'no_pose' if pose is None else 'scan_timeout' # 0.5초 넘게 안바뀌었으면 라이다 끊긴 것
+            self.warn_sensor(now, self.dbg['reason'])   # diag와 상관없이 로그 (→ /rosout → bag)
             return self.drive(0.0, 0.0)
+        if self.sensor_stop_at is not None:         # 센서가 돌아옴 → 한 번 알림
+            self.get_logger().info(f'센서 정상 → 다시 진행 ({now - self.sensor_stop_at:.1f} s 동안 정지했음, 상태 {self.state})')
+            self.sensor_stop_at = self.sensor_log_at = None
         here = np.array(pose[:2])
 
         # [3-1] 관람이 끝나 돌아가는 중인가? (RETURN·DOCK_FACE·DOCK) → 예: go_home() (start_tour.py) / 아니오: 아래로
-        # 언독 지점(odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
+        # 언독 지점(지도 좌표 → AMCL로 odom, 없으면 언독 때 odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
         if self.state in RETURNING:
             return self.go_home(now, pose)
         # [3-2] 관람객이 출구에 들어갔나? (end_at) → 예: end_guide_wait 동안 서서 관람객 쪽을 봄 → 관람 끝(completed) → RETURN
@@ -428,7 +510,12 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 따라가기: 사람 위치를 알고, 마지막으로 본 지 3 s 안이면 FOLLOW.
         # 3 s는 카메라가 잠깐 놓쳐도(가려짐·흔들림) 바로 탐색으로 넘어가지 않게 둔 여유. 그동안은 칼만 예측으로 따라감
         if self.kf.x is not None and now - self.seen < p['lost_timeout']:
-            return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
+            # [6-1] 탐색 중(SEARCH·WAIT)에 다시 보이면 search_confirm_time 동안 끊김 없이 보여야 FOLLOW (A4).
+            # 순간 오인식에 끌려가지 않고, 확인되는 동안은 마지막 위치 탐색을 계속한다
+            if self.state not in ('SEARCH', 'WAIT') or now - self.run_since >= p['search_confirm_time']:
+                return self.follow(now, pose, here)      # [7]~[9] → start_tour.py follow()
+            self.dbg['reason'] = 'reacquire_confirm'
+            return self.search(now, pose, here)
         self.holding = False
         # [10] 사람 정보가 아예 없나? (kf.x == None) → 예: 정지 / 아니오: 아래로(탐색)
         # 사람을 한 번도 못 봤으면 탐색할 기준(마지막 위치)이 없다 → 그냥 정지
@@ -439,7 +526,65 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # [11]~[14] 사람을 놓침 (3 s 넘게 좌표가 안 옴) → start_tour.py search(): 마지막 위치로 이동 → 회전 탐색 → 대기 → LOST
         return self.search(now, pose, here)
 
+    def warn_sensor(self, now, reason):
+        """step [3]에서 센서 때문에 정지할 때 1 s마다 WARN (diag가 꺼져 있어도). 로그는 /rosout으로 나가 bag에도 남는다.
+        scan_timeout은 라이다가 아예 안 오는지(scan_rx), 와도 TF 변환을 못 해 버리는지 구분해서 적는다.
+        받음: now, reason ('no_pose' / 'scan_timeout'), (scan_rx, scan_time, sensor_log_at)
+        바뀜: sensor_stop_at (정지 시작 시각), sensor_log_at (마지막 로그 시각)"""
+        if self.sensor_stop_at is None:
+            self.sensor_stop_at = now
+        if self.sensor_log_at is not None and now - self.sensor_log_at < 1.0:
+            return
+        self.sensor_log_at = now
+        ns = self.get_namespace().rstrip('/')
+        def ago(t):
+            return f'{now - t:.1f} s 전' if t > 0 else '한 번도 없음'
+        if reason == 'no_pose':
+            text = (f'로봇 위치 TF({self.p["odom_frame"]}→{self.p["base_frame"]}) 없음 → 정지 '
+                    f'(확인: ros2 topic hz {ns}/odom)')
+        elif now - self.scan_rx > self.p['scan_timeout']:
+            text = f'라이다 scan 안 옴 (마지막 수신 {ago(self.scan_rx)}) → 정지 (확인: ros2 topic info {ns}/scan)'
+        else:
+            text = (f'라이다 scan은 오지만 TF 변환 실패로 버림 (마지막 사용 {ago(self.scan_time)}) → 정지 '
+                    f'(scan frame → {self.p["odom_frame"]} TF 확인)')
+        self.get_logger().warn(f'{text}, 상태 {self.state}, {now - self.sensor_stop_at:.1f} s째')
+
     # ---------- 액션 (호출·등록 = prepare_tour.py, 관람 = start_tour.py) ----------
+
+    def counted(self, run):
+        """액션 실행 함수(run_prepare·run_tour)를 감싸 실행 중인 개수를 센다 → main이 꺼질 때 결과가 나갈 때까지 기다림."""
+        def wrapped(goal):
+            with self.goals_lock:
+                self.goals_running += 1
+            try:
+                return run(goal)
+            finally:
+                with self.goals_lock:
+                    self.goals_running -= 1
+        return wrapped
+
+    def shutdown_tour(self):
+        """노드가 꺼질 때(Ctrl+C·SIGTERM·코드 에러) 한 번: 정지 → 진행 중 관람을 node_shutdown으로 끝냄.
+        active = False가 되면 run_prepare·run_tour 루프가 result(success=false, message=node_shutdown)를 보낸다
+        (main이 그동안 executor를 더 돌려 키오스크까지 전달). 도크 복귀는 하지 않는다 (노드가 꺼지므로).
+        내보냄: cmd_vel 0, (관람 중이었으면) arti/tour_end, follow/state READY"""
+        self.shutting_down = True
+        locked = self.lock.acquire(timeout=1.0)     # step이 멈춰 있어도 끝까지 정리
+        try:
+            was = self.state if self.active else None
+            if self.active:
+                self.end_reason, self.end_at = 'node_shutdown', None
+                self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
+                self.tour_end_pub.publish(Empty())
+            self.active = False
+            self.drive(0.0, 0.0)
+            self.set_state('READY')
+        finally:
+            if locked:
+                self.lock.release()
+        if was is not None:
+            self.get_logger().warn(f'노드 종료 → 진행 중 관람 끝 (node_shutdown, 상태 {was}). '
+                                   '로봇은 그 자리에 정지, 도크 복귀 안 함')
 
     def on_goal(self, _goal):
         """[액션] prepare_tour·start_tour goal이 오면 일단 다 받는다.
@@ -569,15 +714,29 @@ def main():
     """프로그램 시작점: 노드를 만들고 여러 스레드(MultiThreadedExecutor)로 돌린다
     (run_tour가 관람 내내 기다리는 동안에도 step·구독이 돌게). 끝날 때 정지 명령을 보낸다."""
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    def on_sigterm(*_):                             # launch는 SIGINT 5 s 뒤 SIGTERM → Ctrl+C와 똑같이 정리
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_sigterm)
     node = VisitorFollower()
     executor = MultiThreadedExecutor()              # 액션(관람)이 기다리는 동안에도 제어 주기·구독이 돌게
     executor.add_node(node)
     try:
         executor.spin()
     except KeyboardInterrupt:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
-    finally:
-        node.active = False                         # 준비·관람 액션 대기 루프 끝냄
+        pass
+    finally:                                        # Ctrl+C·SIGTERM·코드 에러 모두 여기서 정리 (kill -9·전원 차단은 불가)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)    # 두 번째 Ctrl+C·SIGTERM이 와도 정리는 끝까지
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        node.shutdown_tour()                        # 정지, 관람 끝(node_shutdown), arti/tour_end
+        end = time.monotonic() + 3.0                # 액션 result가 키오스크까지 나가도록 조금 더 돌림
+        while node.goals_running > 0 and time.monotonic() < end:
+            executor.spin_once(timeout_sec=0.1)
+        if node.goals_running > 0:
+            node.get_logger().error(f'액션 {node.goals_running}개의 result를 3 s 안에 못 보냄 '
+                                    '(키오스크에서 그 관람을 취소해야 할 수 있음)')
+        else:
+            node.get_logger().info('종료 정리 끝 (정지, 액션 result 보냄)')
         executor.shutdown(timeout_sec=1.0)
         node.drive(0.0, 0.0)
         node.destroy_node()
