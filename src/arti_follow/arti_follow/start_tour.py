@@ -26,7 +26,7 @@ class TourMixin:
         """[액션 실행, 관람 내내] start_tour goal 하나: prepare_tour로 등록된 관람객을 끝까지 따라간다 (goal None = auto_start).
         FOLLOW → 0.2 s마다 feedback (취소 확인) → active가 내려가면 result.
         검사는 하지 않는다: 키오스크가 [관람 시작]을 prepare_tour 성공 뒤 한 번만, 120 s 안에만 켠다
-        (로봇 ready_timeout 130 s가 키오스크 120 s보다 길어서 로봇이 먼저 끝나는 일 없음). artwork_ids는 보지 않음 (자유관람).
+        (로봇 ready_timeout 130 s가 키오스크 120 s보다 길어서 로봇이 먼저 끝나는 일 없음). artwork_ids는 보지 않음 (자유 관람).
         움직임은 step()이 하고, 여기서는 시작·끝과 키오스크 보고만 한다.
         받음: goal (is_cancel_requested)
         돌려줌: StartTour.Result(success = 취소·출구 완료로 끝남, message = 끝난 이유: completed / canceled / lost ...)"""
@@ -184,7 +184,8 @@ class TourMixin:
         self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
         self.tour_end_pub.publish(Empty())
         self.get_logger().info(f'관람 끝 ({reason}) → 관람객 데이터 삭제 (arti/tour_end)')
-        if self.p['return_to_dock'] and self.home is not None and self.docked is not True:
+        if self.p['return_to_dock'] and self.home is not None and self.docked is not True \
+                and not self.shutting_down:         # 노드가 꺼지는 중이면 돌아갈 수 없음 → 바로 끝
             # 언독했으면 돌아가 도킹한 뒤에 끝 (active는 그때 내림 → 액션 result도 도킹 뒤)
             self.final_state, self.ret_at, self.dock_future, self.dock_result = state, None, None, None
             self.get_logger().info('언독 지점으로 돌아가 도킹 (RETURN)')

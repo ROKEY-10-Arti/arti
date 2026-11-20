@@ -14,7 +14,7 @@
       arti/prepare_tour (arti_interfaces/PrepareTour, 액션 서버)   호출·관람객 등록 (undock → 위치 잡기 → 키오스크 보기 → 등록)
                                   feedback: state(UNDOCKING/MOVING/ARRIVED/REGISTERING/REGISTERED)
                                   result: success(등록 완료), message(실패 이유)
-      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
+      arti/start_tour (arti_interfaces/StartTour, 액션 서버)   자유 관람 시작 (artwork_ids = []만, prepare_tour 성공 뒤에만).
                                   취소하면 관람 끝. feedback: state(FOLLOW/EXPLAINING/ARTWORK_COMPLETED), artwork_id
                                   result: success, message(끝난 이유)   (명세: docs/common/ros2_interfaces.md)
       artwork_zone/explaining (Int32)    설명 중인 작품 번호 (0 = 없음) → feedback EXPLAINING + artwork_id
@@ -197,15 +197,18 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.reported = 0                           # visited 중 ARTWORK_COMPLETED로 보고한 수
         self.seen_since = None                      # 등록 확인: 끊김 없이 보이기 시작한 시각
         self.face_until = self.loc_at = self.pose_sent = self.face_goal = self.face_log_at = self.loc_log_at = None
+        self.shutting_down = False                  # 노드가 꺼지는 중 (shutdown_tour) → 대기 루프·제어 멈춤
+        self.goals_running = 0                      # 실행 중인 액션 수 (꺼질 때 결과가 나갈 때까지 기다리려고)
+        self.goals_lock = threading.Lock()
         group = ReentrantCallbackGroup()
         self.undock_client = ActionClient(self, Undock, 'undock', callback_group=group)
         self.dock_client = ActionClient(self, Dock, 'dock', callback_group=group)
         self.home = None                            # 언독이 끝난 곳 (x, y, yaw) odom = 돌아올 곳. 도크는 그 뒤쪽
         self.final_state, self.ret_at, self.dock_future, self.dock_result = 'READY', None, None, None
         self.tour_at = self.end_at = None           # start_tour 시작 시각, 출구 종료 예정 시각
-        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.run_prepare, callback_group=group,
+        ActionServer(self, PrepareTour, 'arti/prepare_tour', self.counted(self.run_prepare), callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
-        ActionServer(self, StartTour, 'arti/start_tour', self.run_tour, callback_group=group,
+        ActionServer(self, StartTour, 'arti/start_tour', self.counted(self.run_tour), callback_group=group,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.set_state('READY')
         if self.p['auto_start']:
@@ -370,6 +373,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
     def control(self):
         """[타이머] control_period(0.1 s)마다. step()을 감싸는 껍데기:
         lock을 걸어 run_tour(다른 스레드)와 동시에 상태를 바꾸지 않게 하고, (diag) 걸린 시간을 기록한다."""
+        if self.shutting_down:                      # 꺼지는 중: 정지 명령 뒤에 다른 명령을 보내지 않음
+            return
         t0 = time.monotonic()
         self.dbg = {}
         with self.lock:
@@ -472,6 +477,41 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.get_logger().warn(f'{text}, 상태 {self.state}, {now - self.sensor_stop_at:.1f} s째')
 
     # ---------- 액션 (호출·등록 = prepare_tour.py, 관람 = start_tour.py) ----------
+
+    def counted(self, run):
+        """액션 실행 함수(run_prepare·run_tour)를 감싸 실행 중인 개수를 센다 → main이 꺼질 때 결과가 나갈 때까지 기다림."""
+        def wrapped(goal):
+            with self.goals_lock:
+                self.goals_running += 1
+            try:
+                return run(goal)
+            finally:
+                with self.goals_lock:
+                    self.goals_running -= 1
+        return wrapped
+
+    def shutdown_tour(self):
+        """노드가 꺼질 때(Ctrl+C·SIGTERM·코드 에러) 한 번: 정지 → 진행 중 관람을 node_shutdown으로 끝냄.
+        active = False가 되면 run_prepare·run_tour 루프가 result(success=false, message=node_shutdown)를 보낸다
+        (main이 그동안 executor를 더 돌려 키오스크까지 전달). 도크 복귀는 하지 않는다 (노드가 꺼지므로).
+        내보냄: cmd_vel 0, (관람 중이었으면) arti/tour_end, follow/state READY"""
+        self.shutting_down = True
+        locked = self.lock.acquire(timeout=1.0)     # step이 멈춰 있어도 끝까지 정리
+        try:
+            was = self.state if self.active else None
+            if self.active:
+                self.end_reason, self.end_at = 'node_shutdown', None
+                self.kf.x, self.kf.P, self.seen, self.holding = None, None, -1e9, False
+                self.tour_end_pub.publish(Empty())
+            self.active = False
+            self.drive(0.0, 0.0)
+            self.set_state('READY')
+        finally:
+            if locked:
+                self.lock.release()
+        if was is not None:
+            self.get_logger().warn(f'노드 종료 → 진행 중 관람 끝 (node_shutdown, 상태 {was}). '
+                                   '로봇은 그 자리에 정지, 도크 복귀 안 함')
 
     def on_goal(self, _goal):
         """[액션] prepare_tour·start_tour goal이 오면 일단 다 받는다.
@@ -601,15 +641,29 @@ def main():
     """프로그램 시작점: 노드를 만들고 여러 스레드(MultiThreadedExecutor)로 돌린다
     (run_tour가 관람 내내 기다리는 동안에도 step·구독이 돌게). 끝날 때 정지 명령을 보낸다."""
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    def on_sigterm(*_):                             # launch는 SIGINT 5 s 뒤 SIGTERM → Ctrl+C와 똑같이 정리
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_sigterm)
     node = VisitorFollower()
     executor = MultiThreadedExecutor()              # 액션(관람)이 기다리는 동안에도 제어 주기·구독이 돌게
     executor.add_node(node)
     try:
         executor.spin()
     except KeyboardInterrupt:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)   # Ctrl+C가 두 번 와도 정지 명령은 끝까지 보냄
-    finally:
-        node.active = False                         # 준비·관람 액션 대기 루프 끝냄
+        pass
+    finally:                                        # Ctrl+C·SIGTERM·코드 에러 모두 여기서 정리 (kill -9·전원 차단은 불가)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)    # 두 번째 Ctrl+C·SIGTERM이 와도 정리는 끝까지
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        node.shutdown_tour()                        # 정지, 관람 끝(node_shutdown), arti/tour_end
+        end = time.monotonic() + 3.0                # 액션 result가 키오스크까지 나가도록 조금 더 돌림
+        while node.goals_running > 0 and time.monotonic() < end:
+            executor.spin_once(timeout_sec=0.1)
+        if node.goals_running > 0:
+            node.get_logger().error(f'액션 {node.goals_running}개의 result를 3 s 안에 못 보냄 '
+                                    '(키오스크에서 그 관람을 취소해야 할 수 있음)')
+        else:
+            node.get_logger().info('종료 정리 끝 (정지, 액션 result 보냄)')
         executor.shutdown(timeout_sec=1.0)
         node.drive(0.0, 0.0)
         node.destroy_node()
