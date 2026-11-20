@@ -51,10 +51,10 @@ class Preparation:
             self.phase, self.message, self.progress = phase, message, progress
             return True
 
-
+# 디스커버리 서버 관련 타임아웃 시간 조정
 class RosPreparationTransport:
     """All ROS futures run on one executor. Workers only wait; they never spin its node."""
-    def __init__(self, description, record_event, discovery_timeout=8, action_timeout=60, server_loss_timeout=3):
+    def __init__(self, description, record_event, discovery_timeout=60, action_timeout=60, server_loss_timeout=3):
         self.description = description
         self.record_event = record_event
         self.discovery_timeout = discovery_timeout
