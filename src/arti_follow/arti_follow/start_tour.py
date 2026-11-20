@@ -108,7 +108,7 @@ class TourMixin:
 
     def search(self, now, pose, here):
         """[SEARCH → WAIT → LOST] step [10] 다음: 관람객을 놓침 (lost_timeout 넘게 좌표가 안 옴, kf.x는 있음).
-        마지막 위치로 이동(search_move_time 상한) → 거기서 odom 기준 한 바퀴(360°) 회전 → wait_time 동안 정지 대기
+        마지막 위치로 이동(도착·막힘·search_move_time 상한까지) → 거기서 odom 기준 한 바퀴(360°) 회전 → wait_time 동안 정지 대기
         → LOST (관람 끝). 좌표가 다시 오면 step [6]이 FOLLOW로 돌린다.
         받음: now, pose, here, (kf.x, lost_at, spin_at, spun, spin_yaw, wait_at, turn)
         내보냄: set_state(SEARCH/WAIT), drive(...), 끝나면 end_tour(LOST, lost)"""
@@ -119,17 +119,37 @@ class TourMixin:
         # 방금 놓친 순간(직전까지 FOLLOW)에만 한 번: 놓친 시각과 사람이 가던 쪽(왼/오른)을 기억 → 나중에 그쪽으로 돈다
         if self.state == 'FOLLOW':
             self.lost_at, self.spin_at, self.wait_at = now, None, None
+            self.best_dist, self.progress_at = None, now   # 이동 진척 (가장 짧았던 경로 거리, 그때 시각)
+            self.path_dist = None                   # 이전 dwa(추종) 값은 목표가 달라서 버림
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
+            self.get_logger().info(f'관람객 놓침 → 마지막 위치까지 이동 ({float(np.linalg.norm(last - here)):.2f} m)')
         # [12] 아직 회전 탐색 전인가? (spin_at == None) → 예: 마지막 위치로 이동 또는 회전 준비 / 아니오: 아래로
-        # 1) 마지막으로 본 곳까지 먼저 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다).
-        #    search_move_time(5 s) 상한: 사람이 그 자리에 서 있으면 영원히 도착하지 못하므로
+        # 1) 마지막으로 본 곳(last, 관람객 위치)까지 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다).
+        #    끝나는 조건 셋 중 하나: 도착(직선거리 search_arrive 안) / 막힘(search_stall_time 동안 경로 거리가
+        #    search_stall_dist만큼도 안 줄어듦 — 길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음) / 안전 상한(search_move_time)
+        #    진척은 직선거리가 아니라 경로 거리(dwa가 구한 '장애물을 돌아가는 거리')로 잰다:
+        #    벽을 돌아가느라 직선거리가 잠깐 늘어도 경로 거리는 줄어드므로 막힘으로 잘못 보지 않는다
         if self.spin_at is None:
-            cap = p['search_move_time']             # 0이면 시간 제한 없음
-            if np.linalg.norm(last - here) > p['search_arrive'] and (cap <= 0 or now - self.lost_at < cap):
+            dist = float(np.linalg.norm(last - here))
+            path = self.path_dist                   # 지난 주기 dwa 값. None = 못 구함(전부 막힘·먼저 회전 중)
+            reachable = path is not None and path < 49.0   # 약 50 = 길이 안 보임 → 진척 아님 (3 s 뒤 막힘)
+            if reachable and (self.best_dist is None or path < self.best_dist - p['search_stall_dist']):
+                self.best_dist, self.progress_at = path, now      # 경로 거리가 줄어듦 = 진척
+            elif abs(wrap(math.atan2(last[1] - here[1], last[0] - here[0]) - pose[2])) > p['turn_first_angle']:
+                self.progress_at = now              # 목표가 뒤쪽이라 먼저 도는 중 (거리는 안 줄어도 진척)
+            cap = p['search_move_time']             # 0이면 시간 상한 없음 (막힘 판정은 그대로)
+            if dist <= p['search_arrive']:
+                why = '도착'
+            elif now - self.progress_at > p['search_stall_time']:
+                why = f'{p["search_stall_time"]:.0f} s 동안 경로 거리 안 줄어듦 (막힘)'
+            elif cap > 0 and now - self.lost_at >= cap:
+                why = f'{cap:.0f} s 상한'
+            else:
                 self.set_state('SEARCH')
                 self.dbg['reason'] = 'search_move'
                 return self.go_to(pose, last)       # 목표가 뒤쪽이면 먼저 돌고, 아니면 DWA
+            self.get_logger().info(f'마지막 위치 이동 끝: {why}, 남은 {dist:.2f} m, {now - self.lost_at:.1f} s → 회전 탐색')
             self.spin_at, self.spun, self.spin_yaw = now, 0.0, pose[2]   # 도착 → 여기서 한 바퀴
             self.spin_speed = float(np.clip(2 * math.pi / max(p['search_time'], 1e-3),
                                             p['search_spin'], p['max_angular']))

@@ -49,7 +49,7 @@
               ready_timeout 안에 start_tour가 안 오면 관람 끝 (not_started)
   ── 여기부터 = start_tour ──
   FOLLOW  좌표가 들어옴 → 80 cm 거리 유지하며 이동
-  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지(search_move_time 상한) 이동
+  SEARCH  lost_timeout 동안 안 들어옴 → 최종 좌표에 도착할 때까지 이동 (막히면 search_stall_time 뒤, 상한 search_move_time)
           → 거기서 2π/search_time 일정 속도로 odom 기준 한 바퀴(360°) 회전 탐색
   WAIT    회전 탐색 끝 → 정지 대기 (상태 노드가 '로봇 쪽으로 와 주세요' 안내)
   LOST    wait_time 지남 → 정지, 액션 끝 (reason lost). 다시 시작하려면 액션을 새로 보냄
@@ -149,7 +149,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.kf = PersonKF(self.p['kf_accel_std'], self.p['kf_meas_std'], self.p['kf_gate'], self.p['kf_max_rejects'])
         self.lost_at, self.turn, self.spin_at, self.spin_speed, self.holding = 0.0, 1.0, None, 0.0, False
         self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
+        self.best_dist, self.progress_at = None, 0.0                # SEARCH 이동: 가장 짧았던 경로 거리, 그때 시각
+        self.path_dist = None                                       # dwa가 구한 로봇 → 목표 경로 거리 [m]
         self.scan_pts, self.scan_time = np.zeros((0, 2)), -1e9
+        self.scan_rx = -1e9                         # scan을 받은 시각 (TF 변환 실패로 버려도)
+        self.sensor_stop_at = self.sensor_log_at = None   # 센서 때문에 정지 시작한 시각, 마지막 경고 로그 시각
         self.state, self.enabled, self.cmd = None, self.p['start_enabled'], (0.0, 0.0)
         self.cmd_hist = collections.deque(maxlen=60)  # 최근 cmd_vel (시각, v, w) 약 6 s → odom 지연 보정 (predict_yaw)
         self.dbg = {}                               # 이번 주기의 판단 과정 (diag)
@@ -352,7 +356,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         """[구독] scan (LaserScan) — 라이다가 올 때마다.
         거리 → (x, y) 점, inf·nan·로봇 몸(0.2 m 안)·범위 밖은 버림 → 그 시각 TF로 odom 좌표.
         받음: msg.ranges, angle_min, angle_increment, range_max, header
-        바뀜: scan_pts (장애물 점 N×2), scan_time (받은 시각 → step이 라이다 끊김 확인)"""
+        바뀜: scan_rx (TF와 상관없이 받은 시각), scan_pts (장애물 점 N×2), scan_time (쓴 시각 → step이 라이다 끊김 확인)"""
+        self.scan_rx = self.now()
         f = self.lookup(self.p['odom_frame'], msg.header.frame_id, Time.from_msg(msg.header.stamp))
         if f is None:
             return
@@ -395,7 +400,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 안전: 내 위치(TF)를 모르거나 라이다가 0.5 s 넘게 끊기면 장애물을 못 보는 상태 → 계산하지 말고 바로 정지
         if pose is None or now - self.scan_time > p['scan_timeout']: # 센서 확인
             self.dbg['reason'] = 'no_pose' if pose is None else 'scan_timeout' # 0.5초 넘게 안바뀌었으면 라이다 끊긴 것
+            self.warn_sensor(now, self.dbg['reason'])   # diag와 상관없이 로그 (→ /rosout → bag)
             return self.drive(0.0, 0.0)
+        if self.sensor_stop_at is not None:         # 센서가 돌아옴 → 한 번 알림
+            self.get_logger().info(f'센서 정상 → 다시 진행 ({now - self.sensor_stop_at:.1f} s 동안 정지했음, 상태 {self.state})')
+            self.sensor_stop_at = self.sensor_log_at = None
         here = np.array(pose[:2])
 
         # [3-1] 관람이 끝나 돌아가는 중인가? (RETURN·DOCK_FACE·DOCK) → 예: go_home() (start_tour.py) / 아니오: 아래로
@@ -438,6 +447,29 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
 
         # [11]~[14] 사람을 놓침 (3 s 넘게 좌표가 안 옴) → start_tour.py search(): 마지막 위치로 이동 → 회전 탐색 → 대기 → LOST
         return self.search(now, pose, here)
+
+    def warn_sensor(self, now, reason):
+        """step [3]에서 센서 때문에 정지할 때 1 s마다 WARN (diag가 꺼져 있어도). 로그는 /rosout으로 나가 bag에도 남는다.
+        scan_timeout은 라이다가 아예 안 오는지(scan_rx), 와도 TF 변환을 못 해 버리는지 구분해서 적는다.
+        받음: now, reason ('no_pose' / 'scan_timeout'), (scan_rx, scan_time, sensor_log_at)
+        바뀜: sensor_stop_at (정지 시작 시각), sensor_log_at (마지막 로그 시각)"""
+        if self.sensor_stop_at is None:
+            self.sensor_stop_at = now
+        if self.sensor_log_at is not None and now - self.sensor_log_at < 1.0:
+            return
+        self.sensor_log_at = now
+        ns = self.get_namespace().rstrip('/')
+        def ago(t):
+            return f'{now - t:.1f} s 전' if t > 0 else '한 번도 없음'
+        if reason == 'no_pose':
+            text = (f'로봇 위치 TF({self.p["odom_frame"]}→{self.p["base_frame"]}) 없음 → 정지 '
+                    f'(확인: ros2 topic hz {ns}/odom)')
+        elif now - self.scan_rx > self.p['scan_timeout']:
+            text = f'라이다 scan 안 옴 (마지막 수신 {ago(self.scan_rx)}) → 정지 (확인: ros2 topic info {ns}/scan)'
+        else:
+            text = (f'라이다 scan은 오지만 TF 변환 실패로 버림 (마지막 사용 {ago(self.scan_time)}) → 정지 '
+                    f'(scan frame → {self.p["odom_frame"]} TF 확인)')
+        self.get_logger().warn(f'{text}, 상태 {self.state}, {now - self.sensor_stop_at:.1f} s째')
 
     # ---------- 액션 (호출·등록 = prepare_tour.py, 관람 = start_tour.py) ----------
 

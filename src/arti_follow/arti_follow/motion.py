@@ -122,6 +122,8 @@ class MotionMixin:
         # self.cmd  → v0 [m/s], w0 [rad/s]    지난번 보낸 명령 = 지금 속도로 가정  예) 0.20, 0.0
         p, (x0, y0, th0), (v0, w0) = self.p, pose, self.cmd
         dt = p['control_period']
+        self.path_dist = None                       # 이번에 못 구하면(전부 막힘) None
+
         # ── ① 후보 만들기 ──────────────────────────────────────────────────────────
         # 입력: v0, w0, 가속 한계(linear_accel 0.5, angular_accel 3.0), 최대 속도(0.3, 1.5)
         # 출력: vs (7,)  0.1 s 안에 낼 수 있는 전진 속도 7개   예) 0.15 ~ 0.25
@@ -171,6 +173,8 @@ class MotionMixin:
         t0 = time.monotonic()
         field, origin = self.field(np.asarray(goal, float), np.array([x0, y0]), obs)
         self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
+        # 지금 로봇 자리에서 goal까지 장애물을 돌아가는 거리 [m] → SEARCH 이동의 진척 판정 (못 가면 약 50)
+        self.path_dist = float(self.sample(field, origin, np.array([x0]), np.array([y0]))[0])
         # 출력: ex, ey, eth (105,)  후보별 1.5 s 뒤 도착 위치·방향 (② 결과의 마지막 열)
         ex, ey, eth = xs[:, -1], ys[:, -1], th[:, -1]
         # 출력: cost (105,)  후보별 벌점 =
