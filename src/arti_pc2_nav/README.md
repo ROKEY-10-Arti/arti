@@ -44,11 +44,12 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 
 | 상황 | prepare_tour result | start_tour result |
 |---|---|---|
-| 출발 전 점검 실패 (enable_motion, AMCL, 배터리, Nav2, explain_artwork 서버 …) | `false`, 이유 (움직이지 않음) | `false`, 이유 |
+| 출발 전 점검 실패 (enable_motion, 도크 상태, 배터리, odom, Dock 서버, explain_artwork 서버 …) | `false`, 이유 (움직이지 않음) | `false`, 이유 (Nav2·AMCL도 봄) |
+| 언독 후 60 s 안에 scan·AMCL·TF·Nav2가 준비 안 됨 | `false`, `not_ready: …` → **그 자리에서 Dock으로 재도킹** (Nav2 안 씀) | — |
 | prepare 없이 start_tour | — | `false`, `not_prepared` |
 | 키오스크에서 60 s 안에 등록 못 함 | `false`, `register_failed` (복귀 시작하자마자) | — |
 | 등록 뒤 130 s 동안 start_tour 없음 | (이미 success) → 도킹 복귀 | — |
-| PC3 Action Cancel | `canceled` (언독 중이면 언독 끝난 뒤 복귀) | 도킹 후 `canceled` |
+| PC3 Action Cancel | `canceled` (언독 중이면 언독 끝난 뒤, 키오스크로 출발 전이면 바로 재도킹) | 도킹 후 `canceled` |
 | Nav2 이동 실패 | `false`, `nav_failed` | 도킹 후 `false`, `nav_failed` |
 | 작품 설명 실패 (PC3 무응답 등) / 복귀 중 Nav2 실패 / 도킹 실패 | `false` (ERROR, 그 자리 정지) | `false` (ERROR, 그 자리 정지) |
 
@@ -83,22 +84,32 @@ robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_co
 
 ## 실행
 
-터미널마다 먼저 `source ~/arti/install/setup.bash`. localization → Nav2 → RViz를 먼저 띄운다 (`docs/common/navigation.md`).
+**로봇은 도크에 붙인 채로**, 터미널 하나에서 `source ~/arti/install/setup.bash` 후:
 
-Nav2는 이 패키지의 `config/nav2_real.yaml`로 띄운다. TurtleBot4 기본 `nav2.yaml`과 다른 값은
-두 가지다.
+```
+ros2 launch arti_pc2_nav a_course.launch.py enable_motion:=true
+```
+
+이것 하나로 localization → (5 s 뒤) Nav2 → 코스 노드·음성·인식·RViz 구역 마커가 다 뜬다.
+- **Nav2는 띄우기만 하고(autostart=false) 언독 뒤에 켠다.** 도킹 중엔 LiDAR가 꺼져 AMCL이 map→odom TF를 안 내서,
+  launch 때 켜면 global_costmap이 TF를 기다리다 `Aborting bringup`으로 멈춘다 (2026-11-20). 호출 → 언독 → initialpose →
+  scan·TF가 들어오면 코스 노드가 `lifecycle_manager_navigation/manage_nodes` STARTUP을 요청한다 (로그 `Nav2 STARTUP 완료`).
+  한 번 켜지면 다음 호출부터는 그대로 쓴다. 손으로 켜려면
+  `ros2 service call /robot4/lifecycle_manager_navigation/manage_nodes nav2_msgs/srv/ManageLifecycleNodes "{command: 0}"`.
+- **localization**: follow 팀과 같은 `arti_bringup localization.launch.py`. AMCL 시작 위치 = `arti_common/config/init_pose.yaml`의
+  `/robot4.undock` (언독 직후 위치, 2026-11-20 측정 (-0.12, 0.03, -179°)) → **RViz·2D Pose Estimate 불필요** (RViz는 보고 싶을 때만 따로).
+  로그에 `시작 위치 = init_pose.yaml undock`이 나오면 된다. 지도 기본 = 워크스페이스 `maps/gallery.yaml` (`map:=`로 바꿈).
+- **언독 직후 initialpose**: 도킹 중엔 LiDAR가 꺼져 AMCL이 위치를 못 잡으므로, 언독이 끝나면 코스 노드가 같은 `undock` 값을
+  `initialpose`로 한 번 보낸다 (= 2D Pose Estimate를 코드가 대신, follow `visitor_follower` LOCALIZE와 같음). 도크를 옮기면 다시 잰다.
+- **도킹 중에는 TurtleBot4 절전(power_saver)으로 LiDAR가 꺼져 있다.** 그래서 호출(prepare_tour) 때는 도크로 돌아올 수 있는지만 점검하고 언독한 뒤,
+  scan·AMCL·TF·Nav2가 3 s 연속 준비될 때까지 최대 60 s 기다렸다 키오스크로 출발한다. 안 되면(또는 그 사이 취소) **그 자리에서 Dock 액션으로 다시 도킹**한다.
+- localization·Nav2를 따로 띄웠다면 `nav:=false`.
+
+Nav2는 이 패키지의 `config/nav2_real.yaml`을 쓴다. TurtleBot4 기본 `nav2.yaml`과 다른 값:
 - `xy_goal_tolerance` 0.25 → **0.12** (작품 4 반원 r=0.43이 작아서 0.25면 반원 밖에 정지)
 - local·global costmap `transform_tolerance` 0.3 → **1.0** s (와이파이·서버 경유로 AMCL TF가 0.9 s 늦게 와서 Nav2가 출발하자마자 실패한 적 있음)
-
-
-```
-ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 \
-  params_file:=$HOME/arti/src/arti_pc2_nav/config/nav2_real.yaml
-```
-
-```
-ros2 launch arti_pc2_nav a_course.launch.py robot_namespace:=robot4 enable_motion:=true
-```
+- `lifecycle_manager_navigation` `bond_timeout` 10 → **30** s (서버 경유 discovery가 느려 Nav2 bringup이 중간에 멈춘 적 있음)
+- localization `lifecycle_manager_localization` `bond_timeout` 4 → **30** s: params 파일로 못 바꿔서(nav2_bringup이 안 넘김) `a_course.launch.py`가 `SetParameter`로 넣는다 (2026-11-20, 서버 경유 4 s 초과로 localization이 포기함)
 
 연결 확인 (움직이지 않음):
 
@@ -150,7 +161,9 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 |---|---|---|
 | `minimum_battery_percent` | 30.0 | 이 미만이면 출발 거부 [%] |
 | `undock_timeout` / `dock_timeout` | 25.0 / 90.0 | [s] |
-| `post_undock_sensor_timeout` / `post_undock_settle_time` | 30.0 / 3.0 | 언독 후 LiDAR·AMCL·TF 재수신 대기 [s] |
+| `activate_nav2` / `nav2_lifecycle_manager` / `nav2_startup_retry` | true / `lifecycle_manager_navigation` / 10.0 | 언독 후 scan·TF가 들어오면 Nav2 STARTUP 요청, 실패하면 이 간격 뒤 RESET → STARTUP [s] |
+| `set_initial_pose` / `start_pose_file` / `start_point` | true / `''`(= arti_common `init_pose.yaml`) / `undock` | 언독 직후 initialpose로 보낼 위치 |
+| `post_undock_sensor_timeout` / `post_undock_settle_time` | 60.0 / 3.0 | 언독 후 scan·AMCL·TF·Nav2 준비 대기 / 연속 유지 [s]. 넘으면 재도킹 |
 | `visitor_topic` | `target_person/point_map` | person_tracker 출력 |
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 끊김 없이 1 s 보이면 등록, 0.5 s 넘게 끊기면 다시 셈 [s] |
 | `register_timeout` | 60.0 | 키오스크 도착 후 등록 제한 [s] |
@@ -181,8 +194,8 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `arti_pc2_nav/a_course_node.py` | ROS 어댑터: 센서 → `tick()`, Event → Nav2·Dock·음성, 액션 서버 2개 |
 | `arti_pc2_nav/guided_tour_plan.py` | YAML 파서, `Pose2D`·`Semicircle`·`CoursePlan` |
 | `arti_pc2_nav/zone_geometry.py`, `zone_marker_node.py` | 반원 호 계산, RViz 구역 마커 |
-| `launch/a_course.launch.py` | 위 노드 전부 |
-| `config/nav2_real.yaml` | robot4 Nav2 설정 (기본값 + xy_goal_tolerance 0.12, costmap transform_tolerance 1.0) |
+| `launch/a_course.launch.py` | 위 노드 전부 + localization(arti_bringup, 시작 위치 = init_pose.yaml undock)·Nav2 (`nav:=true`) |
+| `config/nav2_real.yaml` | robot4 Nav2 설정 (기본값 + xy_goal_tolerance 0.12, costmap transform_tolerance 1.0, bond_timeout 30) |
 | `test/test_full_course.py` | 상태 기계 단위 테스트 |
 
 액션 실행 함수(`_prepare_execute`, `_tour_execute`)는 별도 스레드에서 기다리며 feedback/result만 보내고,

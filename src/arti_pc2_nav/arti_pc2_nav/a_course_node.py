@@ -30,8 +30,10 @@ import json
 import math
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
+from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.time import Time
 from action_msgs.msg import GoalStatus
@@ -48,7 +50,7 @@ from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Empty, String
 
 from .course_engine import TourMachine, Event
-from .guided_tour_plan import Pose2D, load_course_config
+from .guided_tour_plan import Pose2D, load_course_config, load_start_pose
 
 from arti_interfaces.action import ExplainArtwork   # 작품 해설 액션 (서버: arti_audio guide_audio_node)
 from arti_interfaces.action import PrepareTour      # 로봇 호출·등록 (클라이언트: PC3 키오스크)
@@ -92,12 +94,24 @@ class ACourseNode(Node):
         self.declare_parameter('require_tf', True)             # map->base_link TF 필수 여부
         # [실물 로봇] TurtleBot4 power_saver가 도킹 중 LiDAR를 꺼서
         # scan/AMCL/TF가 언도킹 전까지 오래된 값임. 언도킹 후 다시 들어올 때까지 대기.
-        self.declare_parameter('post_undock_sensor_timeout', 30.0)
+        self.declare_parameter('post_undock_sensor_timeout', 60.0)   # 언독 후 scan·AMCL·TF·Nav2 준비 대기 [s]. 넘으면 바로 재도킹
         self._await_sensors_since = None   # 언도킹 후 센서 대기 시작 시각 (None = 대기 아님)
         self._sensors_ok_since = None      # 센서가 모두 신선해진 시각 (안정화 시간 계산용)
         # LiDAR 재시작 후 Nav2가 새 map->odom TF를 쓰려면 몇 초 필요.
         # 너무 빨리 목표를 보내면 'Initial robot pose is not available'로 ABORT됨.
         self.declare_parameter('post_undock_settle_time', 3.0)
+        # [언독 직후 AMCL 초기 위치] follow 팀(visitor_follower LOCALIZE)과 같다: RViz 2D Pose Estimate 대신
+        # 언독이 끝나면 init_pose.yaml robots.<ns>.<start_point>를 initialpose로 한 번 보낸다.
+        # (로봇은 항상 도크에서 출발 → 언독 끝 위치는 매번 거의 같다. 도킹 중엔 LiDAR가 꺼져 AMCL이 위치를 못 잡음)
+        self.declare_parameter('set_initial_pose', True)
+        self.declare_parameter('start_pose_file', '')          # '' = arti_common/config/init_pose.yaml
+        self.declare_parameter('start_point', 'undock')        # init_pose.yaml에서 쓸 위치 이름
+        # [Nav2 활성화] Nav2 global_costmap은 map→base_link TF가 있어야 활성화된다. 도킹 중엔 LiDAR가 꺼져 AMCL이
+        # map→odom TF를 안 내서 launch 때 켜면 "Aborting bringup"으로 멈춘다 (2026-11-20).
+        # → launch는 Nav2를 autostart=false로 띄우고, 이 노드가 scan·TF가 신선해지면(= 언독 후) STARTUP을 요청한다.
+        self.declare_parameter('activate_nav2', True)
+        self.declare_parameter('nav2_lifecycle_manager', 'lifecycle_manager_navigation')
+        self.declare_parameter('nav2_startup_retry', 10.0)     # STARTUP 실패 후 다시 요청할 간격 [s]
         # [prepare_tour] 관람객 등록 — 값은 arti_follow visitor_follower와 같게
         self.declare_parameter('visitor_topic', 'target_person/point_map')  # person_tracker 출력 (namespace 안)
         self.declare_parameter('register_confirm_time', 1.0)   # 이만큼 끊김 없이 보이면 등록 [s]
@@ -128,6 +142,15 @@ class ACourseNode(Node):
         self._lifecycle_sent = {}          # name -> 요청 보낸 시각 (재요청 판단용)
         self._lifecycle = {name: [self.create_client(GetState, name+'/get_state'), None, False]
                            for name in ('amcl','map_server','bt_navigator','controller_server','planner_server')}
+        # Nav2 켜기: lifecycle_manager_navigation/manage_nodes (STARTUP, 실패하면 다음엔 RESET 후 STARTUP)
+        from nav2_msgs.srv import ManageLifecycleNodes
+        self._manage_type = ManageLifecycleNodes
+        self._nav2_manage = self.create_client(
+            ManageLifecycleNodes, self.get_parameter('nav2_lifecycle_manager').value + '/manage_nodes')
+        self._nav2_future = None           # 진행 중인 manage_nodes 요청
+        self._nav2_command = None          # 그 요청의 command
+        self._nav2_tried_at = -1e9         # 마지막 STARTUP 요청 시각
+        self._nav2_failed = False          # 지난 STARTUP 실패 → 다음엔 RESET 먼저
 
         # ------------------------------------------------------------
         # 센서 / 진행 상태 변수
@@ -194,6 +217,7 @@ class ACourseNode(Node):
         except Exception as exc:
             self._config_error = str(exc)
             self.get_logger().error(f'좌표 설정 오류. 이동 차단: {self._config_error}')
+        self._start_pose, self._dock_pose = self._load_init_poses()
 
         # ------------------------------------------------------------
         # 액션 클라이언트 / 퍼블리셔 / 구독
@@ -206,6 +230,7 @@ class ACourseNode(Node):
         self._status_pub = self.create_publisher(String, '/arti/course_status', 10)
         self._guide_pub = self.create_publisher(String, 'guide_message', 10)
         self._tour_end_pub = self.create_publisher(Empty, 'arti/tour_end', 10)   # person_tracker 대상 지우기
+        self._initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)  # 언독 직후 AMCL 초기 위치
         # [실물 로봇] AMCL은 amcl_pose를 reliable + transient_local 로 발행하므로 QoS를 맞춤
         # (기본 QoS로는 마지막 위치를 받지 못함)
         amcl_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -244,6 +269,49 @@ class ACourseNode(Node):
     # ------------------------------------------------------------
     # 센서 콜백: 최신 값과 수신 시각만 저장
     # ------------------------------------------------------------
+
+    def _load_init_poses(self):
+        """init_pose.yaml → (언독 지점 = initialpose로 보낼 위치, 도크 = 도킹 중 AMCL 위치가 없을 때 출발 위치). 없으면 None."""
+        path = self.get_parameter('start_pose_file').value
+        point = self.get_parameter('start_point').value
+        ns = self.get_namespace()
+        try:
+            path = path or str(Path(get_package_share_directory('arti_common')) / 'config' / 'init_pose.yaml')
+            start, dock = load_start_pose(path, ns, point), load_start_pose(path, ns, 'dock')
+        except Exception as exc:
+            self.get_logger().warn(f'init_pose.yaml을 못 읽음 ({path}: {exc!r}) → 언독 후 initialpose 안 보냄 (RViz 2D Pose Estimate)')
+            return None, None
+        if start is None:
+            self.get_logger().warn(f'init_pose.yaml에 {ns}.{point} 없음 → 언독 후 initialpose 안 보냄 (RViz 2D Pose Estimate)')
+        else:
+            self.get_logger().info(f'언독 후 AMCL 초기 위치 = init_pose.yaml {point} '
+                                   f'({start.x:.2f}, {start.y:.2f}, {math.degrees(start.yaw):.0f}°)')
+        return start, dock
+
+    def _send_initial_pose(self):
+        """[언독 직후] AMCL에 initialpose(언독 지점)를 한 번 보낸다 = RViz 2D Pose Estimate를 코드가 대신.
+        형식·공분산은 arti_follow prepare_tour.localize와 같다. AMCL 수렴은 _tick (3)에서 기다린다."""
+        start = self._start_pose
+        if start is None or not self.get_parameter('set_initial_pose').value:
+            return
+        subscribers = self._initialpose_pub.get_subscription_count()
+        if subscribers == 0:
+            self.get_logger().warn('initialpose 구독자(AMCL) 없음 → 초기 위치 못 보냄 (localization이 떠 있는지 확인)')
+            return
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.get_parameter('map_frame').value
+        msg.pose.pose.position.x, msg.pose.pose.position.y = start.x, start.y
+        msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(start.yaw / 2), math.cos(start.yaw / 2)
+        cov = [0.0] * 36
+        cov[0] = cov[7] = 0.05                  # x, y 분산 [m^2]
+        cov[35] = 0.05                          # yaw 분산 [rad^2]
+        msg.pose.covariance = cov
+        self._initialpose_pub.publish(msg)
+        # 언독 전 위치(오래된 TF·amcl_pose)는 버린다 → initialpose 뒤 새로 들어온 값만 신선한 것으로 봄
+        self._pose_stamp = self._tf_at = 0.0
+        self.get_logger().info(f'언독 완료 → initialpose 발행 (구독자 {subscribers}, '
+                               f'map {start.x:.2f}, {start.y:.2f}, {math.degrees(start.yaw):.0f}°)')
 
     def _on_pose(self, msg):
         """amcl_pose -> map 좌표 위치 저장."""
@@ -293,15 +361,68 @@ class ACourseNode(Node):
         """요청 거절(REJECTED) 상태 발행."""
         self._emit({'request_id': '', 'state': 'REJECTED', 'detail': text, 'completed': []})
 
-    def _check_ready(self):
-        """출발 전 안전 점검. 문제가 있으면 이유 문자열, 모두 OK면 None."""
+    def _nav2_active(self):
+        """Nav2 노드(bt_navigator, controller_server, planner_server)가 모두 active인지 (AMCL·map_server는 따로)."""
+        return all(self._lifecycle[n][2] for n in ('bt_navigator', 'controller_server', 'planner_server'))
+
+    def _activate_nav2(self, now):
+        """[_tick] Nav2가 active가 아니고 scan·map→base_link TF가 신선하면(= LiDAR 켜짐, 언독 후) STARTUP 요청.
+        도킹 중(LiDAR 꺼짐)에는 요청하지 않는다 → 켜 봐야 global_costmap이 TF를 기다리다 실패하므로.
+        STARTUP은 모든 Nav2 노드가 active가 될 때 응답이 온다 (10~20 s). 실패하면 nav2_startup_retry 뒤 RESET → STARTUP."""
+        if not self.get_parameter('activate_nav2').value:
+            return
+        if self._nav2_future is not None:
+            if not self._nav2_future.done():
+                return
+            try:
+                ok = bool(self._nav2_future.result().success)
+            except Exception:
+                ok = False
+            cmd, self._nav2_future = self._nav2_command, None
+            if cmd == self._manage_type.Request.RESET:
+                self.get_logger().info(f'Nav2 RESET {"완료" if ok else "실패"} → STARTUP 다시 요청')
+                self._nav2_failed = False
+                self._nav2_tried_at = -1e9
+                return
+            self._nav2_failed = not ok
+            self.get_logger().info('Nav2 STARTUP 완료 (active)') if ok else \
+                self.get_logger().warn('Nav2 STARTUP 실패 → 잠시 뒤 RESET 후 다시')
+            return
+        if self._nav2_active():
+            return
+        sensors_on = now - self._scan_stamp < 3.0 and now - self._tf_at < 3.0
+        if not sensors_on or now - self._nav2_tried_at < float(self.get_parameter('nav2_startup_retry').value):
+            return
+        if not self._nav2_manage.service_is_ready():
+            return
+        req = self._manage_type.Request()
+        req.command = req.RESET if self._nav2_failed else req.STARTUP
+        if req.command == req.STARTUP:
+            self._nav2_tried_at = now
+        self.get_logger().info(f'scan·TF 들어옴 → Nav2 {"RESET" if self._nav2_failed else "STARTUP"} 요청 '
+                               f'({self.get_parameter("nav2_lifecycle_manager").value}/manage_nodes)')
+        self._nav2_command = req.command
+        self._nav2_future = self._nav2_manage.call_async(req)
+
+    def _nav_ready(self):
+        """Nav2 navigate_to_pose 서버와 AMCL/map_server/Nav2 lifecycle이 모두 active인지."""
+        return self._nav_client.server_is_ready() and all(v[2] for v in self._lifecycle.values())
+
+    def _check_ready(self, before_undock=False):
+        """출발 전 안전 점검. 문제가 있으면 이유 문자열, 모두 OK면 None.
+
+        before_undock=True (prepare_tour, 도크에 붙어 있음): 도크로 다시 돌아올 수 있는지만 본다
+        (도크·Dock 서버·배터리·odom·음성). Nav2·AMCL·scan·TF는 언독 후 _tick에서 기다렸다 확인
+        (도킹 중엔 절전으로 LiDAR가 꺼져 있어 판단할 수 없음). 안 되면 그 자리에서 재도킹."""
         now = self._now()
         if self._machine is None:
             return self._config_error or '코스 설정 오류'
         if not self.get_parameter('enable_motion').value:
             return 'enable_motion=false (안전 잠금)'
         docked = (self._is_docked is True and now - self._dock_status_stamp < 3.0)
-        if self._pose is None:
+        if self._pose is None and not (before_undock and docked):
+            # 도킹 중엔 절전으로 LiDAR가 꺼져 AMCL 위치가 없어도 된다: 언독 후 initialpose를 보내고,
+            # 실제 AMCL 위치·scan·TF가 settle_time 동안 신선해야 출발한다 (_tick (3)).
             return 'AMCL map 위치 정보 없음 (RViz 2D Pose Estimate 필요)'
         if now - self._odom_stamp > 3.0:
             return 'Odometry 신호가 없음'
@@ -314,10 +435,11 @@ class ACourseNode(Node):
                 return 'LiDAR scan 신호가 없음'
             if self.get_parameter('require_tf').value and now - self._tf_at > 3.0:
                 return 'map -> base_link TF 변환 미수신 또는 만료'
-        if not self._nav_client.server_is_ready():
-            return 'Nav2 navigate_to_pose 액션 미준비'
-        if not all(v[2] for v in self._lifecycle.values()):
-            return 'AMCL/map_server/Nav2 lifecycle not active'
+        if not (before_undock and docked):
+            if not self._nav_client.server_is_ready():
+                return 'Nav2 navigate_to_pose 액션 미준비'
+            if not all(v[2] for v in self._lifecycle.values()):
+                return 'AMCL/map_server/Nav2 lifecycle not active'
         # 해설 수단 준비 확인 (simulation_mode면 생략)
         if not self.get_parameter('simulation_mode').value:
             if not self._explain_client.server_is_ready():
@@ -354,7 +476,7 @@ class ACourseNode(Node):
         거절하면 이유 문자열, 시작하면 None."""
         if self._busy():
             return '코스주행 중복 요청'
-        reason = self._check_ready()
+        reason = self._check_ready(before_undock=True)
         if reason:
             return reason
         if self._is_docked is None or self._now()-self._dock_status_stamp > 3.0:
@@ -365,7 +487,10 @@ class ACourseNode(Node):
         try:
             # 언도킹 '전'의 정확한 도킹 위치를 먼저 기록.
             # Nav2 복귀 목표는 언도킹 '후' 충돌 없는 위치로 갱신됨.
-            events = self._machine.start(request_id, self._now(), self._pose)
+            origin = self._pose or self._dock_pose or self._start_pose   # 도킹 중 AMCL 위치가 없으면 init_pose.yaml dock
+            if origin is None:
+                return 'AMCL map 위치 정보 없음, init_pose.yaml에 dock·undock도 없음 (RViz 2D Pose Estimate 필요)'
+            events = self._machine.start(request_id, self._now(), origin)
         except ValueError as exc:
             return str(exc)
         if self._is_docked is False:
@@ -480,8 +605,10 @@ class ACourseNode(Node):
             prep['outcome'] = ('fail', m.fail_reason or 'error')
         elif m.end_reason:
             # 등록 실패·Nav2 실패 등으로 도킹 복귀 시작
+            # (언독 직후 취소 → redock('canceled')도 여기로 옴: PC3에는 canceled로 알림)
             self._tour_end_pub.publish(Empty())
-            prep['outcome'] = ('fail', m.end_reason)
+            kind = 'canceled' if (prep['cancel'] and m.end_reason == 'canceled') else 'fail'
+            prep['outcome'] = (kind, m.end_reason)
 
     def _on_visitor(self, msg):
         """target_person/point_map 수신 -> 인식 시각·map 좌표 기록 (등록 판정, 관람 중 거리 감시)."""
@@ -614,6 +741,7 @@ class ACourseNode(Node):
                 raise RuntimeError(f'Undock status {response.status}')
             # [실물 로봇] 언도킹 후 LiDAR가 다시 켜짐. _tick 이 scan + AMCL/TF가
             # 신선해질 때까지 기다린 뒤 복귀 위치 저장 및 Nav2 시작.
+            self._send_initial_pose()
             self._await_sensors_since = self._now()
             self._emit({'request_id': self._machine.request_id, 'state': 'UNDOCKED_WAITING_SENSORS',
                         'detail': 'LiDAR/AMCL/TF 재수신 대기', 'completed': []})
@@ -860,13 +988,24 @@ class ACourseNode(Node):
         except Exception:
             pass
 
-        # (3) [실물 로봇] 언도킹 후 센서 재수신 대기
-        #     pose/scan/TF 모두 신선 상태가 settle_time(3초) 연속 유지되면 코스 시작.
-        #     30초 안에 안 되면 실패.
+        # (2-1) Nav2 켜기: 언독 후 scan·TF가 들어오면 (도킹 중엔 안 켬)
+        self._activate_nav2(now)
+
+        # (3) [실물 로봇] 언도킹 후 준비 대기 (LiDAR가 이제 켜짐)
+        #     pose/scan/TF 신선 + Nav2(navigate_to_pose, lifecycle active)가 settle_time(3초) 연속 유지되면 키오스크로 출발.
+        #     post_undock_sensor_timeout(60초) 안에 안 되거나 그 사이 취소되면 Nav2 없이 바로 재도킹.
         if self._await_sensors_since is not None:
-            fresh = (self._pose is not None and now - self._pose_stamp < 3.0
-                     and now - self._scan_stamp < 3.0
-                     and (not self.get_parameter('require_tf').value or now - self._tf_at < 3.0))
+            missing = [name for name, ok in (
+                ('AMCL', self._pose is not None and now - self._pose_stamp < 3.0),
+                ('scan', now - self._scan_stamp < 3.0),
+                ('TF', not self.get_parameter('require_tf').value or now - self._tf_at < 3.0),
+                ('Nav2', self._nav_ready())) if not ok]
+            fresh = not missing
+            if self._prep is not None and self._prep['cancel']:
+                self._await_sensors_since = None
+                self._pending_nav = None
+                self._dispatch(self._machine.redock('canceled', now))
+                return
             if not fresh:
                 self._sensors_ok_since = None
             elif self._sensors_ok_since is None:
@@ -878,8 +1017,9 @@ class ACourseNode(Node):
             if now - self._await_sensors_since > float(self.get_parameter('post_undock_sensor_timeout').value):
                 self._await_sensors_since = None
                 self._pending_nav = None
-                self._undock_failed_latched = True
-                self._dispatch(self._machine.fail('언도킹 후 LiDAR/AMCL/TF 미수신 타임아웃'))
+                why = 'not_ready: ' + ','.join(missing)
+                self.get_logger().warn(f'언독 후 준비 안 됨({", ".join(missing)}) → 바로 재도킹')
+                self._dispatch(self._machine.redock(why, now))
             return
 
         # (4) 언도킹 진행 중: 타임아웃 감시만

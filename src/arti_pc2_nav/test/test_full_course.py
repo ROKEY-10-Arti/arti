@@ -4,6 +4,7 @@
 흐름: start()(prepare_tour) -> 키오스크 -> 등록 -> WAIT_START -> begin_tour()(start_tour) -> 작품 -> 출구 -> 도킹.
 반원 판정, 출구 직사각형(arti_common), 등록, 관람객 거리 감시, 도킹 확인, 도킹 복귀(실패·취소)를 검사합니다.
 """
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent / 'common' / 'arti_common'))
 
 from arti_pc2_nav.course_engine import TourMachine, Event  # noqa: E402
-from arti_pc2_nav.guided_tour_plan import load_course_config, Pose2D  # noqa: E402
+from arti_pc2_nav.guided_tour_plan import load_course_config, load_start_pose, Pose2D  # noqa: E402
 
 P = ROOT / 'config/a_course.yaml'
 Z = str(ROOT.parent / 'common' / 'arti_common' / 'config' / 'artworks.yaml')
@@ -54,6 +55,17 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(z.contains((z.cx - .1, z.cy)))
         self.assertTrue(z.contains((z.cx + .1, z.cy)))
 
+    def test_start_pose_from_init_pose_yaml(self):
+        """언독 후 initialpose = arti_common init_pose.yaml robots./robot4.undock (follow 팀과 같은 파일)."""
+        path = ROOT.parent / 'common' / 'arti_common' / 'config' / 'init_pose.yaml'
+        u = load_start_pose(path, 'robot4', 'undock')
+        self.assertAlmostEqual(u.x, -0.12)
+        self.assertAlmostEqual(u.y, 0.03)
+        self.assertAlmostEqual(math.degrees(u.yaw), -179)
+        d = load_start_pose(path, '/robot4', 'dock')               # yaw_deg 없음 → dock 자신 방향 0
+        self.assertEqual((d.x, d.y), (0.304, -0.0957))
+        self.assertIsNone(load_start_pose(path, '/robot9', 'undock'))
+
     def test_exit_zone_from_arti_common(self):
         """출구 = arti_common artworks.yaml의 exit 직사각형 (follow 팀과 같은 구역)."""
         z = self.m.plan.exit_zone
@@ -84,6 +96,24 @@ class PrepareTests(unittest.TestCase):
 
     def setUp(self):
         self.m = machine(register_timeout=60, ready_timeout=130)
+
+    def test_redock_right_after_undock(self):
+        """언독 직후 Nav2·AMCL이 준비 안 됨 → 키오스크로 가지 않고 Dock 액션으로 바로 재도킹 → 끝나면 DONE."""
+        m = self.m                                          # start() 직후 = NAV_KIOSK (노드는 언독 후 준비 대기 중)
+        ev = m.redock('not_ready: Nav2', 5)
+        self.assertEqual(m.state, 'DOCKING')
+        self.assertEqual(m.end_reason, 'not_ready: Nav2')
+        self.assertIn(Event('dock', None), ev)
+        self.assertNotIn('navigate', [e.kind for e in ev])  # Nav2 안 씀
+        m.docking_action_result(True, 30)
+        m.dock_confirmed(31)
+        self.assertEqual(m.state, 'DONE')
+
+    def test_redock_only_before_leaving(self):
+        m = self.m
+        stop_at(m, m.plan.kiosk_goal, 2)                    # 키오스크 도착 뒤에는 재도킹 아님 (Nav2로 복귀)
+        with self.assertRaises(ValueError):
+            m.redock('canceled', 5)
 
     def arrive(self, t=1.):
         """키오스크 정지 -> REGISTERING + 손바닥 안내. 다음 시각 반환."""

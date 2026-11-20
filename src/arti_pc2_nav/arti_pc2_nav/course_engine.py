@@ -634,6 +634,20 @@ class TourMachine:
     # 복귀 중(또는 이미 끝난) 상태: abort_to_home은 이유만 남기고 하던 복귀를 계속함
     RETURN_STATES = ('NAV_HOME', 'CANCELING_HOME', 'VERIFY_HOME_STOP', 'DOCKING', 'WAIT_DOCK_CONFIRM')
 
+    def redock(self, reason: str, now: float) -> list[Event]:
+        """[prepare_tour] 언독 직후, 키오스크로 출발하기 전에 그만둘 때: Nav2 없이 그 자리에서 Dock 액션으로 다시 도킹.
+        (언독 후 Nav2·AMCL이 준비되지 않았거나 그 사이 취소됨. 도크가 바로 앞이라 Create3 Dock만으로 돌아갈 수 있다)
+        reason은 end_reason에 남는다."""
+        if self.state != 'NAV_KIOSK':
+            raise ValueError(f'{self.state} 상태에서는 바로 재도킹할 수 없습니다 (언독 직후에만)')
+        if not self.end_reason:
+            self.end_reason = reason
+        self.returning = True
+        self.exit_pending = False
+        self.state = 'DOCKING'
+        self.state_since = now
+        return [self._event('REDOCK', f'{reason}; 키오스크로 가지 않고 바로 재도킹'), Event('dock', None)]
+
     def abort_to_home(self, reason: str, now: float) -> list[Event]:
         """관람 시작 전·관람 중 어디서든 그만두고 충전 스테이션으로 복귀 (취소·Nav2 실패 등).
         새 Nav2 goal이 이전 goal을 대신하므로 따로 취소하지 않는다. reason은 end_reason에 남는다."""
