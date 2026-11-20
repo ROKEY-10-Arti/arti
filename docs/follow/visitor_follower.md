@@ -38,7 +38,7 @@
   ├ start = false     → 바로 끝냄: success=false, message=not_requested
   └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
                          등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
-                         실패: not_docked (도크 밖) / undock_failed / no_undock_server / no_localization / canceled
+                         실패: dock_failed (도크 밖인데 도킹 못 함) / undock_failed / no_undock_server / dock_status_unavailable / canceled
 
 ② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만 옴)
   └ 바로 추종 시작. 관람 끝까지 feedback, 끝나면 result (artwork_ids는 보지 않음)
@@ -51,9 +51,9 @@ READY
   │ prepare_tour                                       ┐
   ▼                                                    │
 UNDOCK        Create 3 undock 액션 (로봇이 스스로 움직임). 관람은 항상 도크에서 시작
-  │             도크 밖이면 거절 (not_docked), 실패 → 관람 끝 (undock_failed / no_undock_server)
+  │             도크 밖이면 먼저 Create 3 dock으로 올린 뒤 undock (dock_first), 실패 → 관람 끝 (dock_failed / undock_failed)
   ▼
-LOCALIZE      AMCL에 initialpose(출발 지점 = 언독 지점)를 한 번 보내고 바로 다음 (AMCL 수렴은 안 기다림)
+LOCALIZE      바로 다음 (initialpose = dock은 UNDOCK 직전 도크 위에서 이미 보냄, AMCL 수렴은 안 기다림)
   ▼
 START_FACE    언독 지점 → 키오스크 방향으로 돌 각도를 계산해 odom 기준으로 그만큼 제자리 회전
               (map 위치 안 씀, face_offset_deg로 보정, 15 s 안에 못 돌면 그냥 넘어감)
@@ -73,7 +73,7 @@ REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 �
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
   │ 좌표가 1.5 s(lost_timeout) 안 옴
   ▼
-SEARCH        마지막 좌표까지 이동(최대 5 s, 뒤쪽이면 먼저 제자리 회전) → 거기서 odom 기준 한 바퀴(약 10 s) 회전 탐색
+SEARCH        마지막 좌표까지 이동(최대 5 s, 뒤쪽이면 먼저 제자리 회전) → 거기서 odom 기준 한 바퀴(약 20 s, 0.31 rad/s) 회전 탐색
   ▼
 WAIT          정지 대기 10 s
   ▼
@@ -82,7 +82,10 @@ LOST          관람 끝 (lost)
 SEARCH·WAIT 중 좌표가 다시 오면 → FOLLOW
 액션 취소(cancel)는 언제든 → 정지 → 관람 끝 (canceled)
 
-관람 끝 (취소·분실·등록 뒤 start_tour 안 옴 등, 이번에 언독했을 때만, return_to_dock)
+관람객이 출구 구역(artworks.yaml exit) 진입 (start_tour 뒤 10 s 지나서, end_zone)
+  ▼ artwork_zone: guide_message "tour_end"(종료 안내 음성) + artwork_zone/entered "exit"
+  ▼ visitor_follower: 3 s(end_guide_wait) 서서 관람객 쪽을 봄 → 관람 끝 (completed, success=true)
+관람 끝 (출구 completed·취소·분실·등록 뒤 start_tour 안 옴 등, 이번에 언독했을 때만, return_to_dock)
   ▼
 RETURN        언독이 끝난 곳(odom 기록)까지 이동 (뒤쪽이면 먼저 회전, 최대 60 s)
   ▼
@@ -213,7 +216,7 @@ ros2 action send_goal --feedback /robot1/arti/start_tour arti_interfaces/action/
 ros2 topic echo /robot1/follow/state
 ```
 
-## 8. 자주 바꾸는 파라미터 (`-p 이름:=값`, 전체는 노드 맨 위 `PARAMS`)
+## 8. 자주 바꾸는 파라미터 (`-p 이름:=값`, 전체는 `src/arti_follow/config/visitor_follower.json`, 값마다 설명 포함)
 
 | 이름 | 기본값 | 뜻 |
 |---|---|---|
@@ -221,7 +224,8 @@ ros2 topic echo /robot1/follow/state
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 등록 확인 시간 / 끊김으로 보는 간격 [s] |
 | `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
 | `search_move_time` / `search_arrive` | 5 / 0.35 | 마지막 위치로 이동하는 시간 상한 [s] / 도착 거리 [m] |
-| `search_time` / `wait_time` | 10 / 10 | 회전 탐색 / 정지 대기 [s] |
+| `robot_radius` / `safety_margin` | 0.18 / 0.02 | 로봇 반지름 / 여유 [m]. 합 0.20 안을 지나는 궤적 금지, 통과 가능한 최소 폭 약 0.65 m (0.20/0.05일 때 약 0.85 m) |
+| `search_time` / `wait_time` | 20 / 10 | 회전 탐색 한 바퀴 시간 (속도 = 2π/search_time = 0.31 rad/s) / 정지 대기 [s] |
 | `max_linear` / `max_angular` | 0.3 / 0.8 | 최대 속도 [m/s] / [rad/s] (빨리 돌면 탑캠 영상이 흔들려 인식을 놓침) |
 | `face_zone` | kiosk | 시작 때 바라볼 구역 |
 | `face_offset_deg` | -15 | 시작 때 바라볼 방향 보정 [deg] (+ 왼쪽, - 오른쪽) |
@@ -229,6 +233,7 @@ ros2 topic echo /robot1/follow/state
 | `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
 | `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
 | `return_to_dock` | true | 관람이 끝나면 언독 지점으로 돌아와 도킹 |
+| `end_zone` / `end_guide_wait` / `end_min_time` | exit / 3 / 10 | 이 구역에 들어가면 관람 끝 / 종료 안내 듣는 시간 [s] / start_tour 뒤 이 시간 안 진입은 무시 [s] |
 | `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점까지 이동 / Create 3 도킹 대기 [s] |
 
 ## 한계
