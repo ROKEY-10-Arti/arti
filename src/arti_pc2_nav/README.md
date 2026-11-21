@@ -10,8 +10,8 @@ PC 간 약속은 팀 명세서(`docs/common/ros2_interfaces.md`, CLAUDE.md "PC �
 ① 키오스크 [로봇 호출]  PC3 ──/robot4/arti/prepare_tour {start: true}──▶ a_course_node
      feedback  UNDOCKING → MOVING → ARRIVED → REGISTERING → REGISTERED
      언독 → Nav2로 키오스크 → 정지 확인 → guide 'course_register'(주먹→손바닥 안내)
-     → person_tracker target_person/point_map 1초 연속 → guide 'course_recognized'
-     result    success=true, message='registered'   → 키오스크 앞에서 대기 (130초 안에 ②가 없으면 도킹 복귀)
+     → person_tracker target_person/point_map 1초 연속 → 등록 (인식 완료 안내 없음, 바로 ②의 course_start)
+     result    success=true, message='registered'   → 키오스크가 곧바로 ② (130초 안에 ②가 없으면 도킹 복귀)
 
 ② 준비 성공 직후 자동 시작  PC3 ──/robot4/arti/start_tour {artwork_ids: [1, 3, 4]}──▶ a_course_node
      guide 'course_start'(저를 따라오세요) → 작품마다 (YAML 코스 순서):
@@ -80,7 +80,7 @@ robot4는 앞장서고 관람객이 뒤에서 따라온다. 노트북 웹캠을 
 | 발행 | `/arti/course_status` | `std_msgs/String` JSON (전역) | 로그·디버그용. PC3와의 약속 아님 |
 
 안내 키(`guide_message`)는 `arti_audio/config/guide_lines.yaml`에 있어야 소리가 난다:
-robot4 전용 `course_register`, `course_recognized`, `course_start`, `course_come_here`(follow 팀 문장과 따로) + 공용 `tour_end`, `register_failed` (키 이름은 파라미터로 바꿀 수 있음).
+robot4 전용 `course_register`, `course_start`, `course_come_here`(follow 팀 문장과 따로) + 공용 `tour_end`, `register_failed` (키 이름은 파라미터로 바꿀 수 있음).
 
 ## 초기 대비 바뀐 점 (코스 관람, 2026-11-20)
 
@@ -208,7 +208,7 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `distance_window` / `far_hold` / `near_hold` | 1.0 / 1.0 / 0.5 | 거리 중앙값 구간 / 멈추기 전 유지 / 출발 전 유지 [s] |
 | `come_here_interval` | 8.0 | '따라오세요' 음성 최소 간격 [s] |
 | `lost_timeout` / `visitor_give_up` | 3.0 / 10.0 | 안 보임 판정 / 포기 [s] |
-| `*_guide` | `course_register`, `course_recognized`, `register_failed`, `course_start`, `course_come_here` | guide_lines.yaml 키 |
+| `*_guide` | `course_register`, `recognized_guide`=''(안내 없음), `register_failed`, `course_start`, `course_come_here` | guide_lines.yaml 키 |
 
 ## config/a_course.yaml
 

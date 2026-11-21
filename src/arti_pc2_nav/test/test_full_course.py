@@ -251,6 +251,17 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(m.state, 'WAIT_START')
         self.assertIn(Event('guide', 'recognized'), ev)
 
+    def test_no_recognized_guide_when_empty(self):
+        # [⑫] 노드 기본값 recognized_guide='' -> 등록 완료 때 안내 이벤트 없음 (키오스크가 바로 start_tour)
+        m, t = self.m, self.arrive()
+        m.recognized_guide = ''
+        k = m.plan.kiosk_goal
+        for i in range(11):
+            m.visitor_seen(t + i * .1)
+            ev = m.tick(t + i * .1, k, 0, 0, 0)
+        self.assertEqual(m.state, 'WAIT_START')
+        self.assertNotIn('guide', [e.kind for e in ev])
+
     def test_gap_restarts_confirmation(self):
         m, t = self.m, self.arrive()
         k = m.plan.kiosk_goal

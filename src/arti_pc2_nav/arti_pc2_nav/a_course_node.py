@@ -134,7 +134,9 @@ class ACourseNode(Node):
         self.declare_parameter('ready_timeout', 130.0)         # 등록 후 start_tour 대기 제한 -> 도킹 복귀 [s] (robot1과 같음)
         self.declare_parameter('skip_register', False)         # true면 인식 없이 등록 (person_tracker 없이 시험)
         self.declare_parameter('register_guide', 'course_register')     # guide_lines.yaml 키: 주먹→손바닥 안내 (robot4 전용)
-        self.declare_parameter('recognized_guide', 'course_recognized') # 인식 완료 (robot4 전용)
+        # [코스 관람 변경 ⑫] 인식 완료 안내: '' = 안 함 (2026-11-21). 예전 'course_recognized'("…관람 시작 버튼을 눌러 주세요")는
+        #   키오스크가 prepare 성공 직후 start_tour를 자동으로 보내게 바뀌어(PR #6) 틀린 말이 됐고, 바로 나오는 course_start에 끊겼다.
+        self.declare_parameter('recognized_guide', '')
         self.declare_parameter('register_failed_guide', 'register_failed')  # 등록 실패 / 관람객 분실
         # [코스 관람 변경 ⑦] 키오스크 정지 후 등(웹캠)이 키오스크를 보게 제자리 회전 (Nav2 spin, course_engine FACE_KIOSK).
         # 반원에 들어서자마자 멈춰서 로봇이 키오스크를 보고 서는데, robot4 웹캠은 뒤를 보므로 등을 키오스크로 돌린다.

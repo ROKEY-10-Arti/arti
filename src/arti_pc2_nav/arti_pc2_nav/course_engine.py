@@ -469,7 +469,12 @@ class TourMachine:
                 self.state = 'WAIT_START'
                 self.state_since = now
                 detail = '인식 생략(skip_register)' if self.skip_register else '관람객 인식 완료'
-                return [self._event('REGISTERED', detail), Event('guide', self.recognized_guide)]
+                # [코스 관람 변경 ⑫] recognized_guide ''(기본) = 인식 완료 안내 없음. 키오스크가 prepare 성공 직후
+                #   start_tour를 자동으로 보내서 곧바로 course_start가 나오고, 새 안내가 이전 안내를 끊기 때문.
+                ev = [self._event('REGISTERED', detail)]
+                if self.recognized_guide:
+                    ev.append(Event('guide', self.recognized_guide))
+                return ev
             if now-self.state_since >= self.register_timeout:
                 self.end_reason = 'register_failed'
                 return ([self._event('REGISTER_FAILED', f'{self.register_timeout:.0f}초 안에 관람객 인식 못 함'),
