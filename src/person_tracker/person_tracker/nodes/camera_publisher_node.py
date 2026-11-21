@@ -9,6 +9,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, qos_profile_s
 from sensor_msgs.msg import CompressedImage, Image
 from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
+from person_tracker.core.webcam import fit_frame, open_webcam
 from person_tracker.nodes.top_cam_tf_node import make_static_transform
 
 
@@ -72,10 +73,9 @@ class CameraPublisherNode(Node):
         video_source: Union[int, str] = int(raw_source) if raw_source.isdigit() else raw_source
 
         # 로컬 비디오 장치(/dev/video*)는 GStreamer 충돌 방지를 위해 CAP_V4L2 백엔드 사용
-        if isinstance(video_source, int) or str(video_source).startswith('/dev/video'):
-            self.cap = cv2.VideoCapture(video_source, cv2.CAP_V4L2)
-        else:
-            self.cap = cv2.VideoCapture(video_source)
+        # 넓은 모드(phone_camera.yaml capture, 예 1280x720 MJPG)로 받고 timer_callback에서 가로 out_width로 줄임
+        self.cap, cap_cfg = open_webcam(video_source, self.get_logger())
+        self.out_width = int(cap_cfg['out_width'])
 
         if not self.cap.isOpened():
             self.get_logger().error(
@@ -112,6 +112,7 @@ class CameraPublisherNode(Node):
         if not ret or frame is None:
             self.get_logger().warn('프레임을 읽어오지 못했습니다.', throttle_duration_sec=5.0)
             return
+        frame = fit_frame(frame, self.out_width)   # 비율 유지 (1280x720 → 640x360)
 
         now = self.get_clock().now().to_msg()
 

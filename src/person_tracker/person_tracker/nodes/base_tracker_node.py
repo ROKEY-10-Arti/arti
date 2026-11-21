@@ -28,6 +28,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Empty
 
+from person_tracker.core.webcam import fit_frame, open_webcam
 from person_tracker.core.env_bootstrap import resolve_image_topic
 from person_tracker.core.feature_extractors import PoseKeypointFeatureExtractor
 from person_tracker.core.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
@@ -288,15 +289,10 @@ class BaseTrackerNode(Node):
             return SetParametersResult(successful=False, reason=str(exc))
 
     def _start_local_capture(self, src: Union[int, str]):
-        cap = cv2.VideoCapture(src, cv2.CAP_V4L2) if isinstance(src, int) else cv2.VideoCapture(src)
+        # 넓은 모드(phone_camera.yaml capture, 예 1280x720 MJPG)로 받고 _capture_loop에서 가로 out_width로 줄임
+        cap, cap_cfg = open_webcam(src, self.get_logger())
+        self._cap_out_width = int(cap_cfg['out_width'])
         if not cap.isOpened():
-            cap.release()
-            cap = cv2.VideoCapture(src)
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        else:
             self.get_logger().error(f'로컬 카메라를 열 수 없습니다: {src}')
         self._cap = cap
         self._cap_thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -310,8 +306,7 @@ class BaseTrackerNode(Node):
                 continue
             ret, frame = self._cap.read()
             if ret and frame is not None:
-                if frame.shape[1] != 640 or frame.shape[0] != 480:
-                    frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+                frame = fit_frame(frame, self._cap_out_width)   # 비율 유지 (1280x720 → 640x360)
                 stamp_msg = self.get_clock().now().to_msg()
                 rx_wall = time.time()
                 with self._cap_lock:

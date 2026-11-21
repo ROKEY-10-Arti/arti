@@ -30,6 +30,16 @@ extrinsics:
   yaw: 0.0
   use_degrees: true
 
+# 로컬 웹캠 받는 모드 (video_source가 장치 번호일 때, person_tracker/core/webcam.py)
+# - 넓은 모드로 받고 바로 가로 out_width로 줄여 씀 (비율 유지: 1280x720 → 640x360). 640x480(4:3)은 센서 좌우를 잘라
+#   화각이 좁은 웹캠이 많음 (2026-11-21). 720p는 YUYV면 5~10 fps로 떨어져 MJPG로 받음
+# - 바꾸면 아래 hfov_deg도 그 모드에서 잰 값으로 바꿀 것 (예전 값: width 640, height 480, fourcc "")
+capture:
+  width: 1280
+  height: 720
+  fourcc: "MJPG"
+  out_width: 640
+
 # 상단 카메라 수평 화각(HFOV) 설정 (웹캠+라이다 사람 위치 정합용)
 camera_intrinsics:
   hfov_deg: 54.0     # 일반 스마트폰/웹캠 수평 화각 (기본 65도)
