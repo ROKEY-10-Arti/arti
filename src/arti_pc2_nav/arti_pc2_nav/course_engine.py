@@ -469,8 +469,9 @@ class TourMachine:
                 self.state = 'WAIT_START'
                 self.state_since = now
                 detail = '인식 생략(skip_register)' if self.skip_register else '관람객 인식 완료'
-                # [코스 관람 변경 ⑫] recognized_guide ''(기본) = 인식 완료 안내 없음. 키오스크가 prepare 성공 직후
-                #   start_tour를 자동으로 보내서 곧바로 course_start가 나오고, 새 안내가 이전 안내를 끊기 때문.
+                # [코스 관람 변경 ⑫] recognized_guide가 ''(노드 기본값)이면 인식 완료 안내를 보내지 않는다.
+                #   문제점: 키오스크가 곧바로 start_tour를 보내 course_start가 이 안내를 중간에 끊었고, 문장("관람 시작 버튼")도 틀렸다.
+                #   빈 키를 그대로 보내면 guide_audio_node가 "모르는 안내 키" 경고를 내므로 아예 이벤트를 만들지 않는다.
                 ev = [self._event('REGISTERED', detail)]
                 if self.recognized_guide:
                     ev.append(Event('guide', self.recognized_guide))

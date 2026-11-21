@@ -91,9 +91,13 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.06
-      # [코스 관람 변경 ⑬] 로봇 위 노트북까지 감싸게 팔각형 반지름 0.189 → 0.28 (2026-11-21).
-      #   노트북이 로봇 몸통 밖으로 나와 장애물에 부딪힘. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
-      #   LiDAR(약 20 cm 높이)는 노트북을 못 보므로 footprint로 크기를 알려 줘야 한다. collision_monitor도 이 footprint를 씀.
+      # [코스 관람 변경 ⑬] footprint 팔각형 반지름 0.189 → 0.28 m (2026-11-21)
+      #   문제점: 로봇 위에 올린 노트북(탑캠)이 몸통 밖으로 나와 있어, 주행 중 벽·받침대 모서리에 노트북이 부딪혔다.
+      #   원인:   0.189는 TurtleBot 4 몸통 크기뿐. LiDAR는 약 20 cm 높이 한 면만 봐서 노트북을 못 보고,
+      #           Nav2는 footprint 크기로만 "닿는지"를 판단한다 (경로 계획·DWB·collision_monitor 모두 이 footprint 사용).
+      #   바꾼 것: 노트북까지 감싸는 0.28 m. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
+      #   주의:   로봇 중심이 벽에서 약 0.26 m(내접 반경) 이상 떨어져야 한다. 지도로 본 여유 — 오른쪽 통로 폭 0.95~1.05 m 통과 가능,
+      #           작품 4 goal_pose 벽까지 0.35 m(빠듯 → 다시 찍기), 도킹 접근점 0.30 m(빠듯, 도킹 복귀 현장 확인 필요).
       footprint: "[[ 0.280,  0.000],
                   [ 0.198, -0.198],
                   [ 0.000, -0.280],
@@ -107,8 +111,12 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
         # 팽창 반경(m). cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
-        # [코스 관람 변경 ⑬] 0.22 → 0.45 (2026-11-21): 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다
-        #   약 10 cm 더 크다. 장애물에서 더 떨어져 다니게 비용 구역을 넓힘 (footprint 내접 반경 0.26보다 커야 함).
+        # [코스 관람 변경 ⑬] inflation_radius 0.22 → 0.45 m (2026-11-21)
+        #   문제점: 두 로봇이 같이 다니는데, 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다 약 10 cm 더 크다.
+        #           상대 노트북은 LiDAR에 안 보이므로 footprint만 키워서는 그 부분과 부딪힐 수 있다.
+        #   바꾼 것: 장애물 주변 "비용 구역"을 넓혀 경로가 벽·다른 로봇에서 더 떨어져 지나가게 함 (막는 게 아니라 멀리 돌게 유도).
+        #   주의:   inflation_radius는 footprint 내접 반경(0.28 × cos 22.5° ≈ 0.26)보다 커야 한다. 0.22로 두면 Nav2가 경고하고
+        #           팽창이 몸통 안에서 끝나 효과가 없다.
         inflation_radius: 0.45
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -144,9 +152,13 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      # [코스 관람 변경 ⑬] 로봇 위 노트북까지 감싸게 팔각형 반지름 0.189 → 0.28 (2026-11-21).
-      #   노트북이 로봇 몸통 밖으로 나와 장애물에 부딪힘. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
-      #   LiDAR(약 20 cm 높이)는 노트북을 못 보므로 footprint로 크기를 알려 줘야 한다. collision_monitor도 이 footprint를 씀.
+      # [코스 관람 변경 ⑬] footprint 팔각형 반지름 0.189 → 0.28 m (2026-11-21)
+      #   문제점: 로봇 위에 올린 노트북(탑캠)이 몸통 밖으로 나와 있어, 주행 중 벽·받침대 모서리에 노트북이 부딪혔다.
+      #   원인:   0.189는 TurtleBot 4 몸통 크기뿐. LiDAR는 약 20 cm 높이 한 면만 봐서 노트북을 못 보고,
+      #           Nav2는 footprint 크기로만 "닿는지"를 판단한다 (경로 계획·DWB·collision_monitor 모두 이 footprint 사용).
+      #   바꾼 것: 노트북까지 감싸는 0.28 m. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
+      #   주의:   로봇 중심이 벽에서 약 0.26 m(내접 반경) 이상 떨어져야 한다. 지도로 본 여유 — 오른쪽 통로 폭 0.95~1.05 m 통과 가능,
+      #           작품 4 goal_pose 벽까지 0.35 m(빠듯 → 다시 찍기), 도킹 접근점 0.30 m(빠듯, 도킹 복귀 현장 확인 필요).
       footprint: "[[ 0.280,  0.000],
                   [ 0.198, -0.198],
                   [ 0.000, -0.280],
@@ -179,8 +191,12 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
         # 팽창 반경(m). cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
-        # [코스 관람 변경 ⑬] 0.22 → 0.45 (2026-11-21): 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다
-        #   약 10 cm 더 크다. 장애물에서 더 떨어져 다니게 비용 구역을 넓힘 (footprint 내접 반경 0.26보다 커야 함).
+        # [코스 관람 변경 ⑬] inflation_radius 0.22 → 0.45 m (2026-11-21)
+        #   문제점: 두 로봇이 같이 다니는데, 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다 약 10 cm 더 크다.
+        #           상대 노트북은 LiDAR에 안 보이므로 footprint만 키워서는 그 부분과 부딪힐 수 있다.
+        #   바꾼 것: 장애물 주변 "비용 구역"을 넓혀 경로가 벽·다른 로봇에서 더 떨어져 지나가게 함 (막는 게 아니라 멀리 돌게 유도).
+        #   주의:   inflation_radius는 footprint 내접 반경(0.28 × cos 22.5° ≈ 0.26)보다 커야 한다. 0.22로 두면 Nav2가 경고하고
+        #           팽창이 몸통 안에서 끝나 효과가 없다.
         inflation_radius: 0.45
       always_send_full_costmap: true
 

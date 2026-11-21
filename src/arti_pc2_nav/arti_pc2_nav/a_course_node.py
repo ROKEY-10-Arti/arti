@@ -134,8 +134,14 @@ class ACourseNode(Node):
         self.declare_parameter('ready_timeout', 130.0)         # 등록 후 start_tour 대기 제한 -> 도킹 복귀 [s] (robot1과 같음)
         self.declare_parameter('skip_register', False)         # true면 인식 없이 등록 (person_tracker 없이 시험)
         self.declare_parameter('register_guide', 'course_register')     # guide_lines.yaml 키: 주먹→손바닥 안내 (robot4 전용)
-        # [코스 관람 변경 ⑫] 인식 완료 안내: '' = 안 함 (2026-11-21). 예전 'course_recognized'("…관람 시작 버튼을 눌러 주세요")는
-        #   키오스크가 prepare 성공 직후 start_tour를 자동으로 보내게 바뀌어(PR #6) 틀린 말이 됐고, 바로 나오는 course_start에 끊겼다.
+        # [코스 관람 변경 ⑫] 인식 완료 안내 — 기본 '' = 안 함 (2026-11-21)
+        #   문제점: 인식되면 "인식되었습니다. 키오스크 화면에서 관람 시작 버튼을 눌러 주세요."가 나왔는데
+        #           키오스크에 그 버튼이 없어졌고, 문장도 중간에 끊겨 "키오스크…"까지만 들렸다.
+        #   원인:   키오스크 PR #6부터 prepare_tour 성공 직후 start_tour를 자동으로 보낸다 → 곧바로 course_start가 재생되고,
+        #           guide_audio_node는 새 안내가 오면 재생 중인 안내를 끊는다 (guide_audio_node.py _on_guide).
+        #   바꾼 것: 기본값 'course_recognized' → '' (course_engine이 빈 키면 안내 이벤트를 안 보냄),
+        #           guide_lines.yaml의 robot4 전용 course_recognized 줄 삭제. 인식 직후 바로 course_start("저를 따라오세요")가 나온다.
+        #   다시 넣으려면: guide_lines.yaml에 문장을 추가하고 recognized_guide:=<키> (코드 수정 불필요)
         self.declare_parameter('recognized_guide', '')
         self.declare_parameter('register_failed_guide', 'register_failed')  # 등록 실패 / 관람객 분실
         # [코스 관람 변경 ⑦] 키오스크 정지 후 등(웹캠)이 키오스크를 보게 제자리 회전 (Nav2 spin, course_engine FACE_KIOSK).
