@@ -255,7 +255,10 @@ class MotionMixin:
         p, pts = self.p, self.scan_pts
         # 추종 중: 관람객 본인의 다리 점은 장애물에서 뺀다 (person_obstacle_clear 안, 반지름 0.28로 커져 사람 주변이
         # 막힌 길이 됨). 단, 로봇 몸 가까이(robot_radius + 0.15 안)의 점은 사람 추정이 틀렸을 수 있어 그대로 둔다
-        if p['person_obstacle_clear'] > 0 and here is not None and self.kf.x is not None and self.state == 'FOLLOW':
+        # 최근 person_obstacle_seen 안에 관람객을 봤을 때만 (오래 못 본 예측 위치 둘레를 비우면 진짜 장애물을 지울 수 있음,
+        # jsbzzz feat/follow-perception-update)
+        if p['person_obstacle_clear'] > 0 and here is not None and self.kf.x is not None and self.state == 'FOLLOW' \
+                and self.now() - self.seen < p['person_obstacle_seen']:
             last, vel = self.person()
             ps = last + vel * min(self.now() - self.kf.t, p['predict_max'])
             drop = (np.hypot(pts[:, 0] - ps[0], pts[:, 1] - ps[1]) < p['person_obstacle_clear']) \
@@ -449,7 +452,9 @@ class MotionMixin:
         p = self.p
         t0 = time.monotonic()
         goal_a, here_a, fc = np.asarray(goal, float), np.asarray(here, float), self.field_cache
-        if fc is not None and t0 - fc[0] < p['field_max_age'] \
+        # 지난 지도가 '길 없음'(로봇 자리 약 50)이었으면 다시 쓰지 않음: 장애물이 비켜도 0.5 s 동안 길 없음으로 남음
+        # (jsbzzz feat/follow-perception-update의 prev_path 조건, 2026-11-21)
+        if fc is not None and t0 - fc[0] < p['field_max_age'] and fc[6] < 49.0 \
                 and np.linalg.norm(goal_a - fc[1]) < p['field_reuse_dist'] \
                 and np.linalg.norm(here_a - fc[2]) < p['field_reuse_dist']:
             field, origin, lidar_only = fc[3], fc[4], fc[5]
@@ -471,7 +476,8 @@ class MotionMixin:
                     self.log_every('path_none', 3.0, f'길 없음 (라이다만으로도): 목표까지 직선 '
                                                      f'{np.linalg.norm(goal_a - here_a):.2f} m, 상태 {self.state} '
                                                      f'(목표 둘레를 사람·받침대가 막았거나 로봇이 갇힘)')
-            self.field_cache = (t0, goal_a, here_a, field, origin, lidar_only)
+            cached_path = float(self.sample(field, origin, here_a[:1], here_a[1:])[0])
+            self.field_cache = (t0, goal_a, here_a, field, origin, lidar_only, cached_path)
             self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
         if lidar_only:
             self.dbg['path_lidar_only'] = True
@@ -525,7 +531,18 @@ class MotionMixin:
             local = raw if kl <= 0 else cv2.dilate(raw, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * kl + 1, 2 * kl + 1)))
             grid[win] = local[win]
             grid[ry, rx] = 0                        # 로봇 칸은 늘 출발 가능
-        dist = grid_distances(grid == 0, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]
+        # 목표 칸이 장애물에 덮였거나 로봇과 이어지지 않으면(사람·받침대가 둘러쌈), 로봇이 갈 수 있는 가장 가까운 빈칸으로 옮김
+        # → 길 없음(50)으로 서지 않고 목표 쪽으로 최대한 다가감 (jsbzzz feat/follow-perception-update, 2026-11-21)
+        free = grid == 0
+        _, labels = cv2.connectedComponents(free.astype(np.uint8), connectivity=8)
+        robot_lbl = int(labels[ry, rx])
+        if not free[gy, gx] or (robot_lbl > 0 and labels[gy, gx] != robot_lbl):
+            fy, fx = np.nonzero(labels == robot_lbl) if robot_lbl > 0 else np.nonzero(free)
+            if fy.size:
+                j = int(np.argmin((fy - gy) ** 2 + (fx - gx) ** 2))
+                gy, gx = int(fy[j]), int(fx[j])
+                self.dbg['goal_snapped'] = True
+        dist = grid_distances(free, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]
         dist *= res
         dist[~np.isfinite(dist)] = 50.0
         return dist, origin

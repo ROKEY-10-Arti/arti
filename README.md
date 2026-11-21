@@ -34,3 +34,4 @@
 - [주행 띄우기 (localization, nav2, rviz)](docs/common/navigation.md)
 - [요구사항 요약 (개발용)](docs/common/requirements.md)
 - [트러블슈팅 기록](docs/troubleshooting/README.md)
+- [자유 관람(인식·주행) 빌드 및 단계별 실행·테스트 가이드](docs/follow/run_and_test_guide.md)

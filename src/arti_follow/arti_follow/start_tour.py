@@ -102,7 +102,10 @@ class TourMixin:
         if not self.holding:
             goal = self.reachable_goal(ahead - to / d * p['target_distance'])   # 벽에 붙은 목표면 밀어냄 (우회 가능하게)
             self.dbg['reason'] = 'follow'
-            return self.drive(*self.dwa(pose, goal, ahead, keep_view=True))
+            # 화면 유지 벌점은 카메라로 view_fresh_time 안에 본 관람객일 때만: 예측·라이다 보조·벽 좌표 대체로만 이어 가는 중에는
+            # 그 위치를 화면에 두려고 크게 돌 이유가 약함 (jsbzzz feat/follow-perception-update, 2026-11-21)
+            keep_view = now - self.cam_seen <= p['view_fresh_time']
+            return self.drive(*self.dwa(pose, goal, ahead, keep_view=keep_view))
         # 가까우면: 앞으로는 안 가고 사람 쪽으로 몸만 돌림 (작품 감상 중 등)
         self.dbg['reason'] = 'hold'
         return self.face(pose, here, person)
@@ -119,20 +122,30 @@ class TourMixin:
         # [11] 방금 놓쳤나? (직전 상태가 FOLLOW) → 예: 놓친 시각·회전 방향 기억 (한 번만) / 아니오: 건너뜀
         # 방금 놓친 순간(직전까지 FOLLOW)에만 한 번: 놓친 시각과 사람이 가던 쪽(왼/오른)을 기억 → 나중에 그쪽으로 돈다
         if self.state == 'FOLLOW':
+            prev_path = self.path_dist              # 놓치기 직전 추종 경로 거리 (벽을 돌아가던 중이었나 판단)
             self.lost_at, self.spin_at, self.wait_at = now, None, None
             self.best_dist, self.progress_at = None, now   # 이동 진척 (가장 짧았던 경로 거리, 그때 시각)
             self.path_dist = None                   # 이전 dwa(추종) 값은 목표가 달라서 버림
             # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4).
+            # 걷던 중(search_goal_ext_speed 넘게) 놓쳤으면 걷던 방향으로 최대 search_goal_ext_max 더 감 (모퉁이 너머로 사라진 경우)
+            # (jsbzzz feat/follow-perception-update, 2026-11-21)
+            ext = vel * min(p['predict_max'], 1.0) if float(np.linalg.norm(vel)) > p['search_goal_ext_speed'] else np.zeros(2)
+            if np.linalg.norm(ext) > p['search_goal_ext_max']:
+                ext *= p['search_goal_ext_max'] / float(np.linalg.norm(ext))
             # 벽 모서리에 붙어 있으면 로봇이 갈 수 있는 곳으로 밀어냄 → 길 찾기가 모서리를 돌아가는 길을 찾음
-            self.search_goal = np.asarray(self.reachable_goal(last.copy()), float)
+            self.search_goal = np.asarray(self.reachable_goal(last + ext), float)
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
             # 먼저 돌아볼 곳 = 사람이 가던 쪽 (마지막 위치 + 속도 × search_look_ahead).
             # 놓친 이유는 대부분 사람이 탑캠 화면 옆으로 빠진 것 → 마지막 자리로 직진하면 카메라는 '있던 곳'을 봄
-            # (2026-11-20: 다시 찾는 데 9~23 s). 서 있다 놓쳤으면(속도≈0) 마지막 자리 쪽을 본다
-            self.look_at = last + vel * p['search_look_ahead']
-            self.get_logger().info(f'관람객 놓침 → 가던 쪽으로 먼저 돌아봄, 그다음 마지막 위치까지 이동 '
-                                   f'({float(np.linalg.norm(last - here)):.2f} m)')
+            # (2026-11-20: 다시 찾는 데 9~23 s). 서 있다 놓쳤으면(속도≈0) 마지막 자리 쪽을 본다.
+            # 벽을 돌아가던 중(경로 거리가 직선보다 detour_margin 넘게 김)에 놓쳤으면 돌아보기를 건너뛰고 바로 이동:
+            # 벽 앞에서 벽 너머를 돌아봐야 보이지 않음 (jsbzzz feat/follow-perception-update, 2026-11-21)
+            straight = float(np.linalg.norm(last - here))
+            detouring = prev_path is not None and prev_path < 49.0 and prev_path > straight + p['detour_margin']
+            self.look_at = None if detouring else last + vel * p['search_look_ahead']
+            self.get_logger().info(f'관람객 놓침 → {"벽을 돌아가던 중이라 바로 이동" if detouring else "가던 쪽으로 먼저 돌아봄"}, '
+                                   f'그다음 마지막 위치까지 이동 ({straight:.2f} m)')
         # [11-1] 가던 쪽을 아직 안 돌아봤나? (look_at != None) → 제자리 회전, 그쪽을 보거나 search_look_time 지나면 끝
         if self.look_at is not None and self.spin_at is None:
             off = wrap(math.atan2(self.look_at[1] - here[1], self.look_at[0] - here[0]) - pose[2])

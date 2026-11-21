@@ -10,6 +10,7 @@ docs/
 │   └── requirements.md      노션 BR/SR 요약, 수치 기준, 기능→패키지 매핑
 ├── follow/              자유 관람 팀 (src/arti_follow/)
 │   ├── README.md            범위, 노드·인터페이스·파라미터 설계, 확인 필요 사항
+│   ├── run_and_test_guide.md  실제/부분 시나리오, 단품/bag/모듈 단위 빌드·실행 가이드
 │   └── tasks.md             노션 작업 목록 T01~T46 체크리스트
 ├── course/              코스 관람 (src/arti_pc2_nav/, robot4)
 │   ├── README.md            다른 팀과 주고받는 것, 패키지 README 링크

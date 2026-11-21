@@ -131,10 +131,14 @@
       "search_time": "최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 → 2π/20 = 0.31 rad/s [s] 10 → 20 (2026-11-19: 0.63 rad/s는 너무 빨라 탑캠이 다시 못 잡음)",
       "search_spin": "회전 탐색 최소 속도 [rad/s] (보통은 2π/search_time)",
       "search_spin_extra": "한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]",
-      "wait_time": "회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]"
+      "wait_time": "회전이 끝난 뒤 정지 대기 (플로우차트 10초) [s]",
+      "search_goal_ext_speed": "놓칠 때 관람객 속도가 이보다 [m/s] 빠르면 탐색 목표를 걷던 방향으로 늘림 (jsbzzz feat/follow-perception-update)",
+      "search_goal_ext_max": "탐색 목표를 늘리는 최대 거리 [m] (모퉁이 너머로 사라진 경우)"
     },
     "lost_timeout": 2.5,
     "search_look_ahead": 2.0,
+    "search_goal_ext_speed": 0.2,
+    "search_goal_ext_max": 0.9,
     "search_look_time": 3.0,
     "search_move_time": 20.0,
     "search_stall_time": 3.0,
@@ -164,7 +168,8 @@
       "leg_min_points": "다리 묶음 최소 점 수",
       "leg_min_width": "다리 묶음 최소 폭 [m]",
       "leg_max_width": "다리 묶음 최대 폭 [m] (이보다 길면 벽·가구)",
-      "leg_pair_max": "다리 둘을 한 사람으로 묶는 최대 거리 [m]"
+      "leg_pair_max": "다리 둘을 한 사람으로 묶는 최대 거리 [m]",
+      "person_obstacle_seen": "관람객 다리 점을 장애물에서 빼는 것은 최근 이 시간 [s] 안에 관람객을 봤을 때만 (jsbzzz feat/follow-perception-update)"
     },
     "lidar_assist": true,
     "lidar_assist_after": 0.3,
@@ -177,6 +182,7 @@
     "static_learn_dist": 1.0,
     "static_cell": 0.05,
     "person_obstacle_clear": 0.3,
+    "person_obstacle_seen": 0.5,
     "seg_gap": 0.1,
     "leg_min_points": 2,
     "leg_min_width": 0.03,
@@ -272,7 +278,8 @@
       "spin_window": "w_spin이 보는 최근 회전 기간 [s]",
       "spin_budget": "w_spin: 이 각도 [rad]까지는 벌점 없음 (90°)",
       "follow_progress_far": "따라가기 우선: 목표가 이보다 가까우면(거의 도착) 켜지 않음 [m] (2026-11-21: 목표 0.1 m에서 켜져 화면 유지를 놓고 돎)",
-      "follow_progress_best_min": "따라가기 우선: 가장 잘 가는 후보도 1.5 s 동안 이만큼 [m] 못 줄이면 켜지 않음"
+      "follow_progress_best_min": "따라가기 우선: 가장 잘 가는 후보도 1.5 s 동안 이만큼 [m] 못 줄이면 켜지 않음",
+      "view_fresh_time": "화면 유지 벌점(w_view)은 카메라로 이 시간 [s] 안에 본 관람객일 때만 (예측·라이다 보조로 이어 가는 중에는 끔, jsbzzz feat/follow-perception-update)"
     },
     "robot_radius": 0.28,
     "safety_margin": 0.02,
@@ -294,6 +301,7 @@
     "follow_progress_best_min": 0.1,
     "follow_view_hold": 2.0,
     "view_half_angle": 0.4,
+    "view_fresh_time": 0.4,
     "w_turn": 0.02,
     "w_turn_change": 0.05,
     "w_turn_flip": 0.1,

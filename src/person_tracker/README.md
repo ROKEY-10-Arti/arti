@@ -179,3 +179,39 @@ cd ~/turtlebot4_ws && colcon build --symlink-install --packages-select person_tr
 
 ## 6. 카메라 및 초기 위치 커스터마이징
 - [config/phone_camera.yaml](config/phone_camera.yaml)에서 상단 카메라 위치(`extrinsics: x, y, z, roll, pitch, yaw`), 수평 화각(`camera_intrinsics: hfov_deg`), 초기 위치(`initial_pose`)를 수정한 뒤 `colcon build --symlink-install --packages-select person_tracker`로 반영할 수 있습니다.
+
+---
+
+## 7. 통합 · 부분 · Bag · 모듈 단위 테스트 실행 안내
+
+> 전체 통합(주행+구역+음성)을 포함한 상세 명령은 [`docs/follow/run_and_test_guide.md`](../../docs/follow/run_and_test_guide.md)에 정리되어 있습니다.
+
+### ① 패키지 빌드
+```bash
+cd ~/project/arti && source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-select arti_common arti_follow person_tracker
+source install/setup.bash
+```
+
+### ② 1대 PC 격리 환경 설정 (Bag/단독 테스트 시 현장 로봇과 분리)
+```bash
+unset ROS_DISCOVERY_SERVER ROS_SUPER_CLIENT
+export ROS_DOMAIN_ID=99 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+ros2 daemon stop && source ~/project/arti/install/setup.bash
+```
+
+### ③ `person_tracker` 단독 / Bag 재생 테스트
+```bash
+# 1) 카메라+LiDAR+TF 녹화 bag 재생 (기존 target_person/* 토픽 충돌 방지용 -x 제외)
+ros2 run person_tracker gesture_test_node
+# kinematic gating 비활성 비교: --ros-args -p use_kinematic_gating:=false
+# OAK-D bag(top_cam 없음) 사용 시: --ros-args -p image_topic:=/robot1/oakd/rgb/image_raw/compressed
+ros2 bag play ~/bag/test_full -x '/.*target_person.*'
+
+# 2) 로컬 웹캠 단독 실행 (제스처 / 정면 자동등록)
+ros2 run person_tracker gesture_test_node --ros-args -r __ns:=/robot1 -p video_source:=0
+ros2 run person_tracker front_tracker_node --ros-args -r __ns:=/robot1 -p video_source:=0
+
+# 3) 모듈 단위 import 스모크 테스트 (격리 환경)
+python3 -c "import person_tracker.core.lidar_person_localizer, person_tracker.nodes.base_tracker_node, person_tracker.debug.gesture_test_node; print('PERCEPTION_IMPORT_OK')"
+```
