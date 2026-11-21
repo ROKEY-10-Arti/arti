@@ -21,6 +21,7 @@ guides:
   explain_failed: "죄송합니다. 작품 설명을 불러오지 못했습니다."                                    # 작품 설명 실패 (PC3 응답 없음·없는 작품·합성 실패, guide_audio_node가 직접)
   # --- robot4 코스 관람 전용 (arti_pc2_nav a_course_node가 씀). 로봇이 앞장서고 관람객이 뒤에서 따라온다 ---
   course_register: "로봇 뒤쪽 카메라를 보고 주먹을 쥐었다가 손바닥을 펼쳐 주세요."               # 키오스크 도착 후 등록 요청
-  course_recognized: "인식되었습니다. 잠시 후 관람을 시작합니다."                                # 등록 완료, start_tour 대기
+  # (2026-11-21 삭제) course_recognized "…키오스크 화면에서 관람 시작 버튼을 눌러 주세요." — 키오스크가 이제 인식 직후
+  #   start_tour를 자동으로 보내서(PR #6) 누를 버튼이 없고, 곧바로 나오는 course_start에 끊겼다. (arti_pc2_nav 변경 ⑫)
   course_start: "관람을 시작합니다. 저를 따라오세요."                                            # start_tour 출발
-  course_come_here: "조금 멀어지셨어요. 저를 따라오세요."                                        # 이동 중 관람객이 멀어짐·안 보임 → 정지
+  course_come_here: "조금 멀어지셨어요. 로봇 뒤쪽 카메라 앞으로 와 주세요."                    # 이동 중 관람객이 멀어짐·안 보임 → 정지

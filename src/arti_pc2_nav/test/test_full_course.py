@@ -4,6 +4,7 @@
 흐름: start()(prepare_tour) -> 키오스크 -> 등록 -> WAIT_START -> begin_tour()(start_tour) -> 작품 -> 출구 -> 도킹.
 반원 판정, 출구 직사각형(arti_common), 등록, 관람객 거리 감시, 도킹 확인, 도킹 복귀(실패·취소)를 검사합니다.
 """
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent / 'common' / 'arti_common'))
 
 from arti_pc2_nav.course_engine import TourMachine, Event  # noqa: E402
-from arti_pc2_nav.guided_tour_plan import load_course_config, Pose2D  # noqa: E402
+from arti_pc2_nav.guided_tour_plan import load_course_config, load_start_pose, Pose2D  # noqa: E402
 
 P = ROOT / 'config/a_course.yaml'
 Z = str(ROOT.parent / 'common' / 'arti_common' / 'config' / 'artworks.yaml')
@@ -27,9 +28,10 @@ def machine(**kw):
 
 
 def stop_at(m, pose, t):
-    """pose에서 반원 진입 -> Nav2 취소 결과 -> 정지 확인까지 진행. 마지막 tick의 Event 반환."""
+    """pose에서 반원 진입 -> Nav2 취소 결과 -> 정지 확인까지 진행. 마지막 tick의 Event 반환.
+    키오스크(kiosk_stop_at_goal)는 취소 없이 goal_pose까지 가므로 Nav2 SUCCEEDED로 도착."""
     m.tick(t, pose, 0, 0, 0)
-    m.nav_result('CANCELED', t)
+    m.nav_result('SUCCEEDED' if m.state == 'NAV_KIOSK' else 'CANCELED', t)
     m.tick(t + .1, pose, 0, 0, 0)
     return m.tick(t + 1, pose, 0, 0, 0)
 
@@ -53,6 +55,17 @@ class PlanTests(unittest.TestCase):
         z = self.m.plan.artworks[0].zone
         self.assertFalse(z.contains((z.cx - .1, z.cy)))
         self.assertTrue(z.contains((z.cx + .1, z.cy)))
+
+    def test_start_pose_from_init_pose_yaml(self):
+        """언독 후 initialpose = arti_common init_pose.yaml robots./robot4.undock (follow 팀과 같은 파일)."""
+        path = ROOT.parent / 'common' / 'arti_common' / 'config' / 'init_pose.yaml'
+        u = load_start_pose(path, 'robot4', 'undock')
+        self.assertAlmostEqual(u.x, -0.12)
+        self.assertAlmostEqual(u.y, 0.03)
+        self.assertAlmostEqual(math.degrees(u.yaw), -179)
+        d = load_start_pose(path, '/robot4', 'dock')               # yaw_deg 없음 → dock 자신 방향 0
+        self.assertEqual((d.x, d.y), (0.304, -0.0957))
+        self.assertIsNone(load_start_pose(path, '/robot9', 'undock'))
 
     def test_exit_zone_from_arti_common(self):
         """출구 = arti_common artworks.yaml의 exit 직사각형 (follow 팀과 같은 구역)."""
@@ -85,12 +98,138 @@ class PrepareTests(unittest.TestCase):
     def setUp(self):
         self.m = machine(register_timeout=60, ready_timeout=130)
 
+    def test_redock_right_after_undock(self):
+        """언독 직후 Nav2·AMCL이 준비 안 됨 → 키오스크로 가지 않고 Dock 액션으로 바로 재도킹 → 끝나면 DONE."""
+        m = self.m                                          # start() 직후 = NAV_KIOSK (노드는 언독 후 준비 대기 중)
+        ev = m.redock('not_ready: Nav2', 5)
+        self.assertEqual(m.state, 'DOCKING')
+        self.assertEqual(m.end_reason, 'not_ready: Nav2')
+        self.assertIn(Event('dock', None), ev)
+        self.assertNotIn('navigate', [e.kind for e in ev])  # Nav2 안 씀
+        m.docking_action_result(True, 30)
+        m.dock_confirmed(31)
+        self.assertEqual(m.state, 'DONE')
+
+    def test_redock_only_before_leaving(self):
+        m = self.m
+        stop_at(m, m.plan.kiosk_goal, 2)                    # 키오스크 도착 뒤에는 재도킹 아님 (Nav2로 복귀)
+        with self.assertRaises(ValueError):
+            m.redock('canceled', 5)
+
     def arrive(self, t=1.):
         """키오스크 정지 -> REGISTERING + 손바닥 안내. 다음 시각 반환."""
         ev = stop_at(self.m, self.m.plan.kiosk_goal, t)
         self.assertEqual(self.m.state, 'REGISTERING')
         self.assertIn(Event('guide', 'register'), ev)
         return t + 1
+
+    def test_kiosk_turn_before_register(self):
+        """반원에 들어서자마자 키오스크를 보고 멈춤 → goal_pose.yaw(등을 키오스크로)까지 spin → 등록 시작."""
+        m, g = self.m, self.m.plan.kiosk_goal
+        facing = Pose2D(g.x, g.y, g.yaw + math.pi)                # 반대 방향으로 섬
+        ev = stop_at(m, facing, 1)
+        self.assertEqual(m.state, 'FACE_KIOSK')
+        spin = [e.value for e in ev if e.kind == 'spin']
+        self.assertEqual(len(spin), 1)
+        self.assertAlmostEqual(abs(spin[0]), math.pi, places=3)   # 180° 회전
+        self.assertNotIn(Event('guide', 'register'), ev)          # 돌기 전에는 등록 안내 안 함
+        ev = m.spin_result(True, 5)
+        self.assertEqual(m.state, 'REGISTERING')
+        self.assertIn(Event('guide', 'register'), ev)
+
+    def test_kiosk_goes_to_goal_not_zone_edge(self):
+        """[⑪] 키오스크 반원에 들어서도 Nav2를 취소하지 않고 goal_pose까지 감 → SUCCEEDED로 정지 확인."""
+        m, z = self.m, self.m.plan.kiosk_zone
+        edge = Pose2D(z.cx + 0.45, z.cy + 0.30, 0.0)               # 반원 안 가장자리
+        self.assertTrue(z.contains(edge))
+        ev = m.tick(1, edge, 0, 0.2, 0)
+        self.assertEqual(m.state, 'NAV_KIOSK')                    # 안 멈춤
+        self.assertNotIn(Event('cancel', None), ev)
+        m.nav_result('SUCCEEDED', 1.5)                            # goal_pose 도착
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        old = machine(kiosk_stop_at_goal=False)                   # 전 방식: 진입 즉시 취소
+        old.tick(1, edge, 0, 0.2, 0)
+        self.assertEqual(old.state, 'CANCELING')
+
+    def test_kiosk_aborted_inside_zone_counts_as_arrived(self):
+        """[⑪] 목표 바로 앞에서 Nav2 ABORTED여도 반원 안이면 도착. 반원 밖이면 복구."""
+        m, g = self.m, self.m.plan.kiosk_goal
+        m.nav_result('ABORTED', 0)                                # 위치 정보 전 → 반원 판정 불가
+        self.assertEqual(m.state, 'WAIT_RECOVERY')
+        m = machine(kiosk_goal_tolerance=0.0)                     # 근처 도착 끄고 ABORTED 경로만 봄
+        m.tick(1, Pose2D(g.x, g.y - 0.1, g.yaw), 0, 0, 0)
+        m.nav_result('ABORTED', 2)
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        m2, z = machine(), self.m.plan.kiosk_zone
+        behind = Pose2D(z.cx - 0.2*math.cos(z.direction), z.cy - 0.2*math.sin(z.direction))
+        self.assertFalse(z.contains(behind))                       # 반원 뒤쪽(키오스크 벽 쪽) = 반지름과 상관없이 밖
+        m2.tick(1, behind, 0, 0, 0)
+        m2.nav_result('ABORTED', 2)
+        self.assertEqual(m2.state, 'WAIT_RECOVERY')
+
+    def test_kiosk_near_goal_counts_as_arrived(self):
+        """[⑪] 2026-11-20 실주행: 찍은 자리 0.22 m 앞에서 Nav2가 더 못 감 → 반원 안 + 0.30 m 안이면 도착."""
+        m, g, z = self.m, self.m.plan.kiosk_goal, self.m.plan.kiosk_zone
+        a = math.atan2(z.cy - g.y, z.cx - g.x)                    # goal에서 반원 중심 쪽으로 0.22 m
+        p = Pose2D(g.x + 0.22*math.cos(a), g.y + 0.22*math.sin(a), 2.5)
+        self.assertTrue(z.contains(p))
+        self.assertLess(math.hypot(p.x - g.x, p.y - g.y), 0.30)
+        ev = m.tick(1, p, 0, 0.2, 0)
+        self.assertEqual(m.state, 'CANCELING')
+        self.assertIn(Event('cancel', None), ev)
+        m.nav_result('CANCELED', 1.2)
+        self.assertEqual(m.state, 'VERIFY_STOP')
+        m.tick(1.3, p, 0, 0, 0)
+        m.tick(2.2, p, 0, 0, 0)
+        self.assertEqual(m.state, 'FACE_KIOSK')                     # → 회전 → 등록(스캔)
+        m.spin_result(True, 4)
+        self.assertEqual(m.state, 'REGISTERING')
+
+    def test_kiosk_turn_to_plane_from_side(self):
+        """[⑪] 어디에 서든 등이 키오스크 면을 보게 = 정면이 zone.direction."""
+        m, z = self.m, self.m.plan.kiosk_zone
+        p = Pose2D(z.cx + 0.45, z.cy + 0.30, math.radians(176))
+        ev = stop_at(m, p, 1)
+        self.assertEqual(m.state, 'FACE_KIOSK')
+        turn = [e.value for e in ev if e.kind == 'spin'][0]
+        self.assertAlmostEqual(math.cos(p.yaw + turn - z.direction), 1.0, places=6)
+
+    def test_kiosk_turn_back_to_kiosk_from_side(self):
+        """kiosk_face_target='center'(전): 반원 옆(동쪽)에서 서쪽을 보고 멈춤 → 등이 반원 중심을 보게 약 180°."""
+        self.m = machine(register_timeout=60, ready_timeout=130, kiosk_face_target='center')
+        m, z = self.m, self.m.plan.kiosk_zone
+        p = Pose2D(z.cx + 0.45, z.cy + 0.30, math.radians(176))   # 실주행 2026-11-20과 비슷한 자리
+        ev = stop_at(m, p, 1)
+        self.assertEqual(m.state, 'FACE_KIOSK')
+        turn = [e.value for e in ev if e.kind == 'spin'][0]
+        final = p.yaw + turn
+        away = math.atan2(p.y - z.cy, p.x - z.cx)                 # 키오스크 반대쪽
+        self.assertAlmostEqual(math.cos(final - away), 1.0, places=6)
+        self.assertGreater(abs(math.degrees(turn)), 140)
+
+    def test_kiosk_turn_small_or_failed(self):
+        m, g = self.m, self.m.plan.kiosk_goal
+        stop_at(m, Pose2D(g.x, g.y, g.yaw + 0.2), 1)              # 0.2 rad 차이 → 안 돎
+        self.assertEqual(m.state, 'REGISTERING')
+        m2 = machine()
+        stop_at(m2, Pose2D(g.x, g.y, g.yaw - 2.0), 1)
+        self.assertEqual(m2.state, 'FACE_KIOSK')
+        m2.spin_result(False, 3)                                  # 회전 실패해도 등록은 시작
+        self.assertEqual(m2.state, 'REGISTERING')
+        m3 = machine(face_timeout=5)
+        stop_at(m3, Pose2D(g.x, g.y, g.yaw - 2.0), 1)
+        m3.tick(7, Pose2D(g.x, g.y, g.yaw - 2.0), 0, 0, 0)        # 결과가 안 옴 → 시간 초과 후 등록
+        self.assertEqual(m3.state, 'REGISTERING')
+        m4 = machine(kiosk_face=False)
+        stop_at(m4, Pose2D(g.x, g.y, g.yaw - 2.0), 1)
+        self.assertEqual(m4.state, 'REGISTERING')
+
+    def test_cancel_while_turning_goes_home(self):
+        m, g = self.m, self.m.plan.kiosk_goal
+        stop_at(m, Pose2D(g.x, g.y, g.yaw + math.pi), 1)
+        ev = m.abort_to_home('canceled', 3)
+        self.assertIn('navigate', [e.kind for e in ev])
+        self.assertEqual(m.spin_result(True, 4), [])              # 늦게 온 회전 결과는 무시
 
     def test_stop_requires_odom(self):
         m = self.m
@@ -111,6 +250,17 @@ class PrepareTests(unittest.TestCase):
         ev = m.tick(t + 1.0, k, 0, 0, 0)
         self.assertEqual(m.state, 'WAIT_START')
         self.assertIn(Event('guide', 'recognized'), ev)
+
+    def test_no_recognized_guide_when_empty(self):
+        # [⑫] 노드 기본값 recognized_guide='' -> 등록 완료 때 안내 이벤트 없음 (키오스크가 바로 start_tour)
+        m, t = self.m, self.arrive()
+        m.recognized_guide = ''
+        k = m.plan.kiosk_goal
+        for i in range(11):
+            m.visitor_seen(t + i * .1)
+            ev = m.tick(t + i * .1, k, 0, 0, 0)
+        self.assertEqual(m.state, 'WAIT_START')
+        self.assertNotIn('guide', [e.kind for e in ev])
 
     def test_gap_restarts_confirmation(self):
         m, t = self.m, self.arrive()
@@ -307,6 +457,102 @@ class TourTests(unittest.TestCase):
         self.assertEqual(m.end_reason, 'canceled')
         self.assertEqual(m.abort_to_home('canceled', self.t + 2), [])   # 이미 복귀 중
         self.assertEqual(m.state, 'NAV_HOME')
+
+    def explaining_on_arc(self):
+        """작품 1 반원 호 바로 안쪽에서 멈춰 해설 시작 (실주행 2026-11-20). (machine, zone, 다음 시각)"""
+        m, t = self.m, self.t
+        m.watch_visitor = False
+        m.begin_tour([1], t)
+        z = m.plan.artworks[0].zone
+        edge = Pose2D(z.cx + (z.radius - 0.01) * math.cos(z.direction), z.cy + (z.radius - 0.01) * math.sin(z.direction))
+        stop_at(m, edge, t + 1)
+        self.assertEqual(m.state, 'EXPLAINING')
+        return m, z, t + 3
+
+    def test_explaining_tolerates_amcl_jitter(self):
+        """해설 중 AMCL이 호 밖으로 몇 cm 튀거나(여유 0.15 m) 3초 안에 돌아오면 계속 해설."""
+        m, z, t = self.explaining_on_arc()
+        out = lambda d: Pose2D(z.cx + (z.radius + d) * math.cos(z.direction), z.cy + (z.radius + d) * math.sin(z.direction))
+        m.tick(t, out(0.05), 0, 0, 0)            # 5 cm 밖 → 여유 안
+        self.assertEqual(m.state, 'EXPLAINING')
+        m.tick(t + 0.5, out(0.30), 0, 0, 0)      # 30 cm 튐 → 지켜봄
+        m.tick(t + 2.0, out(0.30), 0, 0, 0)
+        self.assertEqual(m.state, 'EXPLAINING')
+        m.tick(t + 2.5, out(0.0), 0, 0, 0)       # 돌아옴
+        m.tick(t + 9.0, out(0.0), 0, 0, 0)
+        self.assertEqual(m.state, 'EXPLAINING')
+        m.explanation_result(1, True, t + 9.5)
+        self.assertEqual(m.completed, [1])
+
+    def test_explaining_fails_when_really_out_or_lost(self):
+        m, z, t = self.explaining_on_arc()
+        far = Pose2D(z.cx + (z.radius + 0.5) * math.cos(z.direction), z.cy + (z.radius + 0.5) * math.sin(z.direction))
+        m.tick(t, far, 0, 0, 0)
+        m.tick(t + 3.1, far, 0, 0, 0)            # 3초 넘게 밖 → 실패
+        self.assertEqual(m.state, 'ERROR')
+        self.assertIn('반원 이탈', m.fail_reason)
+        m2, z2, t2 = self.__class__.explaining_on_arc(self._fresh())
+        m2.tick(t2 + 1, None, 99, 0, 0)          # 위치 끊김 (2 s 넘으면 신선하지 않음)
+        m2.tick(t2 + 6.5, None, 99, 0, 0)
+        self.assertEqual(m2.state, 'ERROR')
+        self.assertIn('소실', m2.fail_reason)
+
+    def _fresh(self):
+        """같은 setUp 상태의 새 테스트 객체 (machine을 하나 더 쓰려고)."""
+        other = self.__class__(self._testMethodName)
+        other.setUp()
+        return other
+
+    def home_stop(self, m, pose, t):
+        """도킹 접근 원 안 pose에서 멈춤: NAV_HOME → 취소 → 정지 확인 통과. 마지막 Event 반환."""
+        m.state, m.state_since, m.returning = 'NAV_HOME', t, True
+        m.tick(t, pose, 0, 0, 0)
+        self.assertEqual(m.state, 'CANCELING_HOME')
+        m.nav_result('CANCELED', t)
+        m.tick(t + .1, pose, 0, 0, 0)
+        return m.tick(t + 1, pose, 0, 0, 0)
+
+    def test_face_dock_before_docking(self):
+        """[코스 관람] 출구(북쪽)에서 내려와 남쪽을 보고 접근 원에 멈춤 → 정면이 스테이션을 보게 약 +90° → Dock.
+        (2026-11-20: 도크를 안 보고 Dock → 앞 벽에 부딪혀 실패)"""
+        m, t = self.m, self.t
+        h, st = m.home_goal, m.plan.dock_station
+        pose = Pose2D(h.x + 0.05, h.y + 0.20, -math.pi / 2)
+        ev = self.home_stop(m, pose, t)
+        self.assertEqual(m.state, 'FACE_DOCK')
+        turn = [e.value for e in ev if e.kind == 'spin'][0]
+        want = math.atan2(st.y - pose.y, st.x - pose.x)
+        self.assertAlmostEqual(math.cos(pose.yaw + turn - want), 1.0, places=6)
+        self.assertNotIn(Event('dock', None), ev)                 # 돌기 전엔 Dock 안 함
+        ev = m.spin_result(True, t + 4)
+        self.assertEqual(m.state, 'DOCKING')
+        self.assertIn(Event('dock', None), ev)
+
+    def test_face_dock_skip_fail_timeout(self):
+        m, t = self.m, self.t
+        h, st = m.home_goal, m.plan.dock_station
+        facing = math.atan2(st.y - h.y, st.x - h.x)
+        ev = self.home_stop(m, Pose2D(h.x, h.y, facing + 0.1), t)   # 이미 도크를 봄 → 바로 Dock
+        self.assertEqual(m.state, 'DOCKING')
+        self.assertIn(Event('dock', None), ev)
+        m2 = machine()
+        m2.home_goal = h
+        self.home_stop(m2, Pose2D(h.x, h.y, facing + 2.0), t)
+        self.assertEqual(m2.state, 'FACE_DOCK')
+        self.assertEqual(m2.abort_to_home('canceled', t + 2), [])  # 복귀 중이라 그대로 (노드가 spin 취소)
+        m2.spin_result(False, t + 2.5)                              # 회전 실패여도 Dock 시도
+        self.assertEqual(m2.state, 'DOCKING')
+        m3 = machine(face_timeout=5)
+        m3.home_goal = h
+        p3 = Pose2D(h.x, h.y, facing + 2.0)
+        self.home_stop(m3, p3, t)
+        ev = m3.tick(t + 7, p3, 0, 0, 0)                            # 결과가 안 옴 → 시간 초과 후 Dock
+        self.assertEqual(m3.state, 'DOCKING')
+        self.assertIn(Event('dock', None), ev)
+        m4 = machine(dock_face=False)
+        m4.home_goal = h
+        self.home_stop(m4, Pose2D(h.x, h.y, facing + 2.0), t)
+        self.assertEqual(m4.state, 'DOCKING')
 
     def test_exit_far_is_nav_failure(self):
         """출구 Nav2 SUCCEEDED인데 출구 직사각형 밖 -> WAIT_RECOVERY (노드가 도킹 복귀)."""

@@ -12,6 +12,7 @@
   <exec_depend>action_msgs</exec_depend><exec_depend>visualization_msgs</exec_depend><exec_depend>tf2_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>arti_bringup</exec_depend>     <!-- launch에서 localization.launch.py include (follow 팀과 같음) -->
   <exec_depend>arti_common</exec_depend>      <!-- 출구 구역 (artworks.yaml, zones.py) — follow 팀과 공통 -->
   <exec_depend>arti_interfaces</exec_depend>  <!-- ExplainArtwork, PrepareTour, StartTour -->
   <exec_depend>arti_audio</exec_depend>       <!-- launch에서 guide_audio.launch.py include -->
