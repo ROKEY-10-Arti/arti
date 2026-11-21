@@ -72,7 +72,7 @@ python3 ~/project/arti/src/person_tracker/research/bag_benchmark.py \
 | `--max-frames N` | `0` (전체) | 앞 N프레임만 평가 (빠른 동작 확인용) |
 | `--stride K` | `1` (매 프레임) | K프레임마다 1장씩 샘플링 |
 | `--lock-point x,y` | 자동 잠금 | 첫 타겟 선택 좌표 (예: 중앙 `320,240`; 비우면 첫 검출 인물 자동 잠금) |
-| `--snap-frames` | 자동 선정 | Det/Seg/Pose 비교 중심 프레임 번호 직접 지정 (예: `40,120,250`) |
+| `--snap-frames` | 자동 선정 | Det/Seg/Pose·버전 비교 중심 프레임 번호 직접 지정 (예: `40,120,250`) |
 | `--seq-delta Δ` | `10` | 전·중·후 3프레임 시퀀스 비교 간격 (`f-Δ`, `f`, `f+Δ`) |
 | `--reid-scale` | 꺼짐 | `follow_test`의 REID 완화 파라미터(`ema_min_sim=0.52` 등) 적용 |
 | `--no-localizer-compare` | 비교 켜짐 | LiDAR `Raw` vs `Kinematic+Map+EMA` 비교 생략 |
@@ -80,45 +80,50 @@ python3 ~/project/arti/src/person_tracker/research/bag_benchmark.py \
 
 ---
 
-## 3. 자동 생성되는 출력 파일 및 스냅샷 기준
+## 3. 자동 생성되는 정리 리포트 & 지표 의미
 
-실행이 끝나면 `<out>/<bag_name>/` 아래에 다음 파일들이 생성됩니다.
+실행이 끝나면 `<out>/<bag_name>/` 아래에 다음 항목들이 **5개 테마별 표 + 7종 차트 + 4종 시각 비교 이미지**로 정리됩니다.
 
-### A. 요약 표 (발표 자료 바로 복붙용)
-- `summary.md`: 모델 비교(추론/후처리/ReID 분리 시간, Max FPS, 부위별 U/M/L/F 유사도, Margin), 알고리즘 비교, LiDAR 비교 Markdown 표
-- `summary_models.csv`, `summary_modes.csv`, `summary_localizer.csv`
+### A. 통합 리포트 (`summary.md` & `summary_*.csv`)
+`summary.md` 하나에 아래 내용이 이미지 미리보기와 함께 순서대로 정리됩니다.
+- **0. 핵심 관찰 요약 (`Auto Insights`)**: 최고 FPS, 최고 진성 유지율, 최고 변별 마진, Pose 폴백률, Adaptive/LiDAR 개선치 자동 요약
+- **1. 속도·후처리 분해 표**: `Pre`, `Infer Mean / P95`, `Post+Trk (NMS 포함)`, `ReID Extract`, `Total Mean / P95`, `Max FPS`
+- **2. 특징 추출 & 부위 가용성 표**:
+  - `U / M / L Valid %`: 실제로 상의·허벅지·정강이 특징이 추출된 비율 (근접/가림 시 Pose 관절 소실률 확인용)
+  - `Pose Fallback %`: 관절 부족으로 Pose가 BBox 중앙 크롭으로 폴백한 비율
+  - `Mask FG %`: BBox 면적 중 실제 전경 마스크가 차지하는 비율 (배경 포함 정도 비교)
+  - `Avg Tgt Sim ± Std (Min)` 및 `U / M / L / F Avg Sim`
+- **3. 재식별 변별력 · 오인식 방어 표**:
+  - `True Lock %`: 전체 프레임 중 유사도 `>= 0.40`으로 실제 타겟을 유지한 비율
+  - `Hijack %`: 유사도 `< 0.40`인 타인을 타겟으로 오탐 잠금한 비율 (기존 `ByteTrack` 등의 ID 탈취 포착)
+  - `Direct Sw` vs `Recovered (Avg f)`: 비-SEARCH 직접 탈취 횟수와 이탈(`SEARCH`) 후 재등장 복귀(`RECOVERED`) 횟수·평균 소요 프레임 분리 집계
+  - `Other Avg / Max`, `Sim Margin Mean / Min`
+- **4. 추적 알고리즘 비교 표 (`1~5`)** / **5. 3D LiDAR Localizer 비교 표**
 
-### B. 프레임별 전체 시계열 원본 데이터 (`timeseries/`)
-- `model_<name>.csv`, `mode_<idx>_<name>.csv`, `localizer_<cfg>.csv`
-- 매 프레임마다 아래 지표를 전부 기록합니다:
-  - `frame_idx`, `t_sec`, `num_persons`, `locked`, `target_id`, `adaptive_state`, `ema_status`, `search_reason`
-  - `tgt_sim`, `tgt_u_sim`, `tgt_m_sim`, `tgt_l_sim`, `tgt_f_sim`, `other_max_sim`, `other_avg_sim`, `sim_margin`
-  - `bbox_x1..y2`, `bbox_cx`, `bbox_cy`, `bbox_area_ratio`, `bbox_move_px`
-  - `pre_ms`, `infer_ms`, `post_track_ms`, `reid_ms`, `total_ms`
-  - `loc_source`, `loc_dist_m`, `loc_base_x/y`, `loc_map_x/y`
+### B. 프레임별 전체 시계열 원본 (`timeseries/*.csv`)
+- 매 프레임마다 40개 이상 지표(`tgt_sim`, `tgt_u/m/l/f_sim`, `other_max_sim`, `sim_margin`, `u/m/l_valid`, `pose_fallback`, `mask_fg_pct`, `true_locked`, `hijacked`, `bbox_move_px`, `pre/infer/post_track/reid/total_ms`, `loc_*`)를 전부 저장합니다.
 
-### C. 비교 차트 (`charts/`)
-- `chart_models_latency_fps.png`: 모델별 `YOLO Infer` / `Post+Track` / `ReID` 지연시간 누적 막대 & Max FPS
-- `chart_models_tracking.png`: 모델별 타겟 잠금 유지율(`Locked %`) & 평균 유사도
-- `chart_models_part_sim.png`: 모델/태스크별 부위별 평균 유사도(`Total`, `Upper`, `Mid`, `Lower`, `Full`) — Det 배경 섞임 vs Seg/Pose 차이 비교
-- `chart_models_timeseries.png`: 동일 시간축 기준 모델별 `Target Sim` / `Sim Margin` / `Frame Latency(ms)` 동시 비교
-- `chart_modes_comparison.png`: 추적 알고리즘(`1~5`)별 유지율·ID Switch 및 시간별 유사도 곡선
+### C. 비교 차트 (`charts/`, 최대 7종)
+- `chart_models_latency_fps.png`: `YOLO Infer` / `Post+Track` / `ReID` 3단 지연 분해 & Max FPS
+- `chart_models_tracking.png`: 모델별 `True Lock %` vs `Hijack %` & 평균 유사도
+- `chart_models_part_sim.png`: 부위별(`Total / Upper / Mid / Lower / Full`) 유사도 비교
+- `chart_models_parts_and_fg.png`: `U / M / L Valid %` & `Pose Fallback %` vs `Mask FG %` & `Sim Margin`
+- `chart_models_timeseries.png`: 동일 시간축 기준 모델별 `Target Sim` / `Sim Margin` / `Frame Latency(ms)`
+- `chart_modes_comparison.png`: 알고리즘별 `True Lock %` vs `Hijack %` (`0.40` 임계선 포함)
 - `chart_localizer_distance.png`: 3D LiDAR 거리 추정 `Raw` vs `Kinematic+Map+EMA` 비교
 
-### D. 스냅샷 선정 기준 및 생성 이미지 (`snapshots/`)
-1. **상태 전환 대시보드 (`<ref_model>_<STATE>_fXXXX.png`)**:
-   - 기준 모델(`26n-pose`)에서 초기 안정(`SAFE` @ `f=15`, 1장), 혼잡(`GUARD`, 최대 2장), 이탈(`SEARCH`, 최대 2장), 복귀(`RECOVERED`, 최대 2장), 라이다 가림(`Occluded`, 최대 2장) 발생 시 카메라 + ReID 패널 + 벤치마크 패널 통합 대시보드를 저장합니다.
+### D. 시각 검증 스냅샷 (`snapshots/`)
+1. **상태 전환 대시보드 (`<ref>_<STATE>_fXXXX.png`)**: `SAFE(f=15)`, `GUARD`, `SEARCH`, `RECOVERED`, `Occluded` 발생 시 통합 대시보드 저장
 2. **동일 프레임 마스크 + 304D HSV 히스토그램 비교 (`compare_tasks_hist_<tag>_fXXXX.png`)**:
-   - 기준 모델 시계열에서 **① 혼잡/타인 유사도 최고점(`crowd`) → ② 이탈/복귀(`search`/`recovered`) → ③ 타겟 이동량 최대(`motion`) → ④ 부족 시 1/4·1/2·3/4 균등 지점** 순으로 최대 3개 중심 프레임을 자동 선정합니다 (`--snap-frames`로 직접 지정 가능).
-   - 선정된 동일 프레임에서 `26n-det` / `26n-seg` / `26n-pose` 각각의 **상단(마스크·스켈레톤 + Sim/U/M/L/F/지연시간 배너) + 하단(304D HSV Anchor/Recent/Other 히스토그램 히트맵 + 120f 시계열)** 을 나란히 비교합니다.
-3. **움직임·이벤트 전·중·후 3프레임 그리드 (`compare_seq_<tag>_fXXXX.png`)**:
-   - 위 중심 프레임 `f`에 대해 **`[BEFORE (f-Δ) | CENTER (f) | AFTER (f+Δ)]`** 3프레임을 행(`26n-det`, `26n-seg`, `26n-pose`) × 열(전/중/후) 그리드로 합성해 움직임·교차 전후의 마스크와 유사도 변화를 한눈에 비교합니다.
+   - 기준 모델(`26n-pose`)에서 **혼잡(`crowd`) → 복귀/이탈(`recovered`/`search`) → 최대 움직임(`motion`) → 1/4·1/2·3/4** 순으로 자동 선정한 동일 프레임에서 `26n-det / 26n-seg / 26n-pose`의 마스크 + 304D HSV 히스토그램 대조
+3. **실제 추출 픽셀 비교 (`compare_pixels_<tag>_fXXXX.png`)**:
+   - `[Overlay | Upper | Mid | Lower | Full FG]` 순서로 **배경을 검정으로 지운 실제 추출 픽셀만** 나란히 보여줘 `Det`의 배경 유입 vs `Seg`의 실루엣 분리 vs `Pose` 관절/폴백 차이를 직접 검증
+4. **버전 비교 (`compare_versions_<tag>_fXXXX.png`)**: `v8n-pose` / `11n-pose` / `26n-pose` 동일 프레임 비교
+5. **움직임 전·중·후 3프레임 그리드 (`compare_seq_<tag>_fXXXX.png`)**: `[BEFORE (f-Δ) | CENTER (f) | AFTER (f+Δ)] × (Det/Seg/Pose)`
 
 ---
 
 ## 4. 실시간 수동 오프라인 재생 (`run_offline_bag_test.sh`)
-
-자동 벤치마크 외에 실시간 GUI 창에서 직접 모델/모드 버튼(`Q/W/E`, `A/S/F`, `1~5`)과 ReID 트랙바를 눌러보며 확인하고 싶을 때 사용합니다.
 
 ```bash
 # [터미널 1] 오프라인 트래커 실행 (자동 격리 DOMAIN_ID=99)
