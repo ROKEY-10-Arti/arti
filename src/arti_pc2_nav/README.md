@@ -84,7 +84,7 @@ robot4 전용 `course_register`, `course_start`, `course_come_here`(follow 팀 �
 
 ## 초기 대비 바뀐 점 (코스 관람, 2026-11-20)
 
-11/19 첫 실주행 뒤 고친 것 (⑪은 11/20 실주행 뒤). 코드에는 같은 번호로 `[코스 관람 변경 ③]`처럼 표시해 두었다 → `grep -rn "코스 관람 변경 ③" src/`.
+11/19 첫 실주행 뒤 고친 것 (⑪은 11/20, ⑫~⑯은 11/21 실주행 뒤). 코드에는 같은 번호로 `[코스 관람 변경 ③]`처럼 표시해 두었다 → `grep -rn "코스 관람 변경 ③" src/`.
 
 | # | 바뀐 것 | 왜 (전에 생긴 문제) | 어디를 보면 되나 |
 |---|---|---|---|
@@ -99,6 +99,10 @@ robot4 전용 `course_register`, `course_start`, `course_come_here`(follow 팀 �
 | ⑨ | 도킹 접근 원에서 정면이 도크를 보게 spin 후 Dock | 도크를 안 보고 Dock → Create 3가 앞 벽에 부딪혀 실패 | `course_engine.py` `FACE_DOCK`, `_dock_turn` / `a_course.yaml` dock |
 | ⑩ | 인식 노드가 웹캠 직접 열기, `camera_pub` 안 띄움 (`direct_camera`) | 영상이 토픽을 거치고, 같은 웹캠을 두 번 엶 | launch `_tracker` (인식 노드에 `video_source`를 넘기고 `phone_camera.launch.py` `publish_camera:=false`. person_tracker 코드는 안 고침) |
 | ⑪ | 키오스크는 반원 진입 즉시 말고 `kiosk.goal_pose`(RViz로 찍은 자리)까지 가서 서고, 등이 키오스크 면을 똑바로 보게 회전 (`kiosk_stop_at_goal`, `kiosk_face_target: plane`) | 반원 가장자리에 서서 서는 자리·방향이 매번 달라, 관람 시작 때 그림 1 쪽으로 크게 휙 돎 | `course_engine.py` `tick` (1), `nav_result`, `_kiosk_turn` / `a_course.yaml` kiosk `goal_pose` (-1.032, 0.0668) → (-1.5188, 0.6984), 반원 반지름 0.6176 → 1.2 / 자리 찍기 `launch/zone_view.launch.py` |
+| ⑫ | 인식 완료 안내(`course_recognized`) 삭제, `recognized_guide` 기본 `''` (11/21) | 키오스크 PR #6부터 prepare 성공 직후 `start_tour` 자동 → "관람 시작 버튼을 눌러 주세요"가 틀린 말이 됐고, 바로 나오는 `course_start`에 끊김 | `a_course_node.py` `recognized_guide` / `course_engine.py` `tick` (4-1) / `arti_audio/config/guide_lines.yaml` |
+| ⑬·⑯ | footprint 0.189 → 0.28 → **0.23 m**, inflation 0.22 → 0.45 → **0.32 m** (11/21) | 로봇 위 노트북(40×40 cm)이 몸통 밖으로 나와 장애물에 부딪힘. LiDAR(약 20 cm 높이)는 노트북을 못 봄. 정가운데에 놓는 전제로 0.23 | `config/nav2_real.yaml` local·global costmap `footprint`, `inflation_radius` |
+| ⑭ | 작품 4 반원 0.4267 → 0.6 m, `goal_pose` (-0.2146, 3.6897) → (-0.4266, 3.7021) (11/21) | 노트북 footprint로 벽에서 더 떨어져야 하는데 작은 반원 안에 그런 자리가 거의 없음 (찍은 자리가 가장자리 5.5 cm) | `config/a_course.yaml` 작품 4 |
+| ⑮ | 회전 최고 속도 1.0 → 0.5 rad/s (11/21) | 현장에서 회전이 너무 빠름 | `config/nav2_real.yaml` `max_vel_theta`, `max_rotational_vel`, velocity_smoother |
 
 그 밖에: 로봇 OAK-D 끔 (robot4는 웹캠 사용, 로봇 `standard.launch.py`에서 주석 처리 — 저장소 밖).
 
