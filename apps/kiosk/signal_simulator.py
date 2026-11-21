@@ -79,12 +79,19 @@ def register_signal_simulator(app, get_db, serialize):
     manager = app.extensions['robot_preparation']
     sim.jobs = manager.jobs
     settings = {'available': True, 'receiving': True}
+
+    def publish_availability():
+        for name in monitor.fleet.names:
+            monitor.fleet.receive(name, dock=settings['available'], battery=100)
+
     def heartbeat():
         while not sim.stopped.wait(.5):
-            if settings['receiving']:
-                monitor.update(settings['available'])
+            with sim.cv:
+                if settings['receiving']:
+                    publish_availability()
+
+    publish_availability()
     threading.Thread(target=heartbeat, daemon=True).start()
-    monitor.update(True)
 
     @app.before_request
     def local_only():
@@ -137,7 +144,7 @@ def register_signal_simulator(app, get_db, serialize):
                     settings['receiving'] = False
                 else:
                     settings.update(available=event == 'available_on', receiving=True)
-                    monitor.update(settings['available'])
+                    publish_availability()
             else:
                 if not sid:
                     sid = next(reversed(sim.jobs), None)

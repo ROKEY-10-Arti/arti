@@ -13,7 +13,7 @@ PC 간 약속은 팀 명세서(`docs/common/ros2_interfaces.md`, CLAUDE.md "PC �
      → person_tracker target_person/point_map 1초 연속 → guide 'course_recognized'
      result    success=true, message='registered'   → 키오스크 앞에서 대기 (130초 안에 ②가 없으면 도킹 복귀)
 
-② 키오스크 [관람 시작]  PC3 ──/robot4/arti/start_tour {artwork_ids: [1, 3, 4]}──▶ a_course_node
+② 준비 성공 직후 자동 시작  PC3 ──/robot4/arti/start_tour {artwork_ids: [1, 3, 4]}──▶ a_course_node
      guide 'course_start'(저를 따라오세요) → 작품마다 (YAML 코스 순서):
         feedback MOVING(작품 번호) → 반원 진입·정지 → EXPLAINING(번호) → ARTWORK_COMPLETED(번호)
         작품 설명: explain_artwork(번호) → guide_audio_node → PC3 /arti/description(번호) → edge-tts 재생
@@ -154,7 +154,7 @@ ros2 action send_goal /robot4/arti/start_tour arti_interfaces/action/StartTour "
 | `visitor_topic` | `target_person/point_map` | person_tracker 출력 |
 | `register_confirm_time` / `register_gap` | 1.0 / 0.5 | 끊김 없이 1 s 보이면 등록, 0.5 s 넘게 끊기면 다시 셈 [s] |
 | `register_timeout` | 60.0 | 키오스크 도착 후 등록 제한 [s] |
-| `ready_timeout` | 130.0 | 등록 후 start_tour 대기 [s] (robot1과 같음, 키오스크 120 s보다 김) |
+| `ready_timeout` | 130.0 | 등록 후 start_tour 대기 [s] |
 | `far_distance` / `resume_distance` | 2.5 / 1.8 | 멈춤 / 다시 출발 거리 [m] (2026-11-19 실주행: 1.5 / 0.95는 너무 자주 멈춤) |
 | `distance_window` / `far_hold` / `near_hold` | 1.0 / 1.0 / 0.5 | 거리 중앙값 구간 / 멈추기 전 유지 / 출발 전 유지 [s] |
 | `come_here_interval` | 8.0 | '따라오세요' 음성 최소 간격 [s] |

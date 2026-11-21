@@ -11,6 +11,8 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 
+from person_tracker.core.env_bootstrap import load_phone_camera_config
+
 
 def euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float, float]:
     """Convert ZYX Euler angles (radians) into a (x, y, z, w) quaternion."""
@@ -195,25 +197,7 @@ class TopCamTFNode(Node):
         self.timer = self.create_timer(log_interval, self._on_timer)
 
     def _load_yaml_defaults(self) -> dict:
-        candidates = [
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
-        ]
-        try:
-            from ament_index_python.packages import get_package_share_directory
-            candidates.insert(
-                0,
-                os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
-            )
-        except Exception:
-            pass
-        for path in candidates:
-            if os.path.isfile(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return yaml.safe_load(f) or {}
-                except Exception:
-                    pass
-        return {}
+        return load_phone_camera_config()
 
     def _publish_static_transforms(self):
         now = self.get_clock().now().to_msg()

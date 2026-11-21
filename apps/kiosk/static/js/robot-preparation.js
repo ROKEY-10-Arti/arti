@@ -5,7 +5,7 @@ export function subscribePreparation(sessionId, onChange, {
   cancelEvery = globalThis.clearInterval,
   now = Date.now,
 } = {}) {
-  const phases = ['calling','moving','arrived','registering','waiting_ready','ready','error','cancelling','cancelled'];
+  const phases = ['calling','moving','arrived','registering','waiting_ready','ready','starting','touring','completed','error','cancelling','cancelled'];
   let stopped = false;
   let lastFrame = now();
   let disconnected = false;

@@ -10,7 +10,8 @@ from rclpy.time import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
-from person_tracker.top_cam_tf_node import euler_to_quaternion, format_transform
+from person_tracker.core.env_bootstrap import load_phone_camera_config
+from person_tracker.nodes.top_cam_tf_node import euler_to_quaternion, format_transform
 
 
 class InitialPoseNode(Node):
@@ -86,25 +87,7 @@ class InitialPoseNode(Node):
         self.timer = self.create_timer(0.5, self._on_timer)
 
     def _load_yaml_defaults(self) -> dict:
-        candidates = [
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
-        ]
-        try:
-            from ament_index_python.packages import get_package_share_directory
-            candidates.insert(
-                0,
-                os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
-            )
-        except Exception:
-            pass
-        for path in candidates:
-            if os.path.isfile(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return yaml.safe_load(f) or {}
-                except Exception:
-                    pass
-        return {}
+        return load_phone_camera_config()
 
     def _build_pose_msg(self) -> PoseWithCovarianceStamped:
         msg = PoseWithCovarianceStamped()

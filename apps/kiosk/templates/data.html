@@ -41,7 +41,7 @@
           <td><form id="{{ form_id }}" class="artwork-row-form" data-artwork-id="{{ art.artwork_id }}"><button type="submit">저장</button><p class="save-message" role="status" aria-live="polite"></p></form></td>
         </tr>{% endfor %}</tbody>
       </table></div>
-      <p class="help">좌표를 모르면 빈칸으로 저장하세요.</p>
+      <p class="help">대표 x·y는 작품 DB에 저장됩니다. 안내 지도와 로봇 주행 좌표는 각 설정에서 관리합니다. 좌표를 모르면 빈칸으로 저장하세요.</p>
       <details class="advanced-artworks"><summary>이미지 확인·상세 작품 정보 수정</summary>
       <div class="artworks">{% for art in catalog.artworks %}
         <article><form class="artwork-form" data-artwork-id="{{ art.artwork_id }}" aria-label="작품 {{ art.artwork_id }} 정보">

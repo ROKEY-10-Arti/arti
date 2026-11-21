@@ -14,15 +14,15 @@ import math
 import time
 from typing import List, Optional, Tuple
 
-from person_tracker.env_bootstrap import bootstrap_venv
+from person_tracker.core.env_bootstrap import bootstrap_venv
 bootstrap_venv()
 
 import cv2
 import numpy as np
 from std_msgs.msg import Empty
 
-from person_tracker.base_tracker_node import BaseTrackerNode, run_tracker_node
-from person_tracker.multi_tracker_core import UnifiedTrackedPerson
+from person_tracker.nodes.base_tracker_node import BaseTrackerNode, run_tracker_node
+from person_tracker.core.multi_tracker_core import UnifiedTrackedPerson
 
 
 class FrontTrackerNode(BaseTrackerNode):
@@ -50,7 +50,12 @@ class FrontTrackerNode(BaseTrackerNode):
         best, best_dist = None, float('inf')
         for person in self.tracker.last_detections:
             res = self.localizer.localize_target(
-                person, w, h, publish=False, frame_stamp=self._current_frame_stamp
+                person,
+                w,
+                h,
+                publish=False,
+                frame_stamp=self._current_frame_stamp,
+                use_kinematics=False,
             )
             if res.base_xyz is None:
                 continue

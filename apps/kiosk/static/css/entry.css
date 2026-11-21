@@ -38,11 +38,7 @@
   gap: 8px;
 }
 
-.dev-controls [hidden] {
-  display: none;
-}
-
-.dev-toggle {
+.dev-preparation {
   min-height: 36px;
   padding: 7px 10px;
   border: 1px dashed #b2bea4;
@@ -50,32 +46,6 @@
   font-size: 11px;
   color: #677b56;
   background: #f0f3e9;
-}
-
-.dev-toggle.is-publishing {
-  border-style: solid;
-  border-color: #9bad86;
-}
-
-.dev-value {
-  display: inline-block;
-  min-width: 31px;
-  padding-left: 7px;
-  color: #8a977b;
-  font-size: 10px;
-}
-
-.dev-stop {
-  min-height: 36px;
-  font-size: 10px;
-  color: #9d7557;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.dev-publishing {
-  font-size: 9px;
-  color: #9da58d;
 }
 
 @media (min-width: 761px) and (max-height: 900px) {

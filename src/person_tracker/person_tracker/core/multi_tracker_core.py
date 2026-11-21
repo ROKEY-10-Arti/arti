@@ -34,8 +34,8 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from person_tracker.env_bootstrap import resolve_model_path
-from person_tracker.feature_extractors import (
+from person_tracker.core.env_bootstrap import resolve_model_path
+from person_tracker.core.feature_extractors import (
     BaseFeatureExtractor,
     BBoxFeatureExtractor,
     PartFeatureBank,

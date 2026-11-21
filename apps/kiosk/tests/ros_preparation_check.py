@@ -87,8 +87,6 @@ def main():
                 url = '/api/sessions/' + session['id']
                 assert client.post(url + '/preparation', json={}).status_code == 202
                 job = manager.get(session['id'])
-                wait_for(lambda: job.phase == 'ready')
-                assert client.patch(url, json={'status': 'active'}).status_code == 200
                 return url, job
 
             assert description.wait_for_service(timeout_sec=10)

@@ -2,7 +2,7 @@ import os
 import sys
 import time
 
-from person_tracker.env_bootstrap import bootstrap_venv, resolve_image_topic
+from person_tracker.core.env_bootstrap import bootstrap_venv, resolve_image_topic
 bootstrap_venv()
 
 import cv2
@@ -17,7 +17,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
 
-from person_tracker.seg_tracker_core import SegPersonTrackerCore
+from person_tracker.legacy.seg_tracker_core import SegPersonTrackerCore
 
 
 class SegPersonTrackerNode(Node):

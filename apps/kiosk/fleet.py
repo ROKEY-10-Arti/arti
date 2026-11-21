@@ -9,23 +9,26 @@ from pathlib import Path
 
 
 class Fleet:
-    def __init__(self):
+    def __init__(self, max_age=15, clock=time.monotonic):
         self.names = json.loads((Path(__file__).parent / "config/fleet.json").read_text())
         self.values = {name: {} for name in self.names}
+        self.max_age = max_age
+        self.clock = clock
         self.lock = threading.Lock()
 
-    def receive(self, name, field, value):
+    def receive(self, name, **fields):
         with self.lock:
-            self.values[name][field] = (time.monotonic(), value)
+            stamp = self.clock()
+            self.values[name].update({key: (stamp, value) for key, value in fields.items()})
 
     def snapshot(self):
         with self.lock:
-            now = time.monotonic()
+            now = self.clock()
             rows = {}
             for name, fields in self.values.items():
                 # 리뷰: 도킹 해제 메시지를 놓치면 마지막 도킹 수신 후 최대 15초 동안
                 # 호출 가능으로 보일 수 있다. 운영에서 허용할 수 있는 지연인지 확인이 필요하다.
-                row = {key: value if now - stamp <= (3.5 if key == 'moving' else 15) else None
+                row = {key: value if now - stamp <= (3.5 if key == 'moving' else self.max_age) else None
                        for key, (stamp, value) in fields.items()}
                 row["available"] = row.get("dock") is True and (row.get("battery") or 0) > 30
                 rows[name] = row
@@ -41,12 +44,12 @@ class Fleet:
             speed = math.hypot(velocity.linear.x, velocity.linear.y)
             rotation = abs(velocity.angular.z)
             moving = (speed >= 0.02 or rotation >= 0.08) if math.isfinite(speed) and math.isfinite(rotation) else None
-            self.receive(name, 'moving', moving)
+            self.receive(name, moving=moving)
 
         for name, namespace in self.names.items():
             node.create_subscription(BatteryState, namespace + "/battery_state",
-                lambda msg, n=name: self.receive(n, "battery", round(msg.percentage * 100, 5)
+                lambda msg, n=name: self.receive(n, battery=round(msg.percentage * 100, 5)
                     if 0 <= msg.percentage <= 1 else None), qos)
             node.create_subscription(DockStatus, namespace + "/dock_status",
-                lambda msg, n=name: self.receive(n, "dock", msg.is_docked), qos)
+                lambda msg, n=name: self.receive(n, dock=msg.is_docked), qos)
             node.create_subscription(Odometry, namespace + '/odom', lambda msg, n=name: odometry(n, msg), qos)

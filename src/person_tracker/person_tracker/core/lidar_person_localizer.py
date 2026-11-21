@@ -20,8 +20,9 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 from visualization_msgs.msg import Marker
 
-from person_tracker.multi_tracker_core import UnifiedTrackedPerson
-from person_tracker.top_cam_tf_node import make_static_transform, quaternion_to_euler
+from person_tracker.core.env_bootstrap import load_phone_camera_config
+from person_tracker.core.multi_tracker_core import UnifiedTrackedPerson
+from person_tracker.nodes.top_cam_tf_node import make_static_transform, quaternion_to_euler
 
 
 @dataclass
@@ -164,6 +165,7 @@ class LidarPersonLocalizer:
         self.lidar_cluster_tol_m = max(0.10, float(_param_or_cfg('lidar_cluster_tol_m', 0.35)))
         self.lidar_min_cluster_rays = max(1, int(_param_or_cfg('lidar_min_cluster_rays', 2)))
         self.use_pose_sector = bool(_param_or_cfg('use_pose_sector', True))
+        self.use_kinematic_gating = bool(_param_or_cfg('use_kinematic_gating', True))
         # 관측 전용(publish_target_topics=false)일 때는 기본적으로 도킹 중인 로봇의 라이다 모터를 임의로 켜지 않음
         publish_topics = bool(_param_or_cfg('publish_target_topics', True))
         self.auto_start_lidar_motor = bool(
@@ -240,34 +242,15 @@ class LidarPersonLocalizer:
             Marker, f'{self.ns_prefix}/target_person/marker', 10
         )
 
+        # 타겟 이동 방향/속도 추적용 상태 (odom 고정 좌표계 기준)
+        self._last_track_id: Optional[int] = None
+        self._last_odom_xy: Optional[np.ndarray] = None
+        self._last_odom_vel: np.ndarray = np.zeros(2, dtype=np.float64)
+        self._last_valid_time: float = 0.0
+        self._last_cam_dist: Optional[float] = None
+
     def _load_yaml_defaults(self) -> dict:
-        candidates = [
-            os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'config',
-                'phone_camera.yaml',
-            ),
-        ]
-        try:
-            from ament_index_python.packages import get_package_share_directory
-            candidates.insert(
-                0,
-                os.path.join(
-                    get_package_share_directory('person_tracker'),
-                    'config',
-                    'phone_camera.yaml',
-                ),
-            )
-        except Exception:
-            pass
-        for path in candidates:
-            if os.path.isfile(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return yaml.safe_load(f) or {}
-                except Exception:
-                    pass
-        return {}
+        return load_phone_camera_config()
 
     def _publish_static_cam_tf(self):
         now = self.node.get_clock().now().to_msg()
@@ -536,6 +519,97 @@ class LidarPersonLocalizer:
             lidar_frame=lidar_frame,
         )
 
+    def reset_kinematics(self, track_id: Optional[int] = None):
+        """타겟 이동 속도·위치 이력을 초기화합니다 (관람 종료/타겟 변경 시 호출)."""
+        self._last_track_id = track_id
+        self._last_odom_xy = None
+        self._last_odom_vel = np.zeros(2, dtype=np.float64)
+        self._last_valid_time = 0.0
+        self._last_cam_dist = None
+
+    def _reset_kinematics(self, track_id: Optional[int] = None):
+        self.reset_kinematics(track_id)
+
+    def _cluster_sector_points(
+        self, xc: np.ndarray, yc: np.ndarray, gap: float = 0.25
+    ):
+        """부채꼴 내 라이다 점을 거리순으로 묶어 클러스터 목록[(dist, cx, cy, width, count)]을 반환."""
+        dists = np.hypot(xc, yc)
+        order = np.argsort(dists)
+        ds, xs, ys = dists[order], xc[order], yc[order]
+
+        cuts = np.nonzero(np.diff(ds) > gap)[0] + 1
+        clusters = []
+        for idx in np.split(np.arange(ds.size), cuts):
+            if idx.size == 0:
+                continue
+            cx = float(np.mean(xs[idx]))
+            cy = float(np.mean(ys[idx]))
+            width = float(math.hypot(float(np.ptp(xs[idx])), float(np.ptp(ys[idx]))))
+            clusters.append((float(np.mean(ds[idx])), cx, cy, width, int(idx.size)))
+        return clusters
+
+    def _score_odom_candidate(
+        self, cand_xy: np.ndarray, dt: float
+    ) -> Tuple[bool, float]:
+        """직전 이동 방향·속도 대비 후보 좌표(odom)의 물리적 자연스러움을 평가 (통과 여부, 점수)."""
+        if self._last_odom_xy is None or dt <= 1e-3 or dt > 2.5:
+            return True, 0.0
+
+        prev_xy = self._last_odom_xy
+        prev_vel = self._last_odom_vel
+        pred_xy = prev_xy + prev_vel * min(dt, 0.8)
+        err = cand_xy - pred_xy
+        disp = cand_xy - prev_xy
+        disp_norm = float(np.linalg.norm(disp))
+        speed = float(np.linalg.norm(prev_vel))
+
+        # 1) 저속/정지 상태: 방향 벡터가 노이즈이므로 원형 게이팅만 적용
+        if speed < 0.25:
+            lim = 0.45 + 1.0 * dt
+            err_norm = float(np.linalg.norm(err))
+            return (err_norm <= lim), (err_norm / lim)
+
+        # 2) 이동 중: 진행 방향(전방/후방)과 측면으로 분해한 비대칭 게이팅
+        u = prev_vel / speed
+        e_par = float(np.dot(err, u))                       # + 진행 방향, - 반대 방향
+        e_perp = float(np.linalg.norm(err - e_par * u))     # 좌우 이탈
+
+        lim_par = (0.55 + 1.2 * dt) if e_par >= 0.0 else (0.22 + 0.30 * dt)
+        lim_lat = 0.40 + 0.8 * dt
+        norm_d = math.hypot(e_par / lim_par, e_perp / lim_lat)
+        if norm_d > 1.0:
+            return False, float('inf')
+
+        # 3) 급가속 및 갑작스러운 역방향 급변 차단
+        dt_eff = max(dt, 0.05)
+        v_inst = disp / dt_eff
+        v_inst_norm = float(np.linalg.norm(v_inst))
+        accel = float(np.linalg.norm(v_inst - prev_vel)) / dt_eff
+        if accel > 4.5 and disp_norm > 0.30:
+            return False, float('inf')
+
+        cos_sim = float(np.dot(prev_vel, v_inst)) / (speed * v_inst_norm + 1e-6)
+        if cos_sim < -0.30 and v_inst_norm > 0.40 and disp_norm > 0.25:
+            return False, float('inf')
+
+        return True, norm_d
+
+    def _update_kinematics(self, odom_xy: np.ndarray, now: float, cam_dist: float):
+        if self._last_odom_xy is not None and 0.02 < (now - self._last_valid_time) < 2.0:
+            dt = now - self._last_valid_time
+            inst_vel = (odom_xy - self._last_odom_xy) / dt
+            vel = 0.6 * self._last_odom_vel + 0.4 * inst_vel
+            spd = float(np.linalg.norm(vel))
+            if spd > 1.6:
+                vel *= 1.6 / spd
+            self._last_odom_vel = vel
+        else:
+            self._last_odom_vel = np.zeros(2, dtype=np.float64)
+        self._last_odom_xy = odom_xy
+        self._last_valid_time = now
+        self._last_cam_dist = cam_dist
+
     def localize_target(
         self,
         target: UnifiedTrackedPerson,
@@ -544,8 +618,18 @@ class LidarPersonLocalizer:
         publish: bool = True,
         frame_stamp: Optional[BuiltinTime] = None,
         frame_rx_wall: Optional[float] = None,
+        use_kinematics: bool = True,
     ) -> TargetLocalizationResult:
         x1, y1, x2, y2 = target.bbox
+        kin_active = self.use_kinematic_gating and bool(use_kinematics)
+        now_wall = frame_rx_wall if (frame_rx_wall is not None and frame_rx_wall > 0.0) else time.time()
+        if kin_active and (
+            self._last_track_id != target.track_id
+            or (self._last_valid_time > 0.0 and (now_wall - self._last_valid_time) > 2.2)
+        ):
+            self.reset_kinematics(target.track_id)
+
+        occluded = False
         cx, cy = target.center
 
         half_w = max(1.0, frame_width * 0.5)
@@ -616,16 +700,85 @@ class LidarPersonLocalizer:
                         in_sector = diffs <= half_sector
 
                         if np.any(in_sector):
-                            dists = np.hypot(xc[in_sector], yc[in_sector])
-                            matched_rays = int(dists.size)
-                            cam_dist_m = self._select_cluster_distance(dists)
-                            source = 'LiDAR'
+                            if not kin_active:
+                                dists = np.hypot(xc[in_sector], yc[in_sector])
+                                matched_rays = int(dists.size)
+                                cam_dist_m = self._select_cluster_distance(dists)
+                                source = 'LiDAR'
+                            else:
+                                tf_odom_from_cam = self._lookup(
+                                    self.odom_frame,
+                                    self.camera_link_frame,
+                                    scan_time if (abs(clock_offset) > 0.0 and scan_time is not None) else (scan_time or frame_time),
+                                )
+                                mat_odom_from_cam = (
+                                    transform_to_matrix(tf_odom_from_cam)
+                                    if tf_odom_from_cam is not None
+                                    else None
+                                )
+                                clusters = self._cluster_sector_points(
+                                    xc[in_sector], yc[in_sector], gap=0.25
+                                )
+                                # 1-ray 단발 노이즈에 첫 프레임이 잠기지 않도록 다중 ray 클러스터 우선
+                                valid_clusters = [
+                                    c for c in clusters if c[4] >= self.lidar_min_cluster_rays
+                                ]
+                                cand_clusters = valid_clusters if valid_clusters else clusters
+                                dt = now_wall - self._last_valid_time if self._last_valid_time > 0.0 else 0.0
+                                best_cand = None  # (score, dist, count, odom_xy)
 
-        # 2. 라이다 포인트가 없을 때 바운딩 박스 크기 기반 폴백 추정
+                                for c_dist, cx_c, cy_c, c_width, c_cnt in cand_clusters:
+                                    # 사람 체폭을 크게 넘는 넓은 벽/전시대 클러스터 페널티
+                                    width_pen = 0.6 if c_width > 1.0 else 0.0
+
+                                    if mat_odom_from_cam is not None:
+                                        ox, oy, _ = apply_transform_point(
+                                            mat_odom_from_cam, (cx_c, cy_c, 0.0)
+                                        )
+                                        cand_xy = np.array([ox, oy], dtype=np.float64)
+                                        ok, score = self._score_odom_candidate(cand_xy, dt)
+                                        if not ok:
+                                            continue
+                                    else:
+                                        cand_xy = None
+                                        lim_fb = 0.45 + 1.2 * max(dt, 0.05)
+                                        if (
+                                            self._last_cam_dist is not None
+                                            and abs(c_dist - self._last_cam_dist) > lim_fb
+                                        ):
+                                            continue
+                                        score = (
+                                            abs(c_dist - self._last_cam_dist)
+                                            if self._last_cam_dist is not None
+                                            else c_dist
+                                        )
+
+                                    total_score = score + width_pen
+                                    if best_cand is None or total_score < best_cand[0]:
+                                        best_cand = (total_score, c_dist, c_cnt, cand_xy)
+
+                                if best_cand is not None:
+                                    _, cam_dist_m, matched_rays, best_odom_xy = best_cand
+                                    source = 'LiDAR'
+                                    if best_odom_xy is not None:
+                                        self._update_kinematics(best_odom_xy, now_wall, cam_dist_m)
+                                    else:
+                                        self._last_cam_dist = cam_dist_m
+                                        self._last_valid_time = now_wall
+                                else:
+                                    # 부채꼴에 라이다 점은 있으나 모두 앞 장애물(물리적 불가)로 탈락 → 가림
+                                    occluded = True
+
+        # 2. 라이다 포인트가 없을 때 폴백 (단, 앞 장애물 가림 판정 시에는 bbox 추정·발행 모두 보류)
         if cam_dist_m is None:
-            bbox_h = max(24.0, float(y2 - y1))
-            cam_dist_m = float(np.clip((1.65 * fy) / bbox_h, 0.35, 8.0))
-            source = 'CamEst'
+            if occluded and self._last_cam_dist is not None:
+                cam_dist_m = self._last_cam_dist
+                source = 'Occluded'
+            else:
+                bbox_h = max(24.0, float(y2 - y1))
+                cam_dist_m = float(np.clip((1.65 * fy) / bbox_h, 0.35, 8.0))
+                source = 'CamEst'
+
 
         # 상단 카메라(top_cam_link) 기준 타겟 3D 좌표
         cam_x = cam_dist_m * math.cos(alpha_c)
@@ -669,7 +822,7 @@ class LidarPersonLocalizer:
             sync_dt_ms=sync_dt_ms,
             clock_offset_ms=(clock_offset * 1000.0 if abs(clock_offset) > 0.0 else None),
         )
-        if publish:
+        if publish and not occluded:
             out_stamp = scan.header.stamp if use_scan_clock else frame_stamp
             self._publish_target_outputs(res, out_stamp=out_stamp)
         return res

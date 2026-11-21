@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from app import create_app
+from fleet import Fleet
 from signal_simulator import ManualTransport, LABELS
 from robot_availability import RobotAvailability
 
@@ -11,9 +12,11 @@ class SimulatorTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.transport = ManualTransport()
+        self.now = 0
+        fleet = Fleet(max_age=3.5, clock=lambda: self.now)
         self.app = create_app({'TESTING': True, 'DATABASE': Path(self.temp.name)/'sim.sqlite3',
             'SIGNAL_SIMULATOR': self.transport, 'PREPARATION_TRANSPORT': self.transport,
-            'AVAILABILITY_MONITOR': RobotAvailability(), 'CENTRAL_ROS_ENABLED': False})
+            'AVAILABILITY_MONITOR': RobotAvailability(fleet), 'CENTRAL_ROS_ENABLED': False})
         self.client = self.app.test_client()
         self.manager = self.app.extensions['robot_preparation']
         self.addCleanup(self.manager.stop)
@@ -62,6 +65,12 @@ class SimulatorTest(unittest.TestCase):
     def test_values_isolation_and_stream(self):
         self.send('available_off')
         self.assertFalse(self.client.get('/api/simulator').json['availability']['available'])
+        self.send('available_on')
+        self.assertTrue(self.client.get('/api/simulator').json['availability']['available'])
+        self.send('availability_lost')
+        self.now = 4
+        self.assertEqual(self.client.get('/api/simulator').json['availability'],
+                         {'status': 'stale', 'available': None})
         self.send('available_on')
         self.assertTrue(self.client.get('/api/simulator').json['availability']['available'])
         sid = self.send('scan_progress', message='<script>test</script>', progress=.83, robot='robot2')
