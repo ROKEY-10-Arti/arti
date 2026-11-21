@@ -28,11 +28,11 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Empty
 
-from person_tracker.env_bootstrap import resolve_image_topic
-from person_tracker.feature_extractors import PoseKeypointFeatureExtractor
-from person_tracker.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
-from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
-from person_tracker.tracker_state import TrackerState, TrackerStateStore
+from person_tracker.core.env_bootstrap import resolve_image_topic
+from person_tracker.core.feature_extractors import PoseKeypointFeatureExtractor
+from person_tracker.core.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
+from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.core.tracker_state import TrackerState, TrackerStateStore
 
 
 class BaseTrackerNode(Node):
@@ -355,9 +355,10 @@ class BaseTrackerNode(Node):
     # ---------- 상태 리셋·입력 이벤트 훅 ----------
 
     def _reset_target(self, reason: str = '[타겟 초기화] 대기 상태로 복귀합니다.'):
-        """등록된 타겟·로컬라이저 캐시·상태 저장소를 초기 대기 상태로 되돌립니다."""
         if self.tracker is not None:
             self.tracker.select_target_by_id(None)
+        if self.localizer is not None:
+            self.localizer.reset_kinematics()       # ← 추가 (관람 종료/타겟 해제 시 속도 잔상 제거)
         self.last_loc_result = None
         self._on_tracker_reset(reason)
         self.state_store.reset(reason)
@@ -429,6 +430,7 @@ class BaseTrackerNode(Node):
             publish=False,
             frame_stamp=self._current_frame_stamp,
             frame_rx_wall=rx_wall,
+            use_kinematics=False,                   # ← 추가 (후보 검증 시 타겟 속도 상태 보호)
         )
         if res.map_xyz is not None:
             return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source

@@ -27,8 +27,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from person_tracker.feature_extractors import PartFeatureBank
-from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.core.feature_extractors import PartFeatureBank
+from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
 
 
 class ReIDDebugVisualizer:

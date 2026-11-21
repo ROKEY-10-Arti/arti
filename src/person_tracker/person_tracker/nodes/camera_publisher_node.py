@@ -9,7 +9,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, qos_profile_s
 from sensor_msgs.msg import CompressedImage, Image
 from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
-from person_tracker.top_cam_tf_node import make_static_transform
+from person_tracker.nodes.top_cam_tf_node import make_static_transform
 
 
 class CameraPublisherNode(Node):

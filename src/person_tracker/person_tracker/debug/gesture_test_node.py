@@ -12,15 +12,15 @@
 import time
 from typing import Dict, List, Optional, Tuple
 
-from person_tracker.env_bootstrap import bootstrap_venv
+from person_tracker.core.env_bootstrap import bootstrap_venv
 bootstrap_venv()
 
 import cv2
 import numpy as np
 from std_msgs.msg import String
 
-from person_tracker.base_tracker_node import BaseTrackerNode, run_tracker_node
-from person_tracker.gesture_core import (
+from person_tracker.nodes.base_tracker_node import BaseTrackerNode, run_tracker_node
+from person_tracker.core.gesture_core import (
     GESTURE_FIST,
     GESTURE_OPEN_PALM,
     HAND_CONNECTIONS,
@@ -34,8 +34,8 @@ from person_tracker.gesture_core import (
     find_best_hand_owner_slot,
     infer_fallback_hand_slot,
 )
-from person_tracker.multi_tracker_core import UnifiedTrackedPerson
-from person_tracker.reid_visualizer import ReIDDebugVisualizer
+from person_tracker.core.multi_tracker_core import UnifiedTrackedPerson
+from person_tracker.debug.reid_visualizer import ReIDDebugVisualizer
 
 
 class GestureTestNode(BaseTrackerNode):

@@ -4,7 +4,46 @@ TurtleBot4(ROS 2 Jazzy)의 **2D LiDAR(`/robot4/scan`)**, **상단 추가 카메�
 
 ---
 
-## 1. 주요 기능
+## 1. 패키지 구조 및 파일별 역할 한눈에 보기
+
+> 코드 파이프라인 상세 다이어그램·함수 링크는 [`person_tracker/README.md`](./person_tracker/README.md) 를 참고하세요.
+
+```text
+person_tracker/
+├── config/                  # 카메라 외부 파라미터·초기 위치·토픽 설정 (phone_camera.yaml)
+├── launch/                  # 통합/카메라 실행 런치 (bringup.launch.py, phone_camera.launch.py)
+├── models/                  # 번들 가중치 (yolo26n-pose.pt 등)
+├── research/                # 오프라인 bag 재생 검증 스크립트
+└── person_tracker/          # Python 패키지
+    ├── core/                # 공용 인식·제스처·LiDAR 핵심 엔진 (ROS 노드 아님)
+    ├── nodes/               # 실전 주행·카메라·TF 연동 ROS 2 노드
+    ├── debug/               # 제스처 테스트·ReID 시각화·네트워크 모니터 도구
+    └── legacy/              # 초기 단일 모델·9종 벤치마크 노드/코어
+```
+
+| 계층 | 파일 | 역할 |
+|---|---|---|
+| **Core**<br>(`person_tracker/core/`) | [`multi_tracker_core.py`](./person_tracker/core/multi_tracker_core.py) | YOLO26n-pose + ByteTrack 1차 추적 및 Adaptive ReID(`COEX`/`SAFE`/`GUARD`/`SEARCH`) |
+| | [`feature_extractors.py`](./person_tracker/core/feature_extractors.py) | Pose/Seg/BBox 3부위 마스킹 및 304D HSV(`18×16 H-S + 16 V`) 외형 추출·비교 |
+| | [`gesture_core.py`](./person_tracker/core/gesture_core.py) | 손목 ROI + MediaPipe 21관절 + 얼굴 오검출 제외 + 양손 독립 `Fist→Open` 등록 상태머신 |
+| | [`lidar_person_localizer.py`](./person_tracker/core/lidar_person_localizer.py) | `/scan` 버퍼·시계오차 보정·클러스터링 + `top_cam→base_link→map` TF 좌표 변환·발행 |
+| | [`tracker_state.py`](./person_tracker/core/tracker_state.py) | 선택적(`enable_state_store`) 상태 스냅샷(`TrackerState`)·이벤트 콜백 인터페이스 |
+| | [`env_bootstrap.py`](./person_tracker/core/env_bootstrap.py) | 가상환경(`rokey_venv`) 경로 등록, 모델 경로·YAML 설정·토픽 이름 해석 |
+| **Nodes**<br>(`person_tracker/nodes/`) | [`base_tracker_node.py`](./person_tracker/nodes/base_tracker_node.py) | 공용 ROS 2 베이스 노드(영상·동적 소스전환·로컬라이저·오버레이·`arti/tour_end` 리셋) |
+| | [`front_tracker_node.py`](./person_tracker/nodes/front_tracker_node.py) | `BaseTrackerNode` 상속 정면 자동(`register_front`)/클릭 등록 실전 노드 (`tracker:=front`) |
+| | [`top_cam_tf_node.py`](./person_tracker/nodes/top_cam_tf_node.py) | 상단 카메라 정적 TF (`oakd_rgb_camera_frame → top_cam_link → optical`) 발행 (`top_cam_tf`) |
+| | [`camera_publisher_node.py`](./person_tracker/nodes/camera_publisher_node.py) | 로컬 웹캠/DroidCam 영상을 ROS 토픽(`image_raw/compressed`)으로 발행 (`camera_pub`) |
+| | [`init_pose_node.py`](./person_tracker/nodes/init_pose_node.py) | `initialpose` 자동 발행 및 `map→base_link` TF 연결 확인 (`init_pose`) |
+| **Debug**<br>(`person_tracker/debug/`) | [`gesture_test_node.py`](./person_tracker/debug/gesture_test_node.py) | 제스처 등록·`gesture/status` 발행·`ReID Monitor` GUI 노드 (실주행 기본 `tracker:=gesture` 겸용) |
+| | [`reid_visualizer.py`](./person_tracker/debug/reid_visualizer.py) | `ReID Monitor` 120f 유사도 그래프·부위 막대·304D HSV 히트맵 렌더러 |
+| | [`net_monitor_node.py`](./person_tracker/debug/net_monitor_node.py) | 카메라·라이다 토픽 수신 FPS/대역폭/지연 모니터링 (`net_monitor`) |
+| **Legacy**<br>(`person_tracker/legacy/`) | [`multi_tracker_node.py`](./person_tracker/legacy/multi_tracker_node.py) | 9종 YOLO 모델 × 5종 추적기 실시간 전환 벤치마크 노드 (`tracker:=all`) |
+| | [`tracker_core.py`](./person_tracker/legacy/tracker_core.py) · [`tracker_node.py`](./person_tracker/legacy/tracker_node.py) | 초기 BBox Detect 단일 모델 추적 코어·노드 (`tracker_node`) |
+| | [`seg_tracker_core.py`](./person_tracker/legacy/seg_tracker_core.py) · [`seg_tracker_node.py`](./person_tracker/legacy/seg_tracker_node.py) | 초기 Segmentation 단일 모델 추적 코어·노드 (`seg_tracker_node`) |
+
+---
+
+## 2. 주요 기능
 
 - **다중 YOLO 모델 & 추적 알고리즘 실시간 전환**
   - 모델 9종: `YOLOv8n / YOLO11n / YOLO26n` × `Detect / Segment / Pose`
@@ -18,7 +57,7 @@ TurtleBot4(ROS 2 Jazzy)의 **2D LiDAR(`/robot4/scan`)**, **상단 추가 카메�
 
 ---
 
-## 2. 다른 PC에서 설치 및 빌드 (GitHub 클론 후)
+## 3. 다른 PC에서 설치 및 빌드 (GitHub 클론 후)
 
 ### 사전 요구 사항
 - **Ubuntu 24.04 + ROS 2 Jazzy** (또는 Humble/Iron)
@@ -42,7 +81,7 @@ bash setup_and_build.sh
 
 ---
 
-## 3. 실행 방법
+## 4. 실행 방법
 
 매 터미널 시작 시 환경 로드:
 ```bash
@@ -120,7 +159,7 @@ cd ~/turtlebot4_ws && colcon build --symlink-install --packages-select person_tr
 
 ---
 
-## 4. 발행 토픽 및 조작법
+## 5. 발행 토픽 및 조작법
 
 ### 실시간 발행 토픽
 | 토픽 이름 | 메시지 타입 | 설명 |
@@ -138,5 +177,5 @@ cd ~/turtlebot4_ws && colcon build --symlink-install --packages-select person_tr
 
 ---
 
-## 5. 카메라 및 초기 위치 커스터마이징
+## 6. 카메라 및 초기 위치 커스터마이징
 - [config/phone_camera.yaml](config/phone_camera.yaml)에서 상단 카메라 위치(`extrinsics: x, y, z, roll, pitch, yaw`), 수평 화각(`camera_intrinsics: hfov_deg`), 초기 위치(`initial_pose`)를 수정한 뒤 `colcon build --symlink-install --packages-select person_tracker`로 반영할 수 있습니다.
