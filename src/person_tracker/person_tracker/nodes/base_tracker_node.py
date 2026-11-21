@@ -29,10 +29,10 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Empty
 
 from person_tracker.core.env_bootstrap import resolve_image_topic
-from person_tracker.core.feature_extractors import PoseKeypointFeatureExtractor
 from person_tracker.core.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
 from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
 from person_tracker.core.tracker_state import TrackerState, TrackerStateStore
+from person_tracker.debug.reid_visualizer import draw_pose_and_mask_overlays
 
 
 class BaseTrackerNode(Node):
@@ -374,9 +374,14 @@ class BaseTrackerNode(Node):
         """서브클래스가 상단 바 클릭 등을 먼저 처리할 때 True 반환."""
         return False
 
+    def _map_mouse_point(self, x: int, y: int) -> Tuple[int, int]:
+        """단일 대시보드 창 배율 적용 시 클릭 좌표를 원본 영상 좌표로 역변환합니다."""
+        return x, y
+
     def _on_mouse_click(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN:
             return
+        x, y = self._map_mouse_point(x, y)
         if self._handle_custom_mouse(x, y):
             return
         if self.tracker is None:
@@ -514,93 +519,17 @@ class BaseTrackerNode(Node):
         detections: List[UnifiedTrackedPerson],
     ):
         """히스토그램 추출용 3부위 마스크를 반투명 블렌딩+외곽선으로 표시하고 Pose 관절 마커를 그립니다."""
-        if not self.show_pose_mask or self.tracker is None or len(detections) == 0:
+        if not self.show_pose_mask:
             return
-
-        extractor = self.tracker.current_extractor
-        in_guard = (
-            self.tracker.mode == self.tracker.MODE_ADAPTIVE
-            and self.tracker.metrics.adaptive_state == 'GUARD'
+        draw_pose_and_mask_overlays(
+            vis,
+            src_frame,
+            detections,
+            self.tracker,
+            mask_alpha=self.MASK_OVERLAY_ALPHA,
+            pose_edges=self.POSE_EDGES,
+            part_mask_colors=self.PART_MASK_COLORS,
         )
-        target_locked = self.tracker.target_id is not None
-
-        mask_overlay = vis.copy()
-        contour_items = []
-        for p in detections:
-            exclude_boxes = (
-                [o.bbox for o in detections if o.track_id != p.track_id] if in_guard else None
-            )
-            part_masks = extractor.extract_part_masks(
-                src_frame,
-                p.bbox,
-                mask_poly=p.mask_poly,
-                keypoints=p.keypoints,
-                exclude_boxes=exclude_boxes,
-            )
-            if part_masks is None:
-                continue
-            (rx1, ry1, rx2, ry2), upper_m, mid_m, lower_m = part_masks
-            sub = mask_overlay[ry1:ry2, rx1:rx2]
-            palette = self.PART_MASK_COLORS[
-                'active' if (p.is_target or not target_locked) else 'muted'
-            ]
-            for part_mask, color in zip((upper_m, mid_m, lower_m), palette):
-                if part_mask.any():
-                    sub[part_mask > 0] = color
-                    contour_items.append((rx1, ry1, part_mask, color))
-
-        if contour_items:
-            cv2.addWeighted(
-                mask_overlay,
-                self.MASK_OVERLAY_ALPHA,
-                vis,
-                1.0 - self.MASK_OVERLAY_ALPHA,
-                0,
-                vis,
-            )
-            for rx1, ry1, part_mask, color in contour_items:
-                contours, _ = cv2.findContours(
-                    part_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                valid_cnts = [c for c in contours if cv2.contourArea(c) >= 12.0]
-                if valid_cnts:
-                    cv2.drawContours(
-                        vis,
-                        valid_cnts,
-                        -1,
-                        color,
-                        1,
-                        lineType=cv2.LINE_AA,
-                        offset=(rx1, ry1),
-                    )
-
-        kp_thresh = PoseKeypointFeatureExtractor.KP_CONF_THRESH
-        for p in detections:
-            if p.keypoints is None or len(p.keypoints) < 17:
-                continue
-            kp = p.keypoints
-            emph = p.is_target or not target_locked
-            for i1, i2, edge_color in self.POSE_EDGES:
-                if float(kp[i1, 2]) >= kp_thresh and float(kp[i2, 2]) >= kp_thresh:
-                    pt1 = (int(kp[i1, 0]), int(kp[i1, 1]))
-                    pt2 = (int(kp[i2, 0]), int(kp[i2, 1]))
-                    cv2.line(
-                        vis,
-                        pt1,
-                        pt2,
-                        edge_color if emph else (150, 150, 150),
-                        2 if emph else 1,
-                        cv2.LINE_AA,
-                    )
-
-            for idx in range(5, 17):
-                if float(kp[idx, 2]) >= kp_thresh:
-                    pt = (int(kp[idx, 0]), int(kp[idx, 1]))
-                    radius = 4 if emph else 2
-                    color = (0, 255, 255) if emph else (190, 190, 190)
-                    if emph:
-                        cv2.circle(vis, pt, radius + 1, (30, 30, 30), 1, cv2.LINE_AA)
-                    cv2.circle(vis, pt, radius, color, -1, cv2.LINE_AA)
 
     @staticmethod
     def _draw_target_loc_text(

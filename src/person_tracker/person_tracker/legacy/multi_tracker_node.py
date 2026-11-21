@@ -22,6 +22,12 @@ from cv_bridge import CvBridge
 from typing import Optional, Tuple
 from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
 from person_tracker.core.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
+from person_tracker.debug.reid_visualizer import (
+    ReIDDebugVisualizer,
+    compose_dashboard_frame,
+    create_reid_trackbars,
+    draw_pose_and_mask_overlays,
+)
 
 
 class MultiModelTrackerNode(Node):
@@ -68,6 +74,8 @@ class MultiModelTrackerNode(Node):
         self.declare_parameter('iou', 0.55)
         self.declare_parameter('show_gui', True)
         self.declare_parameter('draw_overlay', True)
+        self.declare_parameter('show_reid_viz', True)
+        self.declare_parameter('single_window', True)
         self.declare_parameter('auto_lock_first', False)
         self.declare_parameter('device', '')
         # target_person/register_front(Empty) 요청 때 '바로 앞 사람'으로 볼 범위 (base_link 기준)
@@ -89,6 +97,10 @@ class MultiModelTrackerNode(Node):
         iou = float(self.get_parameter('iou').value)
         self.show_gui = bool(self.get_parameter('show_gui').value)
         self.draw_overlay = bool(self.get_parameter('draw_overlay').value)
+        self.show_reid_viz = bool(self.get_parameter('show_reid_viz').value)
+        self.single_window = bool(self.get_parameter('single_window').value)
+        self._display_scale = 1.0
+        self._main_frame_size = (640, 480)
         self.auto_lock_first = bool(self.get_parameter('auto_lock_first').value)
         device = str(self.get_parameter('device').value)
 
@@ -141,29 +153,53 @@ class MultiModelTrackerNode(Node):
         self.last_loc_log_time = 0.0
         self.image_topic = image_topic
         self.last_frame_wall_time = 0.0
+        self._current_frame_stamp = None
         self.last_display_frame: Optional[np.ndarray] = None
+        self._bench_stats = {}
         self.win_name = 'TurtleBot4 Multi-Model Benchmark (v8 / v11 / v26 x Det / Seg / Pose)'
         self.info_win_name = 'Tracker Status & Coordinates'
+        self.reid_win_name = 'ReID Similarity & 304D HSV Vector'
+        self.reid_viz = ReIDDebugVisualizer()
 
         if self.show_gui:
             cv2.namedWindow(self.win_name)
             cv2.setMouseCallback(self.win_name, self.on_mouse_click)
-            cv2.namedWindow(self.info_win_name)
+            if self.single_window:
+                self._ensure_reid_window()
+            else:
+                cv2.namedWindow(self.info_win_name)
+                if self.show_reid_viz:
+                    self._ensure_reid_window()
 
         self.get_logger().info(
             f'MultiModelTrackerNode 시작됨 | 토픽: {image_topic} | 모델: {self.tracker.current_model_name} | '
             f'모드: {MultiModelTrackerCore.MODE_NAMES[self.tracker.mode]} | 장치: {self.tracker.device}'
         )
 
-    def on_tour_end(self, _msg):
-        self.tracker.select_target_by_id(None)     # target_id, anchor_bank·recent_bank(re-ID 특징), 마지막 위치 삭제
+    def _ensure_reid_window(self):
+        target_win = self.win_name if self.single_window else self.reid_win_name
+        create_reid_trackbars(target_win, lambda: self.tracker)
+
+    def _clear_target_state(self, log_msg: str = ''):
+        self.tracker.select_target_by_id(None)
         if self.localizer is not None:
             self.localizer.reset_kinematics()
+        self.reid_viz.reset()
         self.last_loc_result = None
-        self.get_logger().info('[관람 끝] 타겟과 re-ID 특징을 지웠습니다.')
+        if log_msg:
+            self.get_logger().info(log_msg)
+
+    def on_tour_end(self, _msg):
+        self._clear_target_state('[관람 끝] 타겟과 re-ID 특징을 지웠습니다.')
 
     def on_mouse_click(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if self._display_scale > 0.0 and abs(self._display_scale - 1.0) > 1e-4:
+            x = int(round(x / self._display_scale))
+            y = int(round(y / self._display_scale))
+        mw, mh = self._main_frame_size
+        if x < 0 or y < 0 or x >= mw or y >= mh:
             return
 
         # 1단 바 클릭: 왼쪽 절반(3칸)은 모델 버전(v8n/11n/26n), 오른쪽 절반(3칸)은 태스크(Det/Seg/Pose)
@@ -191,10 +227,14 @@ class MultiModelTrackerNode(Node):
         # 영상 영역 클릭: 추적 타겟 지정 / 해제
         selected_id = self.tracker.select_target_by_point(x, y)
         if selected_id is not None:
+            self.reid_viz.reset()
             self.get_logger().info(
                 f'[타겟 선택] ID={selected_id} (현재 모델: {self.tracker.current_model_name})'
             )
         else:
+            if self.localizer is not None:
+                self.localizer.reset_kinematics()
+            self.reid_viz.reset()
             self.get_logger().info('[타겟 해제] 추적을 중지합니다.')
 
     def on_register_front(self, _msg):
@@ -215,10 +255,12 @@ class MultiModelTrackerNode(Node):
                 best, best_dist = person, dist
         if best is None:
             if self.tracker.target_id is not None:
-                self.get_logger().info('[앞 사람 등록] 앞에 사람 없음 → 예전 타겟 해제')
-            self.tracker.select_target_by_id(None)
+                self._clear_target_state('[앞 사람 등록] 앞에 사람 없음 → 예전 타겟 해제')
+            else:
+                self.tracker.select_target_by_id(None)
             return
         selected = self.tracker.select_target_by_id(best.track_id)
+        self.reid_viz.reset()
         self.get_logger().info(f'[앞 사람 등록] ID={selected} (거리 {best_dist:.2f} m)')
 
     def _update_system_metrics(self, msg_stamp):
@@ -240,48 +282,31 @@ class MultiModelTrackerNode(Node):
             self.cpu_percent = psutil.cpu_percent(interval=None)
             self.ram_mb = self.process.memory_info().rss / (1024 * 1024)
 
-    def _draw_task_overlays(self, frame: np.ndarray, detections: list[UnifiedTrackedPerson]):
+    def _draw_task_overlays(self, frame: np.ndarray, src_frame: np.ndarray, detections: list[UnifiedTrackedPerson]):
         if not self.draw_overlay or len(detections) == 0:
             return
 
-        task = self.tracker.current_task_name
-
-        # Segment 태스크: 반투명 폴리곤 마스크 렌더링
-        if task == 'segment':
-            mask_overlay = frame.copy()
+        # Segment 태스크일 때는 원본 세그멘테이션 폴리곤 외곽선도 함께 표시
+        if self.tracker.current_task_name == 'segment':
             for p in detections:
                 if p.mask_poly is not None and len(p.mask_poly) >= 3:
                     pts = p.mask_poly.astype(np.int32)
-                    fill_color = (0, 230, 80) if p.is_target else (140, 120, 90)
-                    cv2.fillPoly(mask_overlay, [pts], fill_color)
                     cv2.polylines(
-                        frame, [pts], isClosed=True, color=fill_color, thickness=2 if p.is_target else 1
+                        frame,
+                        [pts],
+                        isClosed=True,
+                        color=(0, 230, 80) if p.is_target else (140, 120, 90),
+                        thickness=2 if p.is_target else 1,
                     )
-            cv2.addWeighted(mask_overlay, 0.28, frame, 0.72, 0, frame)
 
-        # Pose 태스크: 17개 관절 스켈레톤 및 가시성 키포인트 렌더링
-        elif task == 'pose':
-            for p in detections:
-                if p.keypoints is None or len(p.keypoints) < 17:
-                    continue
-                kp = p.keypoints
-                for i1, i2, edge_color in self.POSE_EDGES:
-                    if kp[i1, 2] >= 0.35 and kp[i2, 2] >= 0.35:
-                        pt1 = (int(kp[i1, 0]), int(kp[i1, 1]))
-                        pt2 = (int(kp[i2, 0]), int(kp[i2, 1]))
-                        color = edge_color if p.is_target else (150, 150, 150)
-                        cv2.line(frame, pt1, pt2, color, 2 if p.is_target else 1, cv2.LINE_AA)
-
-                for idx in (5, 6, 11, 12, 13, 14, 15, 16):
-                    if kp[idx, 2] >= 0.35:
-                        pt = (int(kp[idx, 0]), int(kp[idx, 1]))
-                        cv2.circle(
-                            frame,
-                            pt,
-                            4 if p.is_target else 2,
-                            (0, 255, 255) if p.is_target else (180, 180, 180),
-                            -1,
-                        )
+        # Det(BBox 3등분) / Seg(폴리곤 3등분) / Pose(관절 기준 3등분 + 스켈레톤) 공통 3부위 HSV 추출 마스크 표시
+        draw_pose_and_mask_overlays(
+            frame,
+            src_frame,
+            detections,
+            self.tracker,
+            pose_edges=self.POSE_EDGES,
+        )
 
     def _draw_hud(self, frame: np.ndarray, num_persons: int):
         h, w = frame.shape[:2]
@@ -392,8 +417,8 @@ class MultiModelTrackerNode(Node):
             cv2.LINE_AA,
         )
 
-        # 4. 별도 정보 창(Tracker Status & Coordinates)에 좌표 및 성능 표시
-        self._render_info_window(num_persons, cam_status)
+        # 4. 정보/벤치마크 패널 생성 (단일 창 모드면 대시보드 합성용 반환, 분리 모드면 별도 창 표시)
+        return self._render_info_window(num_persons, cam_status)
 
     def _draw_target_camera_axes(self, frame: np.ndarray, person: UnifiedTrackedPerson):
         """타겟 중심에 카메라 기준(top_cam_link) 3D 좌표축(+X 정면, +Y 왼쪽, +Z 위) 방향 투영 표시."""
@@ -442,7 +467,15 @@ class MultiModelTrackerNode(Node):
             vram_mb = torch.cuda.memory_allocated() / (1024 * 1024)
             vram_str = f' | VRAM:{vram_mb:.0f}MB'
 
-        adapt_str = f' [{m.adaptive_state}]' if self.tracker.mode == 5 else ''
+        adapt_str = f' [{m.adaptive_state} | EMA:{m.ema_status}]' if self.tracker.mode == 5 else ''
+        if m.inference_ms > 0.0:
+            self._bench_stats[m.model_label] = (
+                m.inference_ms,
+                m.post_track_ms + m.reid_ms,
+                m.total_ms,
+                m.max_infer_fps,
+                self.cam_fps,
+            )
 
         if cam_status.map_xyz is not None:
             mx, my, _ = cam_status.map_xyz
@@ -462,9 +495,10 @@ class MultiModelTrackerNode(Node):
             bx, by, _ = loc.base_xyz
             cx_m, cy_m, _ = loc.cam_xyz
             cam_tgt_line = f'Target(Cam): x={cx_m:+.2f}m y={cy_m:+.2f}m ({loc.cam_bearing_deg:+.1f}deg)'
+            sync_tag = f' {loc.sync_dt_ms:+.0f}ms' if loc.sync_dt_ms is not None else ''
             bot_line = (
                 f'Target(Bot): x={bx:+.2f}m y={by:+.2f}m '
-                f'({loc.base_dist_m:.2f}m, {loc.base_angle_deg:+.1f}deg) [{loc.source}]'
+                f'({loc.base_dist_m:.2f}m, {loc.base_angle_deg:+.1f}deg) [{loc.source}{sync_tag}]'
             )
             bot_color = (80, 255, 120) if loc.source == 'LiDAR' else (80, 220, 255)
             if loc.map_xyz is not None:
@@ -482,7 +516,7 @@ class MultiModelTrackerNode(Node):
             map_color = (150, 150, 150)
 
         lines = [
-            (f'Model  : {m.model_label} | {m.device} [D:Dev, M:Draw]', (0, 255, 255)),
+            (f'Model  : {m.model_label} | {m.device} [D:Dev M:Mask V:ReID R:Rst C:Clr]', (0, 255, 255)),
             (f'Cam FPS: {self.cam_fps:4.1f} | Max Infer: {m.max_infer_fps:5.1f} FPS', (0, 255, 0)),
             (f'Total  : {m.total_ms:5.1f} ms (ROS Lag: {self.ros_lag_ms:4.0f} ms)', (255, 255, 255)),
             (f' - YOLO ({m.task[:3]}) : {m.inference_ms:5.1f} ms (Pre:{m.preprocess_ms:3.1f})', (200, 220, 255)),
@@ -497,19 +531,50 @@ class MultiModelTrackerNode(Node):
         if status_banner:
             lines.append((status_banner, (0, 200, 255)))
 
-        panel = np.full((280, 540, 3), 24, dtype=np.uint8)
+        bench_rows = list(self._bench_stats.items())[-9:]
+        extra_h = (28 + len(bench_rows) * 19) if bench_rows else 0
+        panel_h = max(280, 28 + len(lines) * 22 + extra_h)
+        panel = np.full((panel_h, 580, 3), 24, dtype=np.uint8)
         for idx, (text, color) in enumerate(lines):
             cv2.putText(
                 panel,
                 text,
                 (14, 24 + idx * 22),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
+                0.47,
                 color,
                 1,
                 cv2.LINE_AA,
             )
-        cv2.imshow(self.info_win_name, panel)
+        if bench_rows:
+            y_tbl = 24 + len(lines) * 22 + 8
+            cv2.line(panel, (12, y_tbl - 14), (568, y_tbl - 14), (70, 70, 70), 1)
+            cv2.putText(
+                panel,
+                'Benchmark Compare (Q/W/E x A/S/F) [C:Clear]',
+                (14, y_tbl),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.44,
+                (255, 210, 100),
+                1,
+                cv2.LINE_AA,
+            )
+            for r_i, (lbl, (inf_ms, trk_ms, tot_ms, mf, cf)) in enumerate(bench_rows):
+                cur = (lbl == m.model_label)
+                row_txt = f'{"*" if cur else " "} {lbl:<13} Inf:{inf_ms:4.1f}ms Trk:{trk_ms:4.1f}ms Tot:{tot_ms:4.1f}ms ({mf:4.0f}FPS)'
+                cv2.putText(
+                    panel,
+                    row_txt,
+                    (14, y_tbl + 19 + r_i * 19),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.41,
+                    (120, 255, 160) if cur else (195, 205, 215),
+                    1,
+                    cv2.LINE_AA,
+                )
+        if not self.single_window:
+            cv2.imshow(self.info_win_name, panel)
+        return panel
 
     def compressed_callback(self, msg: CompressedImage):
         try:
@@ -546,6 +611,17 @@ class MultiModelTrackerNode(Node):
             self.tracker.toggle_device()
         elif key in (ord('m'), ord('M')):
             self.draw_overlay = not self.draw_overlay
+        elif key in (ord('v'), ord('V')):
+            self.show_reid_viz = not self.show_reid_viz
+            if self.show_gui and not self.single_window:
+                if self.show_reid_viz:
+                    self._ensure_reid_window()
+                else:
+                    cv2.destroyWindow(self.reid_win_name)
+        elif key in (ord('r'), ord('R')):
+            self._clear_target_state('[타겟 초기화] R키 입력으로 타겟과 ReID/운동학 이력을 초기화합니다.')
+        elif key in (ord('c'), ord('C')):
+            self._bench_stats.clear()
 
     def refresh_idle_gui(self):
         """토픽이 아직 안 들어오거나 bag 재생이 멈췄을 때도 에러/창 멈춤 없이 대기 화면 유지."""
@@ -576,13 +652,22 @@ class MultiModelTrackerNode(Node):
             cv2.LINE_AA,
         )
         cv2.imshow(self.win_name, idle_frame)
-        self._render_info_window(0, status_banner=status_txt)
+        if not self.single_window:
+            self._render_info_window(0, status_banner=status_txt)
         key = cv2.waitKey(1) & 0xFF
         if key != 255:
             self._process_key(key)
 
     def _estimate_candidate_spatial(self, person: UnifiedTrackedPerson, w: int, h: int):
-        res = self.localizer.localize_target(person, w, h, publish=False, use_kinematics=False)
+        res = self.localizer.localize_target(
+            person,
+            w,
+            h,
+            publish=False,
+            frame_stamp=self._current_frame_stamp,
+            frame_rx_wall=self.last_frame_wall_time,
+            use_kinematics=False,
+        )
         if res.map_xyz is not None:
             return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source
         return (res.base_xyz[0], res.base_xyz[1]), 'base_link', res.source
@@ -591,10 +676,12 @@ class MultiModelTrackerNode(Node):
         h, w = frame.shape[:2]
         self.frame_size = (w, h)
         self.last_frame_wall_time = time.time()
+        self._current_frame_stamp = msg_stamp
         detections, target = self.tracker.process_frame(
             frame,
             auto_lock_first=self.auto_lock_first,
             spatial_estimator=self._estimate_candidate_spatial,
+            compute_all_sims=(self.show_gui and self.show_reid_viz),
         )
         self._update_system_metrics(msg_stamp)
 
@@ -605,7 +692,13 @@ class MultiModelTrackerNode(Node):
             msg.z = float(target.area_ratio)
             self.target_pub.publish(msg)
 
-            loc_res = self.localizer.localize_target(target, w, h)
+            loc_res = self.localizer.localize_target(
+                target,
+                w,
+                h,
+                frame_stamp=msg_stamp,
+                frame_rx_wall=self.last_frame_wall_time,
+            )
             self.last_loc_result = loc_res
 
             now_t = time.time()
@@ -627,7 +720,8 @@ class MultiModelTrackerNode(Node):
             self.last_loc_result = None
 
         if self.show_gui:
-            self._draw_task_overlays(frame, detections)
+            src_frame = frame.copy()
+            self._draw_task_overlays(frame, src_frame, detections)
             show_sim = self.tracker.mode in (2, 4, 5)
 
             for p in detections:
@@ -686,9 +780,23 @@ class MultiModelTrackerNode(Node):
                         1,
                     )
 
-            self._draw_hud(frame, len(detections))
-            self.last_display_frame = frame.copy()
-            cv2.imshow(self.win_name, frame)
+            info_panel = self._draw_hud(frame, len(detections))
+            self._main_frame_size = (frame.shape[1], frame.shape[0])
+            reid_panel = self.reid_viz.render(self.tracker, detections) if self.show_reid_viz else None
+            if self.single_window:
+                dashboard, self._display_scale = compose_dashboard_frame(
+                    frame,
+                    reid_panel=reid_panel,
+                    bench_panel=info_panel,
+                )
+                self.last_display_frame = dashboard
+                cv2.imshow(self.win_name, dashboard)
+            else:
+                self._display_scale = 1.0
+                self.last_display_frame = frame.copy()
+                cv2.imshow(self.win_name, frame)
+                if reid_panel is not None:
+                    cv2.imshow(self.reid_win_name, reid_panel)
 
             key = cv2.waitKey(1) & 0xFF
             if key != 255:
