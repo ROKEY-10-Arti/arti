@@ -19,7 +19,7 @@ robots:
   /robot4:   # 2026-11-19 arti_pc2_nav a_course.yaml dock 값을 옮김 (robot4 실측)
     dock:   {x: 0.304, y: -0.0957}                 # 충전 스테이션
     dock_approach: {x: -0.35, y: -0.0957, yaw_deg: 0}   # 스테이션 정면 약 0.65 m 앞 (Nav2 복귀 목표, 스테이션 +x를 봄)
-    # dock에 yaw_deg가 없으면 arti_bringup localization.launch.py(기본 start_point dock)가 AMCL 시작 위치를 넣지 않음
-    #   (지금처럼 RViz 2D Pose Estimate). 도크 위 방향을 재서 dock에 yaw_deg를 넣으면 자동이 된다.
-    # undock(언독 직후 위치·방향)은 아직 안 잼
-    #   (지금처럼 RViz 2D Pose Estimate). robot4 담당이 재서 undock: {x, y, yaw_deg}로 추가
+    # dock에 yaw_deg가 없으면 arti_bringup localization.launch.py(기본 start_point dock)가 AMCL 시작 위치를 넣지 않음.
+    #   arti_pc2_nav a_course.launch.py는 start_point:=undock으로 아래 undock 값을 쓴다 (언독 직후 initialpose도 같은 값).
+    # 언독 직후 위치·방향. 2026-11-20 robot4 언독 → RViz 2D Pose Estimate → /robot4/amcl_pose 값 (-0.117, 0.030, -179°)
+    undock: {x: -0.12, y: 0.03, yaw_deg: -179}

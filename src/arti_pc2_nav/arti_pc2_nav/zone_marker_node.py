@@ -39,6 +39,7 @@ class ZoneMarkerNode(Node):
         self.pub = self.create_publisher(MarkerArray, 'arti/a_course/zones', qos)
         # (라벨, 중심 (x, y), 외곽점 목록, 색상). 키오스크·작품 = a_course.yaml, 출구 = arti_common
         self.zones = []
+        self.goals = []    # (라벨, Pose2D goal_pose, 색상)
         filename = self.get_parameter('config_file').value
         if filename:
             try:
@@ -51,6 +52,9 @@ class ZoneMarkerNode(Node):
                 self.zones.append(self._semi('KIOSK', cfg.kiosk_zone, (.05, .75, .95)))     # 키오스크: 파랑
                 self.zones.extend(self._semi(f'ART {a.artwork_id}', a.zone, (.12, .92, .22))
                                   for a in cfg.artworks)                                  # 작품: 초록
+                # Nav2 목표(goal_pose) 화살표: 키오스크는 이 자리까지 가서 선다 (kiosk_stop_at_goal, 변경 ⑪)
+                self.goals = [('KIOSK', cfg.kiosk_goal, (.05, .75, .95))] + \
+                    [(f'ART {a.artwork_id}', a.goal, (.12, .92, .22)) for a in cfg.artworks]
             except Exception as exc:
                 self.get_logger().warn(f'a_course.yaml을 읽지 못해 반원을 표시하지 않음: {exc}')
         self.timer = self.create_timer(1.0, self.publish_markers)   # 1초마다 재발행
@@ -81,6 +85,19 @@ class ZoneMarkerNode(Node):
             title.color = rgba(*color, 1.)
             title.text = label
             arr.markers.append(title)
+        # goal_pose: 점 + 방향 화살표 (로봇이 서는 자리·정면). id는 반원 마커 뒤 1000번부터
+        for j, (label, g, color) in enumerate(self.goals):
+            arrow = self._marker(frame, 1000 + j, Marker.ARROW)
+            arrow.points = [point(g.x, g.y, .08),
+                            point(g.x + .30*math.cos(g.yaw), g.y + .30*math.sin(g.yaw), .08)]
+            arrow.scale.x, arrow.scale.y, arrow.scale.z = .04, .09, .10   # 몸통 굵기, 머리 폭, 머리 길이
+            arrow.color = rgba(*color, 1.)
+            arr.markers.append(arrow)
+            dot = self._marker(frame, 2000 + j, Marker.SPHERE)
+            dot.pose.position = point(g.x, g.y, .08)
+            dot.scale.x = dot.scale.y = dot.scale.z = .10
+            dot.color = rgba(1., 1., 1., .95)
+            arr.markers.append(dot)
         self.pub.publish(arr)
 
     @staticmethod

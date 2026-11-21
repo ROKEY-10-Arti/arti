@@ -210,3 +210,22 @@ def load_course_config(path: str | Path, zones_file: Optional[str] = None) -> Co
         approach = Pose2D.parse(dock_cfg.get('approach_pose'))
     return CoursePlan(kiosk_goal, kiosk_zone, tuple(works),
                       exit_goal, farewell, station, approach, exit_zone)
+
+
+def load_start_pose(path: str | Path, namespace: str, point: str) -> Optional[Pose2D]:
+    """[코스 관람 변경 ②] arti_common init_pose.yaml의 robots.<namespace>.<point> → Pose2D (yaw = yaw_deg를 라디안으로).
+    follow 팀(visitor_follower, arti_bringup localization.launch.py)과 같은 파일·같은 키를 읽는다.
+    yaw_deg가 없으면 dock → 그 지점 방향, dock도 없으면 0. 그 로봇·지점이 없으면 None."""
+    with open(path, encoding='utf-8') as f:
+        robot = ((yaml.safe_load(f) or {}).get('robots') or {}).get('/' + namespace.strip('/')) or {}
+    target = robot.get(point)
+    if not target:
+        return None
+    x, y = number(target.get('x'), f'{point}.x'), number(target.get('y'), f'{point}.y')
+    if 'yaw_deg' in target:
+        yaw = math.radians(number(target['yaw_deg'], f'{point}.yaw_deg'))
+    elif robot.get('dock'):
+        yaw = math.atan2(y - float(robot['dock']['y']), x - float(robot['dock']['x']))
+    else:
+        yaw = 0.0
+    return Pose2D(x, y, yaw)

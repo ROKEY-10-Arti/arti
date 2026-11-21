@@ -13,6 +13,7 @@
 | `robot/` | TurtleBot 4 본체: 배터리, 도킹, Create3, 센서 하드웨어, 로봇 쪽 설정 |
 | `common/` | `src/common/` 패키지: interfaces, bringup(localization·nav2), 지도·공용 좌표 |
 | `follow/` | `src/arti_follow/` 자유 관람 |
+| `course/` | `src/arti_pc2_nav/` 코스 관람 (robot4) |
 
 `src/`의 역할 폴더와 이름을 맞춘다. 새 역할 폴더가 생기면 여기에도 같은 이름으로 만든다.
 
@@ -56,5 +57,14 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-20 | follow | [관람 중 로봇이 뚝뚝 멈춤 (라이다 scan이 Wi-Fi로 0.5~0.8 s씩 끊김, scan_timeout 0.5 s)](follow/2026-11-20-scan-gap-wifi-stutter.md) | 우회 | 이정욱 |
 | 2026-11-17 | env | [localization이 "Configuring amcl"에서 멈춤 (Discovery Server 연결 안 됨)](env/2026-11-17-localization-stuck-discovery.md) | 해결 | jsy0605 |
 | 2026-11-17 | env | [nav2가 활성화되지 않음 (lifecycle 서비스 응답이 Discovery Server 지연으로 사라짐)](env/2026-11-17-nav2-lifecycle-stuck-discovery.md) | 확인 중 | jsy0605 |
+| 2026-11-20 | course | [도킹 중 호출 거절·2D Pose 안 먹음·Nav2 "Aborting bringup" (도킹 중 LiDAR 꺼짐)](course/2026-11-20-docked-lidar-off-prepare-fails.md) | 해결 | flypig341 |
+| 2026-11-20 | env | [서버(PC3)만 쓰면 새 노드끼리 못 찾거나 아주 느림 (Waiting for service, bond 4.00s)](env/2026-11-20-discovery-server-slow-new-nodes.md) | 우회 | flypig341 |
+| 2026-11-20 | course | [언독 후 키오스크로 안 가고 재도킹 (AMCL "earlier than all the data in the transform cache")](course/2026-11-20-amcl-message-filter-dropping-scan.md) | 미해결 | flypig341 |
+| 2026-11-20 | course | [키오스크 앞에서 웹캠이 관람객 반대쪽을 봄 / 고정 각도로 반만 돎](course/2026-11-20-kiosk-camera-faces-away.md) | 해결 | flypig341 |
+| 2026-11-20 | course | [해설 시작 0.7 s 만에 "반원 이탈 또는 위치 정보 소실"](course/2026-11-20-explaining-fails-on-zone-edge.md) | 해결 | flypig341 |
+| 2026-11-20 | course | [도킹 접근점에서 Dock 2.7 s 만에 실패, 앞 벽에 부딪힘](course/2026-11-20-dock-bumps-wall.md) | 해결 | flypig341 |
+| 2026-11-20 | course | [Nav2가 장애물을 거의 피해 가지 않음](course/2026-11-20-nav2-weak-obstacle-avoidance.md) | 미해결 | flypig341 |
+| 2026-11-20 | robot | [robot4 OAK-D 끄기 (standard.launch.py)](robot/2026-11-20-robot4-oakd-disabled.md) | 해결 | flypig341 |
+| 2026-11-20 | env | [RTPS_TRANSPORT_SHM Error: open_and_lock_file failed](env/2026-11-20-fastdds-shm-open-and-lock.md) | 해결 | flypig341 |
 | 2026-11-20 | env | [prepare_tour가 dock_status_unavailable로 실패 (같은 때 /arti/description도 못 받음, Discovery 일시 끊김 의심)](env/2026-11-20-dock-status-unavailable-discovery.md) | 미해결 | 이정욱 |
 | 2026-11-20 | follow | [관람객이 화면에 보이는데 놓침·제자리 회전 (인식 좌표가 벽 점으로 튐) → LiDAR 다리 후보로 이어 감](follow/2026-11-20-target-lost-wall-coords-leg-assist.md) | 우회 | 이정욱 |
