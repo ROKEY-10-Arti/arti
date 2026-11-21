@@ -8,6 +8,7 @@ async function checkFlow(manual, devMode = false) {
   const nativeNow = Date.now;
   let time=0, timerId=0;
   const timers=new Map(), sources=[], documentEvents=new Map(), windowEvents=new Map(), writes=[];
+  let artworkRequests = 0;
   const root={innerHTML:'', querySelectorAll:()=>[]};
   const overlay={innerHTML:'', firstElementChild:null, querySelector:()=>({focus(){}})};
   const stub={focus(){},classList:{add(){},remove(){},toggle(){}},textContent:'',querySelector:()=>null};
@@ -21,7 +22,7 @@ async function checkFlow(manual, devMode = false) {
   install('document',{hidden:false, activeElement:null, body:stub, querySelector:selector=>{
     if(selector==='#app')return root;
     if(selector==='#overlay')return overlay;
-    if(['#main','#announcer','#toast','h1'].includes(selector))return stub;
+    if(['#main','#announcer','#toast','h1','[data-action="accept-terms"]'].includes(selector))return stub;
     return null;
   },querySelectorAll:()=>[],getElementById:()=>null,addEventListener:(key,fn)=>documentEvents.set(key,fn),removeEventListener:key=>documentEvents.delete(key)});
   install('window',{scrollTo(){},addEventListener:(key,fn)=>windowEvents.set(key,fn)});
@@ -35,7 +36,9 @@ async function checkFlow(manual, devMode = false) {
       writes.push(JSON.parse(options.body));
       return {ok:true,json:async()=>({...session,status:'active',startedAt:123})};
     }
-    const data=url==='/api/catalog'?{artworks:[{artwork_id:'001',artwork_title:'artwork1',artist_name:'artist1',theme:'theme1',description:'description1',location:'location1',image_path:'/static/art/art-001.png'}],courses:[]}
+    assert.notEqual(url, '/api/catalog');
+    if (url === '/api/artworks') artworkRequests++;
+    const data=url==='/api/artworks'?{artworks:[{artwork_id:'001',artwork_title:'artwork1',artist_name:'artist1',theme:'theme1',description:'description1',location:'location1',image_path:'/static/art/art-001.png'}]}
       :url==='/api/auth/status'?{authenticated:false}:url==='/api/test-mode'?{enabled:false}:session;
     return {ok:true,json:async()=>data};
   });
@@ -43,6 +46,7 @@ async function checkFlow(manual, devMode = false) {
   try {
     await import(`../static/js/app.js?handoff=${manual?'manual':'automatic'}-${devMode}`);
     await tick(); await tick();
+    assert.equal(artworkRequests, 0, 'Restoring a visit does not fetch artwork data');
     const source=sources.find(source=>source.url.includes('/preparation/events'));
     assert(source);
     source.handlers.preparation({data:JSON.stringify({session_id:session.id,phase:devMode?'ready':'touring',message:'관람 시작',robot_id:devMode?'DEV-ARTI':'robot4',progress:1,dev_mode:devMode})});
@@ -59,14 +63,36 @@ async function checkFlow(manual, devMode = false) {
     if(manual) {time=2000;await click('reset');assert(![...timers.values()].some(timer=>timer===pending));}
     else {time=10000;pending.fn();}
     assert(root.innerHTML.includes('page-home'));
+    assert.equal(artworkRequests, 0, 'Home does not fetch artwork data');
     assert.deepEqual(writes,expectedWrites, '첫 화면 복귀는 관람 완료/취소나 가짜 방문 기록을 저장하지 않습니다.');
     await click('exhibition');
+    await tick();
+    assert.equal(artworkRequests, 1);
     assert.match(root.innerHTML, /data-action="view-art" data-id="001"/);
     assert.match(root.innerHTML, /<h3>artwork1<\/h3>/);
     await click('view-art', {id:'001'});
     assert.match(overlay.innerHTML, /<h2>artwork1<\/h2>/);
     assert.match(overlay.innerHTML, /<p class="artwork-artist">artist1<\/p>/);
     assert.match(overlay.innerHTML, /<p>description1<\/p>/);
+    await click('close-modal');
+    await click('back');
+    assert(![...timers.values()].some(timer => timer.delay === 3000), 'Leaving the gallery stops artwork polling');
+    const availability = sources.find(source => source.url === '/api/availability/stream');
+    availability.handlers.availability({data:JSON.stringify({status:'available',available:true})});
+    await click('begin-visit');
+    await click('continue-usage');
+    documentEvents.get('change')({target:{id:'terms-consent',checked:true,matches:()=>false}});
+    await click('accept-terms');
+    assert.equal(artworkRequests, 1, 'Usage, terms and mode selection do not request artwork data');
+    await click('choose-mode', {mode:'course'});
+    await tick();
+    assert.equal(artworkRequests, 2);
+    assert.match(root.innerHTML, /artwork1/);
+    await click('back');
+    await click('choose-mode', {mode:'free'});
+    await tick();
+    assert.equal(artworkRequests, 3);
+    assert.match(root.innerHTML, /data-action="call"\s*>자유 관람/);
   } finally {
     windowEvents.get('pagehide')?.();
     Date.now=nativeNow;

@@ -3,8 +3,8 @@
 import math
 import re
 
-from flask import abort, jsonify
-from database import ARTWORK_SELECT
+from flask import abort, jsonify, request
+from database import ARTWORK_SELECT, artwork_rows
 
 
 ARTWORK_FIELDS = {"artist_name": 200, "theme": 200, "artwork_title": 200, "description": 10000,
@@ -36,8 +36,10 @@ def register_managed_data(app, get_db, json_body, now_ms):
 
     @app.get("/api/artworks")
     def list_artworks():
-        return jsonify(artworks=[dict(row) for row in get_db().execute(
-            ARTWORK_SELECT + " ORDER BY artwork_id")])
+        response = jsonify(artworks=artwork_rows(get_db()))
+        response.cache_control.no_cache = True
+        response.add_etag()
+        return response.make_conditional(request)
 
     @app.get("/api/artworks/<int:artwork_number>")
     def get_artwork(artwork_number):

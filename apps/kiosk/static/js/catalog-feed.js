@@ -1,5 +1,5 @@
 // 화면 조작 없이 DB의 최신 카탈로그를 조회합니다. 요청은 겹치지 않습니다.
-export function watchCatalog({refresh, onUpdate, onError = () => {}, interval = 3000,
+export function watchCatalog({refresh, onUpdate, onError = () => {}, interval = 3000, immediate = false,
   documentImpl = document, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout}) {
   let stopped = false;
   let timer = null;
@@ -38,7 +38,8 @@ export function watchCatalog({refresh, onUpdate, onError = () => {}, interval = 
     else if (!running && !stopped) void poll();
   }
   documentImpl.addEventListener('visibilitychange', visibilityChanged);
-  schedule();
+  if (immediate) void poll();
+  else schedule();
   return () => {
     stopped = true;
     clearTimeoutImpl(timer);

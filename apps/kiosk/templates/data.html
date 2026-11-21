@@ -23,13 +23,13 @@
       </table></div>
     </section>
     <script defer src="/static/js/fleet.js?v=3"></script>
-    <div class="stats"><div><b>{{ catalog.artworks | length }}</b>개 작품</div><div><b id="fleet-total">—</b>대 전체</div><div><b id="fleet-available">—</b>대 이용 가능</div><div><b id="fleet-unavailable">—</b>대 이용 불가</div></div>
+    <div class="stats"><div><b>{{ artworks | length }}</b>개 작품</div><div><b id="fleet-total">—</b>대 전체</div><div><b id="fleet-available">—</b>대 이용 가능</div><div><b id="fleet-unavailable">—</b>대 이용 불가</div></div>
     <details class="database-section" open>
       <summary id="artworks-heading">작품 DB · Art <small>표에서 수정 후 행별 저장</small></summary>
       <p>저장한 작품 정보는 DB에 보관됩니다. 키오스크 작품 화면은 연결이 정상일 때 약 3초마다 변경 사항을 확인합니다. 작품 ID는 고정입니다.</p>
       <div class="table-wrap"><table class="art-editor">
         <thead><tr><th scope="col">artwork_id</th><th scope="col">artwork_title</th><th scope="col">artist_name</th><th scope="col">location</th><th scope="col">theme</th><th scope="col">description</th><th scope="col">x (m)</th><th scope="col">y (m)</th><th scope="col">저장</th></tr></thead>
-        <tbody>{% for art in catalog.artworks %}{% set form_id = 'art-row-' ~ art.artwork_id %}<tr data-artwork-id="{{ art.artwork_id }}">
+        <tbody>{% for art in artworks %}{% set form_id = 'art-row-' ~ art.artwork_id %}<tr data-artwork-id="{{ art.artwork_id }}">
           <th scope="row"><code>{{ art.artwork_id }}</code></th>
           <td><input form="{{ form_id }}" name="artwork_title" value="{{ art.artwork_title }}" aria-label="작품 {{ art.artwork_id }} 제목" required maxlength="200"></td>
           <td><input form="{{ form_id }}" name="artist_name" value="{{ art.artist_name }}" aria-label="작품 {{ art.artwork_id }} 작가" required maxlength="200"></td>
@@ -43,7 +43,7 @@
       </table></div>
       <p class="help">대표 x·y는 작품 DB에 저장됩니다. 안내 지도와 로봇 주행 좌표는 각 설정에서 관리합니다. 좌표를 모르면 빈칸으로 저장하세요.</p>
       <details class="advanced-artworks"><summary>이미지 확인·상세 작품 정보 수정</summary>
-      <div class="artworks">{% for art in catalog.artworks %}
+      <div class="artworks">{% for art in artworks %}
         <article><form class="artwork-form" data-artwork-id="{{ art.artwork_id }}" aria-label="작품 {{ art.artwork_id }} 정보">
           <img class="managed-art-image" src="{{ art.image_path }}" alt="{{ art.image_alt or art.artwork_title }}" width="1536" height="1024" loading="lazy">
           <h3>{{ art.artwork_id }} · {{ art.artwork_title }}</h3>

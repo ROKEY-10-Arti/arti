@@ -90,7 +90,7 @@ apps/kiosk/
 
 ## 초기 데이터와 관람 흐름
 
-- 브라우저는 처음 열릴 때 `GET /api/catalog`로 SQLite의 작품 정보를 받습니다. 작품 선택 표는 위치 코드(`location`)와 설명을 표시합니다. 응답에는 관리 화면에서 편집하는 DB 좌표(`x`, `y`)와 이전 클라이언트용 코스 데이터도 포함됩니다.
+- 브라우저는 갤러리 소개나 관람 화면(코스·자유)을 열 때 `GET /api/artworks`로 SQLite의 작품 정보를 받습니다. 작품 선택 표는 위치 코드(`location`)와 설명을 표시합니다. 예전 클라이언트용 `GET /api/catalog`는 작품과 사전 정의 코스를 반환합니다.
 - 코스 관람은 화면에서 체크한 작품 ID로 요청합니다. 안내용 평면도는 [gallery-map.js](static/js/gallery-map.js)에 정의되어 있습니다. 로봇은 자유 관람 구역을 `artworks.yaml`에서, 코스 주행 목표 및 작품 구역을 `a_course.yaml`에서 읽습니다.
 - `/api/availability/stream`은 배터리 잔량이 30%를 초과하고 도킹 상태인 로봇이 있는지 브라우저에 전달합니다.
 

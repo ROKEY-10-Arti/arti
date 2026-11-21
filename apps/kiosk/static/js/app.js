@@ -43,6 +43,10 @@ let prepStep = 0;
 let toastTimer;
 let overlayTrigger;
 const handedOffSessions = new Set();
+const catalogPages = new Set(['exhibition', 'course', 'free']);
+let catalogPage = null;
+let catalogMessage = '작품 정보를 불러오고 있어요…';
+let stopCatalog = null;
 const autoReturn = createAutoReturn({onReturn: returnHome});
 function rememberPreparation(id) { try { if (id) sessionStorage.setItem('arti-preparation', id); else sessionStorage.removeItem('arti-preparation'); } catch {} }
 let simulatedStart = null;
@@ -154,16 +158,20 @@ function selectedIds() {
     : selectedArtworks(artworks, state.selectedArtworkIds).map(art => art.artwork_id);
 }
 
+function catalogStatus() {
+  return `<p class="catalog-status" data-catalog-status role="status">${catalogMessage}</p>`;
+}
+
 function coursePage() {
   const ids = selectedIds();
-  return `<div class="course-workspace"><div class="course-intro">${sectionTop('CHOOSE YOUR ARTWORKS', '관람할 작품을<br>선택해 주세요', '여러 작품을 선택할 수 있어요.')}<p class="catalog-status" data-catalog-status role="status">작품 정보는 DB에서 자동 갱신돼요.</p></div>
+  return `<div class="course-workspace"><div class="course-intro">${sectionTop('CHOOSE YOUR ARTWORKS', '관람할 작품을<br>선택해 주세요', '여러 작품을 선택할 수 있어요.')}${catalogStatus()}</div>
     ${courseSelection(artworks, state.selectedArtworkIds)}
     <section class="course-map-panel" aria-labelledby="course-map-heading"><div class="preview-heading"><span class="eyebrow">GALLERY MAP</span><h2 id="course-map-heading">작품 위치</h2></div>${galleryMap(ids.map(tourArtworkId))}</section>
     <div class="course-selection-next"><span class="selection-count">선택한 작품 <b>${ids.length}개</b></span><button class="button primary" data-action="call" ${!ids.length || state.busy ? 'disabled' : ''}>코스 관람 · 아티 만나기 ${icon('arrow')}</button></div></div>`;
 }
 
 function freePage() {
-  return `${sectionTop('FOLLOW YOUR CURIOSITY', '당신의 발걸음에 함께할게요', '보고 싶은 작품을 자유롭게 만나세요. 아티가 곁에서 이야기를 더해요.')}<div class="free-layout"><div class="free-intro"><div class="free-big-icon">${icon('walk')}<span class="dashed-connector"></span>${icon('robot')}</div><h2>정해진 길 없이,<br>마음에 드는 작품 앞에서.</h2><p>아티 앞에서 관람객 등록을 마친 뒤 천천히 걸어주세요.<br>작품 앞에서 잠시 머무르면 해설이 시작돼요.</p><ul class="instruction-list"><li><span>01</span><div><b>아티에게 나를 알려주세요</b><p>키오스크 스캔 지점에서 한 분만 아티 앞에 서 주세요.</p></div></li><li><span>02</span><div><b>작품 앞에서 잠시 멈춰보세요</b><p>관람 구역에서 머무르면 작품을 소개해요.</p></div></li><li><span>03</span><div><b>다시 걸으면, 함께 걸어요</b><p>작품을 떠나면 설명을 멈추고 따라가요.</p></div></li></ul></div><aside class="course-preview"><div class="preview-heading"><span class="eyebrow">MEET YOUR ARTI</span><h2>아티와 만날 장소</h2></div>${galleryMap([])}<div class="meeting-caption">${icon('pin')} 키오스크 앞 · 관람객 스캔 지점</div><div class="soft-notice">${icon('volume')} 주변 관람객을 배려하며<br>아티와 함께 천천히 이동해 주세요.</div><button class="button primary full" data-action="call" ${state.busy ? 'disabled' : ''}>자유 관람 · 아티 만나기 ${icon('arrow')}</button><p class="preview-note">아티가 키오스크 앞으로 도착하면 관람객을 등록해요.</p></aside></div>`;
+  return `${sectionTop('FOLLOW YOUR CURIOSITY', '당신의 발걸음에 함께할게요', '보고 싶은 작품을 자유롭게 만나세요. 아티가 곁에서 이야기를 더해요.')}<div class="free-layout"><div class="free-intro"><div class="free-big-icon">${icon('walk')}<span class="dashed-connector"></span>${icon('robot')}</div><h2>정해진 길 없이,<br>마음에 드는 작품 앞에서.</h2><p>아티 앞에서 관람객 등록을 마친 뒤 천천히 걸어주세요.<br>작품 앞에서 잠시 머무르면 해설이 시작돼요.</p><ul class="instruction-list"><li><span>01</span><div><b>아티에게 나를 알려주세요</b><p>키오스크 스캔 지점에서 한 분만 아티 앞에 서 주세요.</p></div></li><li><span>02</span><div><b>작품 앞에서 잠시 멈춰보세요</b><p>관람 구역에서 머무르면 작품을 소개해요.</p></div></li><li><span>03</span><div><b>다시 걸으면, 함께 걸어요</b><p>작품을 떠나면 설명을 멈추고 따라가요.</p></div></li></ul></div><aside class="course-preview"><div class="preview-heading"><span class="eyebrow">MEET YOUR ARTI</span><h2>아티와 만날 장소</h2></div>${galleryMap([])}<div class="meeting-caption">${icon('pin')} 키오스크 앞 · 관람객 스캔 지점</div>${catalogStatus()}<div class="soft-notice">${icon('volume')} 주변 관람객을 배려하며<br>아티와 함께 천천히 이동해 주세요.</div><button class="button primary full" data-action="call" ${!artworks.length || state.busy ? 'disabled' : ''}>자유 관람 · 아티 만나기 ${icon('arrow')}</button><p class="preview-note">아티가 키오스크 앞으로 도착하면 관람객을 등록해요.</p></aside></div>`;
 }
 
 
@@ -187,7 +195,7 @@ function sessionPage() {
 }
 
 function collectionSection() {
-  return `<section class="collection-section" aria-labelledby="collection-heading"><div class="collection-heading"><div><span class="eyebrow">THE COLLECTION · 2026</span><h2 id="collection-heading">작품으로 만나는, 하나의 전시</h2></div><p>작품을 눌러 아티의 이야기를 만나보세요.</p></div><div class="collection-grid">${artworks.map(art => `<button class="collection-card" data-action="view-art" data-id="${esc(art.artwork_id)}" aria-label="${esc(art.artwork_title)} 작품 상세 보기"><div class="collection-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.artwork_title)}" width="1536" height="1024" loading="lazy"><span class="collection-code">${esc(art.artwork_id)}</span></div><div class="collection-copy"><span class="small-tag">${esc(art.theme)}</span><h3>${esc(art.artwork_title)}</h3><p class="collection-artist">${esc(art.artist_name)}</p><span class="collection-link">작품 이야기 ${icon('arrow')}</span></div></button>`).join('')}</div></section>`;
+  return `<section class="collection-section" aria-labelledby="collection-heading"><div class="collection-heading"><div><span class="eyebrow">THE COLLECTION · 2026</span><h2 id="collection-heading">작품으로 만나는, 하나의 전시</h2></div><p>작품을 눌러 아티의 이야기를 만나보세요.</p>${catalogStatus()}</div><div class="collection-grid">${artworks.map(art => `<button class="collection-card" data-action="view-art" data-id="${esc(art.artwork_id)}" aria-label="${esc(art.artwork_title)} 작품 상세 보기"><div class="collection-image"><img src="${esc(artImage(art))}" alt="${esc(art.image_alt || art.artwork_title)}" width="1536" height="1024" loading="lazy"><span class="collection-code">${esc(art.artwork_id)}</span></div><div class="collection-copy"><span class="small-tag">${esc(art.theme)}</span><h3>${esc(art.artwork_title)}</h3><p class="collection-artist">${esc(art.artist_name)}</p><span class="collection-link">작품 이야기 ${icon('arrow')}</span></div></button>`).join('')}</div></section>`;
 }
 
 function showArtwork(id) {
@@ -211,6 +219,7 @@ function mediaPage(kind) {
 
 const pages = { home, terms: termsPage, mode: modePage, course: coursePage, free: freePage, exhibition: () => mediaPage('exhibition'), usage: () => mediaPage('usage'), session: sessionPage, farewell: farewellPage };
 function render({ focus = false, scroll = false } = {}) {
+  syncCatalog();
   const farewell = state.page === 'farewell';
   app.innerHTML = farewell
     ? `<main id="main" class="main page-farewell" tabindex="-1">${farewellPage()}</main>`
@@ -485,50 +494,78 @@ document.addEventListener('keydown', event => {
     else if (!event.shiftKey && (document.activeElement===last || document.activeElement===modal)) { event.preventDefault(); first?.focus(); }
   }
 });
-function connectCatalog() {
+function updateCatalogStatus(message) {
+  catalogMessage = message;
+  const status = document.querySelector('[data-catalog-status]');
+  if (status) status.textContent = message;
+}
+
+function disconnectCatalog() {
   stopCatalog?.();
+  stopCatalog = null;
+  catalogPage = null;
+}
+
+function syncCatalog() {
+  const page = catalogPages.has(state.page) ? state.page : null;
+  if (page === catalogPage) return;
+  disconnectCatalog();
+  if (!page) return;
+  catalogPage = page;
+  if (!artworks.length) catalogMessage = '작품 정보를 불러오고 있어요…';
   stopCatalog = watchCatalog({
-    refresh: options => ['course', 'free', 'exhibition'].includes(state.page) ? loadCatalog(options) : false,
+    refresh: loadCatalog,
+    immediate: true,
     onUpdate: changed => {
-      if (changed && ['course', 'free', 'exhibition', 'home'].includes(state.page) && !state.busy) {
+      updateCatalogStatus(artworks.length ? '작품 정보는 DB에서 자동 갱신돼요.' : '등록된 작품이 없어요.');
+      if (changed && !state.busy) {
         const focusId = document.activeElement?.id;
         render();
         if (focusId) document.getElementById(focusId)?.focus({preventScroll:true});
       }
-      const status = document.querySelector('[data-catalog-status]');
-      if (status) status.textContent = '작품 정보는 DB에서 자동 갱신돼요.';
     },
-    onError: () => {
-      const status = document.querySelector('[data-catalog-status]');
-      if (status) status.textContent = 'DB 연결을 확인하고 있어요. 마지막 조회 내용을 표시해요.';
-    },
+    onError: () => updateCatalogStatus(artworks.length
+      ? 'DB 연결을 확인하고 있어요. 마지막 조회 내용을 표시해요.'
+      : '작품 정보를 불러오지 못했어요. 다시 연결하고 있어요.'),
   });
 }
 
 let stopAvailability = null;
-let stopCatalog = null;
 function connectAvailability() {
   stopAvailability?.();
   stopAvailability = subscribeRobotAvailability(receiveRobotAvailability);
 }
-window.addEventListener('pagehide', () => { autoReturn.suspend(); stopSimulator(); stopAvailability?.(); stopPreparation?.(); stopCatalog?.(); });
-window.addEventListener('pageshow', event => { if (event.persisted) { autoReturn.resume(); connectCatalog(); if(simulationEnabled)watchSimulatedSession(); connectAvailability(); if (state.page === 'session') connectPreparation(); } });
-app.innerHTML = '<main class="main"><h1>작품 정보를 불러오고 있어요…</h1></main>';
-loadCatalog().then(async () => {
+window.addEventListener('pagehide', () => { autoReturn.suspend(); stopSimulator(); stopAvailability?.(); stopPreparation?.(); disconnectCatalog(); });
+window.addEventListener('pageshow', event => { if (event.persisted) { autoReturn.resume(); syncCatalog(); if(simulationEnabled)watchSimulatedSession(); connectAvailability(); if (state.page === 'session') connectPreparation(); } });
+
+render();
+connectAvailability();
+
+async function initializeSession() {
   let pending; try { pending=sessionStorage.getItem('arti-preparation'); } catch {}
   if (pending) {
     try {
-      const session=await getSession(pending);
-      if (['calling', 'active'].includes(session.status)) { state.session=session; state.mode=session.mode; state.selectedArtworkIds=session.artworkIds.map(catalogArtworkId); state.page='session'; history=['mode']; connectPreparation(); }
-      else rememberPreparation(null);
+      const session = await getSession(pending);
+      if (!['calling', 'active'].includes(session.status)) rememberPreparation(null);
+      else if (state.page === 'home') {
+        state.session = session;
+        state.mode = session.mode;
+        state.selectedArtworkIds = session.artworkIds.map(catalogArtworkId);
+        state.page = 'session';
+        history = ['mode'];
+        render();
+        connectPreparation();
+      }
     } catch { rememberPreparation(null); }
   }
-  try{simulationEnabled=(await (await fetch('/api/test-mode')).json()).enabled===true;}catch{}
-  if(simulationEnabled)watchSimulatedSession();
-  render(); connectAvailability(); connectCatalog();
-}).catch(() => {
-  app.innerHTML = '<main class="main"><h1>로컬 서버 연결을 확인해 주세요</h1><p>프로젝트 폴더에서 python3 app.py를 실행한 뒤 다시 접속해 주세요.</p><a href="/">다시 시도하기</a></main>';
-});
+  try { simulationEnabled = (await (await fetch('/api/test-mode')).json()).enabled === true; } catch {}
+  if (simulationEnabled) {
+    watchSimulatedSession();
+    render();
+  }
+}
+
+void initializeSession();
 
 async function refreshAdminControls() {
   try {

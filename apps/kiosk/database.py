@@ -9,6 +9,10 @@ SESSION_SELECT = """SELECT *, record_id AS id, route AS course_id,
     created_time AS created_at, end_time AS ended_at FROM TourSession"""
 
 
+def artwork_rows(db):
+    return [dict(row) for row in db.execute(ARTWORK_SELECT + " ORDER BY artwork_id")]
+
+
 def insert_artwork(db, art, replace=False):
     if replace:
         updates = {key: value for key, value in art.items()

@@ -3,9 +3,10 @@ export const artworks = [];
 
 let catalogSignature = '';
 export async function loadCatalog({signal} = {}) {
-  const response = await fetch('/api/catalog', {cache: 'no-cache', signal});
+  const response = await fetch('/api/artworks', {cache: 'no-cache', signal});
   if (!response.ok) throw new Error('작품 정보를 불러오지 못했습니다.');
   const data = await response.json();
+  signal?.throwIfAborted();
   const signature = JSON.stringify(data.artworks);
   if (signature === catalogSignature) return false;
   artworks.splice(0, artworks.length, ...data.artworks);

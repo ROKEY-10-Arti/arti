@@ -21,8 +21,8 @@ function environment() {
   let row = {artwork_id: '001', artwork_title: 'artwork1', artist_name: 'artist1', location: 'location1', theme: 'theme1', description: 'description1'};
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/catalog'); assert.equal(options.cache, 'no-cache');
-    return {ok: true, json: async () => ({artworks: [row], courses: []})};
+    assert.equal(url, '/api/artworks'); assert.equal(options.cache, 'no-cache');
+    return {ok: true, json: async () => ({artworks: [row]})};
   };
   try {
     assert.equal(await loadCatalog(), true);

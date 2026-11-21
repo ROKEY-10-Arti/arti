@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, abort, current_app, g, jsonify, render_template, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from database import initialize_database, ARTWORK_SELECT, SESSION_SELECT
+from database import artwork_rows, initialize_database, SESSION_SELECT
 from log_query import log_page
 from session_query import session_page
 from robot_logs import initialize_log_token, register_robot_logs
@@ -132,17 +132,13 @@ def create_app(test_config=None):
 
     @app.after_request
     def response_headers(response):
-        if (request.path.startswith("/api/") and request.endpoint != "catalog_endpoint") or request.path == "/data":
+        if (request.path.startswith("/api/") and request.endpoint not in {"catalog_endpoint", "list_artworks"}) or request.path == "/data":
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    def catalog_data():
-        db = get_db()
-        return {
-            "artworks": [dict(row) for row in db.execute(ARTWORK_SELECT + " ORDER BY artwork_id")],
-            "courses": [json.loads(row["data"]) for row in db.execute("SELECT data FROM courses ORDER BY id")],
-        }
+    def legacy_courses():
+        return [json.loads(row["data"]) for row in get_db().execute("SELECT data FROM courses ORDER BY id")]
 
     def find_session(session_id):
         row = get_db().execute(SESSION_SELECT + " WHERE record_id = ?", (session_id,)).fetchone()
@@ -230,7 +226,7 @@ def create_app(test_config=None):
 
     @app.get("/api/catalog")
     def catalog_endpoint():
-        response = jsonify(catalog_data())
+        response = jsonify(artworks=artwork_rows(get_db()), courses=legacy_courses())
         response.cache_control.no_cache = True
         response.add_etag()
         return response.make_conditional(request)
@@ -246,9 +242,10 @@ def create_app(test_config=None):
         course_id = body.get("courseId")
         if mode not in ("course", "free"):
             abort(400, description="mode는 course 또는 free여야 합니다.")
-        catalog = catalog_data()
         # 관람 세션의 기존 ID 형식 art-01은 DB의 001에서 변환합니다.
-        ids = validate_ids(body.get("artworkIds"), {f"art-{int(art['artwork_id']):02d}" for art in catalog["artworks"]})
+        db = get_db()
+        allowed_ids = {f"art-{int(row['artwork_id']):02d}" for row in db.execute("SELECT artwork_id FROM Art")}
+        ids = validate_ids(body.get("artworkIds"), allowed_ids)
         if not ids:
             abort(400, description="관람할 작품을 하나 이상 선택해 주세요.")
         if mode == "free" and course_id is not None:
@@ -256,7 +253,7 @@ def create_app(test_config=None):
         if mode == "course":
             if course_id is not None:
                 # 이전 클라이언트가 보낸 코스 ID는 호환을 위해 처리합니다.
-                courses = {course["id"]: course for course in catalog["courses"]}
+                courses = {course["id"]: course for course in legacy_courses()}
                 if not isinstance(course_id, str) or course_id not in {*courses, "custom"}:
                     abort(400, description="존재하지 않는 코스입니다.")
                 if course_id != "custom" and ids != courses[course_id]["ids"]:
@@ -265,7 +262,6 @@ def create_app(test_config=None):
             # 이전 클라이언트의 코스 요청도 같은 방향으로 정규화합니다.
             ids.sort(key=lambda artwork_id: int(artwork_id.split('-')[-1]))
         session_id = str(uuid4())
-        db = get_db()
         with db:
             db.execute(
                 "INSERT INTO TourSession (record_id, mode, route, artwork_ids, status, created_time) "
@@ -337,7 +333,7 @@ def create_app(test_config=None):
     @app.get("/data")
     def data_page():
         logs = log_page(get_db(), request.args, operator_view=True)
-        return render_template("data.html", catalog=catalog_data(),
+        return render_template("data.html", artworks=artwork_rows(get_db()),
                                logs=logs, total=logs['total'])
 
     return app
