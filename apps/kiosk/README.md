@@ -30,8 +30,8 @@ bash scripts/build-interfaces.sh
 
 - **실기** — 관제 PC의 Fast DDS Discovery Server를 먼저 실행합니다. `run-dev.sh`는 Jazzy, 빌드된 인터페이스, [중앙 ROS 접속 설정](config/central_ros.json)을 불러옵니다. 서버 실행 방법은 [팀 ROS 환경 설정](../../docs/common/setup.md)을 참고하세요.
 - **Robot1 자유 관람** — PC1의 `PrepareTour`·`StartTour` 액션 서버를 사용합니다. [로봇 관람 실행 안내](../../docs/follow/README.md)
-- **Robot4 코스 관람** — 실기 연동에는 PC2의 두 액션 서버가 필요합니다. 현재 [PC2 코스 노드](../../src/arti_pc2_nav/arti_pc2_nav/a_course_node.py)는 토픽으로 관람 요청을 받습니다.
-- **시뮬레이터** — `/remote`에서 도착, 등록 완료 등의 신호를 보내고 별도 SQLite DB에 테스트 데이터를 저장합니다.
+- **Robot4 코스 관람** — PC2의 `PrepareTour`·`StartTour` 액션 서버를 사용합니다. [코스 관람 실행 안내](../../src/arti_pc2_nav/README.md)
+- **시뮬레이터** — `/remote`에서 호출 가능 ON/OFF, 가용 신호 수신 중단, 도착, 등록 완료를 테스트합니다. 호출 가능 여부는 모의 배터리·도킹 상태로 계산하며, 테스트 데이터는 별도 SQLite DB에 저장됩니다.
 - **관리자** — 각 실행 모드의 `/data`에서 작품·로봇 상태·로그를 확인합니다. 첫 관리자 계정은 서버가 실행 중인 PC에서 `/admin/setup`을 열어 생성합니다. 시스템 상태 화면은 `/sysmon`입니다.
 
 ## 한눈에 보는 구조
@@ -88,11 +88,15 @@ apps/kiosk/
 | 시스템 상태 화면과 지표 API | [system_monitor.py](system_monitor.py), [templates/system_monitor.html](templates/system_monitor.html) |
 | 시뮬레이터와 수동 신호 | [signal_simulator.py](signal_simulator.py), [scripts/run-simulator.py](scripts/run-simulator.py) |
 
-## 관람 버튼과 서버 흐름
+## 초기 데이터와 관람 흐름
+
+- 브라우저는 처음 열릴 때 `GET /api/catalog`로 SQLite의 작품 정보를 받습니다. 작품 선택 표는 위치 코드(`location`)와 설명을 표시합니다. 응답에는 관리 화면에서 편집하는 DB 좌표(`x`, `y`)와 이전 클라이언트용 코스 데이터도 포함됩니다.
+- 코스 관람은 화면에서 체크한 작품 ID로 요청합니다. 안내용 평면도는 [gallery-map.js](static/js/gallery-map.js)에 정의되어 있습니다. 로봇은 자유 관람 구역을 `artworks.yaml`에서, 코스 주행 목표 및 작품 구역을 `a_course.yaml`에서 읽습니다.
+- `/api/availability/stream`은 배터리 잔량이 30%를 초과하고 도킹 상태인 로봇이 있는지 브라우저에 전달합니다.
 
 1. **로봇 호출** — 브라우저가 `POST /api/sessions`로 관람 세션을 만들고 `POST /api/sessions/<id>/preparation`을 보냅니다. Flask가 관람 방식에 따라 로봇을 배정하고 `prepare_tour` Goal을 전송합니다.
-2. **준비 상태 표시** — `GET /api/sessions/<id>/preparation/events`의 서버 전송 이벤트(SSE)로 최신 준비 상태를 받습니다. 준비 액션이 성공하면 **관람 시작하기** 버튼이 활성화됩니다.
-3. **관람 시작하기** — 브라우저가 `PATCH /api/sessions/<id>`에 `{"status":"active"}`를 보냅니다. Flask가 준비 상태를 확인하고 `start_tour` Goal을 전송합니다.
+2. **준비 상태 표시** — `GET /api/sessions/<id>/preparation/events`의 서버 전송 이벤트(SSE)로 최신 준비 상태를 받습니다.
+3. **자동 시작** — 준비 액션이 성공하면 Flask가 세션을 활성화하고 `start_tour` Goal을 전송합니다. 로봇이 Goal을 수락하면 브라우저는 관람 안내 화면으로 이동합니다.
 4. **관람 진행·종료** — 완료한 작품과 관람 결과는 `TourSession`에 반영됩니다. 사용자가 진행 중인 작업을 취소하면 키오스크가 ROS 액션 취소를 요청합니다.
 
 실제 Goal 전송 코드는 [robot_preparation.py](robot_preparation.py)의 `RosPreparationTransport.action()` 안에 있는 `send_goal_async()`입니다. 브라우저 Network 탭에서는 HTTP 요청을, ROS에서는 각 액션의 `/_action/status`와 `/_action/feedback` 토픽을 확인할 수 있습니다.
@@ -103,10 +107,10 @@ apps/kiosk/
 
 | 인터페이스 | 방향 | 데이터 |
 | --- | --- | --- |
-| `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 준비 액션이 성공한 뒤 관람 시작 버튼을 활성화합니다. |
+| `/<robot>/arti/prepare_tour` (`PrepareTour`) | 키오스크 → 로봇 | `start: true`로 호출하고, 성공 결과를 받으면 서버가 관람을 시작합니다. |
 | `/<robot>/arti/start_tour` (`StartTour`) | 키오스크 → 로봇 | 자유 관람 `/robot1`에는 `artwork_ids: []`, 코스 관람 `/robot4`에는 정수 작품 ID 목록을 보냅니다. |
 | `/arti/description` (`Description`) | 로봇 → 키오스크 | 정수 작품 ID로 SQLite의 `Art` 테이블에서 설명을 조회합니다. |
-| `/<robot>/battery_state`, `/<robot>/dock_status` | 로봇 → 키오스크 | 두 로봇의 배터리와 도킹 상태를 구독합니다. |
+| `/<robot>/battery_state`, `/<robot>/dock_status`, `/<robot>/odom` | 로봇 → 키오스크 | 배터리·도킹으로 호출 가능 여부를 계산하고, 오도메트리로 이동 여부를 확인합니다. |
 
 키오스크는 `ARTWORK_COMPLETED` 피드백의 작품 ID를 방문 기록에 저장합니다. 관람 종료는 액션 결과로 확인하고, 진행 중인 작업 취소는 ROS 2 Action Cancel을 사용합니다. 세션 ID와 관람객 ID는 키오스크 내부에서 관리하며, 작품 위치와 구역은 로봇 PC의 로컬 YAML에서 관리합니다.
 

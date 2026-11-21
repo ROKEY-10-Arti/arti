@@ -1,9 +1,10 @@
 // 실제 브라우저를 열지 않고 앱의 이벤트·API·자동 복귀를 함께 검사합니다.
 import assert from 'node:assert/strict';
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function checkFlow(manual) {
+async function checkFlow(manual, devMode = false) {
   const originals = new Map();
   const install = (name, value) => {originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, {configurable:true, writable:true, value});};
+  const expectedWrites = devMode ? [{status:'active'}] : [];
   const nativeNow = Date.now;
   let time=0, timerId=0;
   const timers=new Map(), sources=[], documentEvents=new Map(), windowEvents=new Map(), writes=[];
@@ -40,24 +41,25 @@ async function checkFlow(manual) {
   });
   Date.now=()=>time;
   try {
-    await import(`../static/js/app.js?handoff=${manual?'manual':'automatic'}`);
+    await import(`../static/js/app.js?handoff=${manual?'manual':'automatic'}-${devMode}`);
     await tick(); await tick();
     const source=sources.find(source=>source.url.includes('/preparation/events'));
     assert(source);
-    source.handlers.preparation({data:JSON.stringify({session_id:session.id,phase:'ready',message:'준비 완료',robot_id:'DEV-ARTI',progress:1,dev_mode:true})});
+    source.handlers.preparation({data:JSON.stringify({session_id:session.id,phase:devMode?'ready':'touring',message:'관람 시작',robot_id:devMode?'DEV-ARTI':'robot4',progress:1,dev_mode:devMode})});
     const click=async (action, dataset={})=>{const button={dataset:{action, ...dataset},disabled:false};await documentEvents.get('click')({target:{closest:()=>button}});};
-    await click('start-tour');
+    assert(!root.innerHTML.includes('data-action="start-tour"'));
+    await tick();
     assert(root.innerHTML.includes('즐거운 관람 되세요!'));
     assert(!root.innerHTML.includes('지금, 이 작품') && !root.innerHTML.includes('description1'));
     assert.equal((root.innerHTML.match(/<button/g)||[]).length,1);
-    assert.deepEqual(writes,[{status:'active'}]);
+    assert.deepEqual(writes,expectedWrites);
     assert.equal(storage.has('arti-preparation'),false);
     const pending=[...timers.values()].find(timer=>timer.delay===10000);
     assert(pending);
     if(manual) {time=2000;await click('reset');assert(![...timers.values()].some(timer=>timer===pending));}
     else {time=10000;pending.fn();}
     assert(root.innerHTML.includes('page-home'));
-    assert.deepEqual(writes,[{status:'active'}], '첫 화면 복귀는 관람 완료/취소나 가짜 방문 기록을 저장하지 않습니다.');
+    assert.deepEqual(writes,expectedWrites, '첫 화면 복귀는 관람 완료/취소나 가짜 방문 기록을 저장하지 않습니다.');
     await click('exhibition');
     assert.match(root.innerHTML, /data-action="view-art" data-id="001"/);
     assert.match(root.innerHTML, /<h3>artwork1<\/h3>/);
@@ -72,5 +74,5 @@ async function checkFlow(manual) {
   }
 }
 await checkFlow(false);
-await checkFlow(true);
+await checkFlow(true, true);
 console.log('앱 흐름 검증: 준비 완료 → 관람 시작 → 마지막 화면 → 10초/수동 복귀, 관람 중 기록 유지');
