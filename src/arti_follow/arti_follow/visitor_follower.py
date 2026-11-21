@@ -157,6 +157,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.turning_first = False                                  # go_to가 이번 주기 길 방향으로 먼저 돌았는지
         self.view_drop_until = None                                 # 따라가기 우선으로 화면 유지를 포기한 상태가 끝나는 시각
         self.jump_pending = None                                    # A3: 튄 좌표 확인 중 (좌표, 처음 시각, 마지막 시각)
+        self.twin, self.twin_used, self.cam_q = None, -1e9, None    # 라이다 짝 [위치, 속도, 시각], 칼만에 넣은 시각, 마지막 카메라 좌표
         self.return_lidar_only = False                              # RETURN이 막혀 지도 벽을 빼고 가는 중
         self.ret_best = self.ret_progress_at = self.ret_warn_at = None   # RETURN 진척: 가장 짧았던 거리, 그때 시각, 마지막 경고
         self.log_times = {}                                         # log_every: 종류별 마지막 로그 시각
@@ -397,6 +398,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         else:
             self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
         self.seen = self.cam_seen = now
+        self.cam_q = q.copy()                       # 마지막으로 받은 카메라 좌표 (odom) → 라이다 짝 잡기
         if self.state in ('FOLLOW', 'REGISTERED'):  # 확인된 관람객 위치 = 다음에 다시 잡을 때의 기준
             self.anchor = (self.kf.x[:2].copy(), now)
 
@@ -579,6 +581,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             if self.p['static_time'] > 0:
                 cand = cand[self.clutter.filter(m, learn, self.now())]
         self.people, self.people_time = cand, self.now()
+        self.update_twin()                          # 관람객 라이다 짝 (카메라 공백 잇기)
         mk = Marker(type=Marker.SPHERE_LIST, action=Marker.ADD, ns='lidar_people', id=0)
         mk.header.frame_id, mk.header.stamp = self.p['odom_frame'], stamp
         mk.scale.x = mk.scale.y = mk.scale.z = 0.15
@@ -618,14 +621,74 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.dbg['goal_shift'] = moved
         return apply(to_odom, g[None])[0]
 
+    def update_twin(self):
+        """[scan마다] 관람객의 라이다 다리 '짝'(twin)을 추적한다 (lidar_twin). update_people 뒤에 부름.
+        카메라가 보는 중(twin_cam_fresh 안): 마지막 카메라 좌표(cam_q)에서 twin_pair_dist 안의 다리 후보를 짝으로 잡는다.
+        카메라가 끊기면: 짝을 라이다만으로 이어 간다 = 짝의 예측 위치(위치 + 속도)에서 twin_gate 안의 후보 중 가장 가까운 것
+        (두 번째 후보가 twin_ambiguity 안으로 비슷하면 이번 scan은 건너뜀). twin_timeout 동안 못 이으면 짝을 놓음.
+        예전 라이다 보조는 칼만 예측(튀는 카메라 좌표로 속도가 틀어짐)에서 찾아서 공백 시작 1 s 안에 끊겼다.
+        카메라가 보는 동안 짝을 미리 잡아 두면 카메라 좌표가 튀어도 짝은 다리를 따라간다
+        (2026-11-21 12:21 bag 재생: 카메라 공백 106 s 중 이전 방식 1~5 s → 짝 방식 47 s 이어 감).
+        바뀜: twin = [위치 odom, 속도, 마지막으로 이은 시각] 또는 None"""
+        p, now = self.p, self.now()
+        if not p['lidar_twin'] or self.kf.x is None or self.state not in LISTEN:
+            self.twin = None
+            return
+        cand = self.people
+        def clip(v):
+            s = float(np.linalg.norm(v))
+            return v if s <= p['max_person_speed'] else v * p['max_person_speed'] / s
+        def follow_to(c):
+            if self.twin is not None and now - self.twin[2] < p['twin_timeout']:
+                v = 0.7 * self.twin[1] + 0.3 * (c - self.twin[0]) / max(now - self.twin[2], 1e-3)
+                self.twin = [c.copy(), clip(v), now]
+            else:
+                self.twin = [c.copy(), np.zeros(2), now]
+        if now - self.cam_seen <= p['twin_cam_fresh'] and self.cam_q is not None:
+            if len(cand):
+                d = np.hypot(cand[:, 0] - self.cam_q[0], cand[:, 1] - self.cam_q[1])
+                i = int(np.argmin(d))
+                if d[i] <= p['twin_pair_dist']:
+                    follow_to(cand[i])
+            return
+        if self.twin is None:
+            return
+        if len(cand):
+            pred = self.twin[0] + self.twin[1] * min(now - self.twin[2], 0.5)
+            d = np.hypot(cand[:, 0] - pred[0], cand[:, 1] - pred[1])
+            o = np.argsort(d)
+            if d[o[0]] <= p['twin_gate']:
+                if len(d) > 1 and d[o[1]] < d[o[0]] + p['twin_ambiguity']:
+                    self.dbg['twin_ambiguous'] = True
+                else:
+                    follow_to(cand[o[0]])
+        if now - self.twin[2] > p['twin_timeout']:
+            self.log_every('twin_lost', 2.0, f'라이다 짝 놓침 (카메라 공백 {now - self.cam_seen:.1f} s째)', 'info')
+            self.twin = None
+
     def lidar_assist(self, now):
-        """[FOLLOW] 카메라 좌표가 lidar_assist_after 넘게 안 오면(가림·화면 밖·벽 좌표로 버림), 칼만 예측 위치에서
+        """[FOLLOW] 카메라 좌표가 lidar_assist_after 넘게 안 오면 라이다로 이어 간다.
+        lidar_twin이면: 짝(update_twin)이 새로 이어졌을 때마다 그 위치를 칼만에 넣는다. 카메라 공백 twin_max_time까지
+        (그동안 seen이 갱신되어 FOLLOW 유지 → 놓침·탐색으로 가지 않음). 카메라 좌표가 돌아오면 카메라가 우선
+        (누가 관람객인지는 카메라 재식별이 정하고, 라이다는 공백을 잇기만 함. 2026-11-21 팀 판단: 공백이면 마커(라이다) 좌표 우선).
+        lidar_twin이 아니면 예전 방식: 칼만 예측 위치에서
         lidar_gate 안의 라이다 사람 후보로 이어서 따라간다. 카메라를 마지막으로 받은 지 lidar_assist_max가 지나면 그만
         (그 뒤는 lost_timeout → SEARCH). 누가 관람객인지는 카메라(재식별)만 정한다: 라이다는 이어 주기만.
         애매하면(두 번째 후보가 lidar_ambiguity 안으로 비슷하게 가까움) 쓰지 않는다.
         받음: now, (people, people_time, kf, cam_seen)
         바뀜: kf (update), seen (라이다로 이어 본 시각)"""
         p = self.p
+        if p['lidar_twin']:
+            if self.twin is None or self.kf.x is None or now - self.cam_seen < p['lidar_assist_after'] \
+                    or now - self.cam_seen > p['twin_max_time'] or self.twin[2] <= self.twin_used:
+                return
+            self.twin_used = self.twin[2]
+            if not self.kf.update(self.twin[0], now):
+                self.kf.reset(self.twin[0], now)    # 짝은 scan마다 0.5 m 안으로 이어 온 위치 → 칼만이 뒤처졌으면 짝으로 맞춤
+            self.seen = now
+            self.dbg['lidar_twin'] = True
+            self.log_every('twin_use', 3.0, f'카메라 공백 {now - self.cam_seen:.1f} s → 라이다 짝으로 이어 감', 'info')
+            return
         if not p['lidar_assist'] or self.kf.x is None or len(self.people) == 0:
             return
         if now - self.cam_seen < p['lidar_assist_after'] or now - self.cam_seen > p['lidar_assist_max']:

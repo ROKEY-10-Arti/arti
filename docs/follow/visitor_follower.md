@@ -245,6 +245,7 @@ ros2 topic echo /robot1/follow/state
 | `follow_progress_far` / `follow_progress_best_min` | 0.5 / 0.1 | 따라가기 우선은 목표가 이보다 멀고 [m], 가장 잘 가는 후보가 1.5 s에 이만큼 [m] 이상 줄일 수 있을 때만 (거의 도착했을 때 켜져 화면 유지를 놓고 돌던 것, 2026-11-21) |
 | `w_turn_change` / `w_turn_flip` / `w_spin` / `spin_window` / `spin_budget` | 0.05 / 0.1 / 1.0 / 4.0 / 1.57 | 회전 부드러움: 회전 속도 변화·방향 뒤집기 벌점 / 최근 4 s 돈 각 + 이번 회전이 90°를 넘는 만큼 벌점 (계속 한 방향으로 도는 것을 늦춤. 진짜 뒤돌기는 약 3 s 늦어짐) |
 | `wall_leg_gate` / `follow_jump_dist` / `follow_jump_radius` / `follow_jump_confirm` | 0.8 / 1.0 / 0.5 / 0.5 | 따라가는 중: 벽 좌표 대체 후보는 예측 위치 0.8 m 안만 / 예측에서 1 m 넘게 튄 좌표는 0.5 m 안에서 0.5 s 계속 와야 받아들임 (한두 번 튄 좌표로 목표가 옮겨 크게 도는 것 방지) |
+| `lidar_twin` / `twin_pair_dist` / `twin_cam_fresh` / `twin_gate` / `twin_ambiguity` / `twin_timeout` / `twin_max_time` | true / 0.4 / 0.3 / 0.5 / 0.3 / 1.0 / 30 | **카메라 공백이면 라이다 다리 '짝'으로 이어 감**: 카메라가 보는 동안 카메라 좌표 0.4 m 안 다리를 짝으로 잡아 두고, 카메라가 0.3 s 넘게 끊기면 짝을 라이다만으로 (예측 0.5 m 안, 애매하면 건너뜀) 추적해 칼만에 넣음. 1 s 못 이으면 놓고, 공백 30 s까지. 카메라가 돌아오면 카메라 우선 (2026-11-21 bag 재생: 공백 중 추종 유지 3% → 52%) |
 | `return_stall_time` | 5 | 도크 복귀 중 이만큼 경로 거리가 안 줄면 막힘 경고. 처음 막히면 지도 벽을 빼고 라이다만 보며 계속 감 [s] |
 | `path_fallback_lidar` / `path_heading_radius` | true / 0.3 | 지도 벽까지 넣어 길이 없으면 라이다만으로 다시 길 찾기 / go_to가 '먼저 돌기'를 직선 대신 길 방향(로봇 둘레 이 반지름 [m])으로 판단 (2026-11-21: 벽 너머 목표에서 제자리 흔들림) |
 
