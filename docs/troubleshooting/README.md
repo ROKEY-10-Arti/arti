@@ -67,3 +67,4 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-20 | robot | [robot4 OAK-D 끄기 (standard.launch.py)](robot/2026-11-20-robot4-oakd-disabled.md) | 해결 | flypig341 |
 | 2026-11-20 | env | [RTPS_TRANSPORT_SHM Error: open_and_lock_file failed](env/2026-11-20-fastdds-shm-open-and-lock.md) | 해결 | flypig341 |
 | 2026-11-20 | env | [prepare_tour가 dock_status_unavailable로 실패 (같은 때 /arti/description도 못 받음, Discovery 일시 끊김 의심)](env/2026-11-20-dock-status-unavailable-discovery.md) | 미해결 | 이정욱 |
+| 2026-11-20 | follow | [관람객이 화면에 보이는데 놓침·제자리 회전 (인식 좌표가 벽 점으로 튐) → LiDAR 다리 후보로 이어 감](follow/2026-11-20-target-lost-wall-coords-leg-assist.md) | 우회 | 이정욱 |

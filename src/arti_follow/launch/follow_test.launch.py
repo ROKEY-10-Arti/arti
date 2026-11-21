@@ -20,6 +20,9 @@
     tracker:=camera          카메라만 띄우고 인식 노드는 뺌 (인식은 다른 PC·bag 재생에서)
     (gesture·front는 person_tracker BaseTrackerNode를 상속한 같은 구조, 좌표 토픽·형식은 셋 다 같음)
     tracker:=none            카메라·인식 노드 모두 안 띄움 (인식 모듈을 따로 띄울 때)
+    camera_pub:=true         gesture·front에서도 camera_pub을 띄워 <ns>/top_cam/image_raw/compressed 토픽을 낸다.
+                             웹캠은 camera_pub이 열고, 인식 노드는 그 토픽을 구독해서 인식 창에 그대로 표시
+                             (웹캠은 한 프로세스만 열 수 있어서). 다른 PC·rqt_image_view에서 영상을 볼 때
     auto_start:=true         액션 없이 켜자마자 관람 시작
     diag:=true               visitor_follower 진단 로그: 2 s마다 토픽별 수신 Hz·간격·지연, [늦음]·[이유] 즉시 로그
     namespace:=/robot1       기본은 $ARTI_ROBOT_NS (env.bash의 ARTI_DISCOVERY_SERVERS로 자동)
@@ -66,10 +69,21 @@ BAG_TOPICS = [
 
 # tracker 인자: all = 카메라 + 인식 노드, camera = 카메라만, none = 둘 다 안 띄움
 TRACKER_MODES = ('gesture', 'front', 'all', 'camera', 'none')
+# 재식별(놓친 뒤 같은 관람객인지) 기준 (gesture·front = BaseTrackerNode 파라미터). 괄호 = person_tracker 기본값
+# 2026-11-20 이력: 기본값 → 다른 사람·벽을 다시 잡음 / 엄격(0.60·0.58) → 다시 잡기 어려워 되돌림.
+# 2026-11-20 저녁: 로봇이 다가가거나 멀어지면 화면 속 사람 크기가 바뀌어 유사도가 떨어지고 ID가 자주 바뀜
+#   (관람 한 번에 ID 8번, 11 s 동안 못 잡음). 등록 때 특징만 믿지 않고 추종 중 특징을 더 빨리 따라가게 하고,
+#   복귀 기준은 조금만 낮춘다. 비슷한 사람 둘일 때 막는 recover_margin·recover_confirm_frames는 기본값 유지.
+REID_SCALE = {
+    'ema_min_sim': 0.52,             # (0.60) 이 유사도 이상이면 추종 중 특징(recent_bank)을 갱신 → 크기 변화에 따라감
+    'ema_alpha': 0.08,               # (0.04) 갱신할 때 새 특징 비중 (클수록 빨리 따라감, 너무 크면 다른 사람에 물듦)
+    'search_min_sim': 0.44,          # (0.48) 탐색 중 후보가 넘어야 할 최소 외형 유사도
+    'reid_match_thresh': 0.46,       # (0.50) 복귀 점수 기준 (외형 0.65 + 위치 0.35)
+}
 # 인식 노드: (executable, node name, parameters)
 TRACKER_NODES = {
-    'gesture': ('gesture_test_node', 'gesture_test_node', {}),     # 재식별 기준은 person_tracker 기본값
-    'front': ('front_tracker_node', 'front_tracker_node', {}),      # (2026-11-20 엄격하게 해 봤으나 다시 잡기 어려워 되돌림)
+    'gesture': ('gesture_test_node', 'gesture_test_node', REID_SCALE),
+    'front': ('front_tracker_node', 'front_tracker_node', REID_SCALE),
     'all': ('multi_tracker_node', 'multi_person_tracker_node',
             {'show_info_window': False,      # 화면은 인식 영상 창 하나만
              'show_distance': True}),        # 박스마다 거리(m)
@@ -90,19 +104,20 @@ def pc_time_sync():
 DIRECT_CAMERA = ('gesture', 'front')
 
 
-def tracker_actions(ns, mode, video_arg):
+def tracker_actions(ns, mode, video_arg, camera_pub=False):
     """person_tracker: 탑캠 TF + 카메라 + 인식 노드 (같은 네임스페이스).
     gesture·front: 인식 노드가 웹캠을 직접 읽어 화면에 바로 보여 준다 (토픽·discovery와 상관없음).
                    영상 토픽은 내지 않고 camera_pub도 안 띄움 (웹캠은 한 프로세스만 열 수 있음)
     all: camera_pub(웹캠 → 토픽) + multi_tracker_node(토픽 구독). camera: camera_pub만 (인식은 다른 PC)
-    video_source = video_source 인자, 비었으면 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0)."""
+    video_source = video_source 인자, 비었으면 person_tracker/config/phone_camera.yaml 값 (노트북 웹캠 0).
+    camera_pub=True면 gesture·front도 all처럼: camera_pub이 웹캠 → 토픽, 인식 노드는 토픽 구독 (video_source '')"""
     try:
         share = get_package_share_directory('person_tracker')
     except PackageNotFoundError:
         raise RuntimeError('person_tracker 패키지가 없음 → colcon build 하거나 tracker:=none') from None
     with open(os.path.join(share, 'config', 'phone_camera.yaml'), encoding='utf-8') as f:
         video_source = video_arg or str((yaml.safe_load(f) or {}).get('video_source', '0'))
-    direct = mode in DIRECT_CAMERA
+    direct = mode in DIRECT_CAMERA and not camera_pub
     camera = IncludeLaunchDescription(        # direct면 top_cam_tf만, 아니면 camera_pub도
         PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'phone_camera.launch.py')),
         launch_arguments={'namespace': ns, 'video_source': video_source,
@@ -112,6 +127,8 @@ def tracker_actions(ns, mode, video_arg):
     executable, name, params = TRACKER_NODES[mode]
     if direct:
         params = {**params, 'video_source': video_source}
+    elif mode in DIRECT_CAMERA:                     # camera_pub:=true → 웹캠 대신 <ns>/top_cam/image_raw/compressed 구독
+        params = {**params, 'video_source': '', 'use_compressed': True}
     tracker = Node(package='person_tracker', executable=executable, name=name, namespace=ns,
                    output='screen', parameters=[params])
     if direct:
@@ -150,7 +167,7 @@ def make_nodes(context):
                                    f'bag 저장: {out}'))
 
     if tracker != 'none':
-        actions += tracker_actions(ns, tracker, arg('video_source').strip())
+        actions += tracker_actions(ns, tracker, arg('video_source').strip(), arg('camera_pub').lower() == 'true')
 
     actions.append(Node(
         package='arti_follow', executable='visitor_follower', namespace=ns, output='screen',
@@ -175,6 +192,9 @@ def generate_launch_description():
                               description='true면 액션 없이 켜자마자 prepare → start (undock → 초기 위치 → 인식 → 추종)'),
         DeclareLaunchArgument('video_source', default_value='',
                               description="카메라: '0' 웹캠 / DroidCam URL (비우면 person_tracker phone_camera.yaml)"),
+        DeclareLaunchArgument('camera_pub', default_value='false',
+                              description='true면 gesture·front에서도 camera_pub으로 영상 토픽을 내고 인식 노드는 그 토픽을 구독 '
+                                          '(인식 창 표시는 그대로)'),
         DeclareLaunchArgument('bag_dir', default_value='~/arti_bags/follow',
                               description='bag 저장 폴더 (그 아래 <날짜_시각>/)'),
         OpaqueFunction(function=make_nodes),
