@@ -77,6 +77,8 @@ python3 ~/project/arti/src/person_tracker/research/bag_benchmark.py \
 | `--reid-scale` | 꺼짐 | `follow_test`의 REID 완화 파라미터(`ema_min_sim=0.52` 등) 적용 |
 | `--no-localizer-compare` | 비교 켜짐 | LiDAR `Raw` vs `Kinematic+Map+EMA` 비교 생략 |
 | `--no-snapshots` | 저장 켜짐 | 대시보드 및 비교 스냅샷 PNG 저장 생략 |
+| `--gt PATH` | 비활성 | `gt_annotator.py`로 만든 정답 CSV 기반 진짜 Recall / Hijack / Miss / 개입 횟수 집계 |
+| `--gt-iou THRESH` | `0.5` | `--gt` 매칭 시 정답으로 인정하는 최소 BBox IoU 임계값 |
 
 ---
 
@@ -135,3 +137,27 @@ bash ~/project/arti/src/person_tracker/research/run_offline_bag_test.sh play ~/b
 # [터미널 3] (선택) RViz2 동시 확인
 bash ~/project/arti/src/person_tracker/research/run_offline_bag_test.sh rviz
 ```
+
+---
+
+## 5. Human-in-the-Loop GT 클릭 어노테이션 & 정량 평가 (`gt_annotator.py` + `--gt`)
+
+트래커의 `similarity >= 0.40` 휴리스틱 대신 실제 정답(Ground Truth) 기준으로 오인식(Hijack)·놓침(Miss)·재잠금 개입 횟수를 측정하려면:
+
+```bash
+# 1) 보조 트래커(26n-seg)를 재생하면서 오인식 순간만 마우스로 클릭해 GT CSV 생성
+python3 src/person_tracker/research/gt_annotator.py \
+  --bag ~/bag3/pose_estimate2 \
+  --out ~/bench_gt/pose_estimate2_gt.csv
+
+# 2) 생성된 GT CSV를 넘겨 모델·알고리즘별 진짜 GT Recall / Hijack / Miss / 개입 횟수 집계
+python3 src/person_tracker/research/bag_benchmark.py \
+  --bags ~/bag3/pose_estimate2 \
+  --models all9 \
+  --modes 1,2,3,4,5 \
+  --gt ~/bench_gt/pose_estimate2_gt.csv \
+  --gt-iou 0.5 \
+  --reid-scale
+```
+- **Left-Click**: 실제 타겟 인물 클릭 지정(GT 기록 + 보조 트래커 즉시 재잠금) / **Left-Drag**: 미검출 구간 수동 BBox
+- **Right-Click / `N`**: 타겟 부재·완전 가림(`gt_present=0`) 표시 / **`S`**: 저장 / **`Q`**: 저장 후 종료

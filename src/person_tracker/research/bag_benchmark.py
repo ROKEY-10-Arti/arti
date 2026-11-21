@@ -112,6 +112,49 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._-]+', '_', name).strip('_')
 
 
+def _bbox_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return float(inter) / float(area_a + area_b - inter)
+
+
+def _load_gt_csv(path: str) -> Dict[int, dict]:
+    """gt_annotator.py가 생성한 GT CSV를 frame_idx -> dict 매핑으로 로드합니다."""
+    gt_map: Dict[int, dict] = {}
+    with open(path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            src = row.get('source', '') or ''
+            if src == 'unlabeled':
+                continue
+            fidx = int(row['frame_idx'])
+            pres = int(row['gt_present'])
+            bbox = None
+            if pres == 1 and row.get('x1', '') != '':
+                bbox = (
+                    int(float(row['x1'])),
+                    int(float(row['y1'])),
+                    int(float(row['x2'])),
+                    int(float(row['y2'])),
+                )
+            gt_map[fidx] = {
+                'present': pres,
+                'bbox': bbox,
+                'corrected': int(row.get('corrected', 0) or 0),
+                'source': src,
+            }
+    return gt_map
+
+
 def _detect_storage_id(bag_dir: str) -> str:
     meta_path = os.path.join(bag_dir, 'metadata.yaml')
     if os.path.isfile(meta_path):
@@ -512,6 +555,8 @@ def _run_single_experiment(
     auto_cache_all_for_centers: bool = False,
     capture_pixel_strips: bool = False,
     seq_delta: int = 10,
+    gt_map: Optional[Dict[int, dict]] = None,
+    gt_iou_thresh: float = 0.5,
 ):
     is_comp = 'CompressedImage' in topics['image_type']
     has_scan = bool(topics['scan_topic'])
@@ -577,6 +622,20 @@ def _run_single_experiment(
     prev_lidar_dist: Optional[float] = None
     prev_lidar_id: Optional[int] = None
 
+    gt_pos_frames = 0
+    gt_neg_frames = 0
+    gt_true_lock_frames = 0
+    gt_hijack_frames = 0
+    gt_miss_frames = 0
+    gt_false_lock_frames = 0
+    gt_fail_episodes = 0
+    prev_gt_err = False
+    gt_ious: List[float] = []
+    has_pos_gt = bool(
+        gt_map
+        and any(v.get('present') == 1 and v.get('bbox') is not None for v in gt_map.values())
+    )
+
     frame_records: List[dict] = []
     series_t = []
     series_sim = []
@@ -628,14 +687,26 @@ def _run_single_experiment(
                 return (res_s.base_xyz[0], res_s.base_xyz[1]), 'base_link', res_s.source
 
             t_f0 = time.perf_counter()
+            gt_entry = gt_map.get(total_imgs) if gt_map is not None else None
+            eff_lock_point = lock_point
+            if (
+                eff_lock_point is None
+                and not locked_once
+                and gt_entry is not None
+                and gt_entry['present'] == 1
+                and gt_entry['bbox'] is not None
+            ):
+                gx1, gy1, gx2, gy2 = gt_entry['bbox']
+                eff_lock_point = ((gx1 + gx2) // 2, (gy1 + gy2) // 2)
+
             dets, tgt = tracker.process_frame(
                 frame,
-                auto_lock_first=(lock_point is None and not locked_once),
+                auto_lock_first=(lock_point is None and not has_pos_gt and not locked_once),
                 spatial_estimator=_spatial_est if loc is not None else None,
                 compute_all_sims=True,
             )
-            if lock_point is not None and not locked_once and dets:
-                sel = tracker.select_target_by_point(lock_point[0], lock_point[1])
+            if eff_lock_point is not None and not locked_once and dets:
+                sel = tracker.select_target_by_point(eff_lock_point[0], eff_lock_point[1])
                 if sel is not None:
                     locked_once = True
                     tgt = next((p for p in dets if p.track_id == sel), None)
@@ -784,6 +855,41 @@ def _run_single_experiment(
             if frame_margin is not None:
                 margin_list.append(float(frame_margin))
 
+            gt_iou_val: Optional[float] = None
+            gt_status_str = ''
+            if gt_map is not None:
+                if gt_entry is not None:
+                    is_err = False
+                    if gt_entry['present'] == 1 and gt_entry['bbox'] is not None:
+                        gt_pos_frames += 1
+                        gt_iou_val = _bbox_iou(tgt.bbox, gt_entry['bbox']) if tgt is not None else 0.0
+                        if tgt is None:
+                            gt_miss_frames += 1
+                            gt_status_str = 'MISS'
+                            is_err = True
+                        elif gt_iou_val >= gt_iou_thresh:
+                            gt_true_lock_frames += 1
+                            gt_status_str = 'TRUE_LOCK'
+                            gt_ious.append(gt_iou_val)
+                        else:
+                            gt_hijack_frames += 1
+                            gt_status_str = 'HIJACK'
+                            is_err = True
+                            gt_ious.append(gt_iou_val)
+                    else:
+                        gt_neg_frames += 1
+                        if tgt is not None:
+                            gt_false_lock_frames += 1
+                            gt_status_str = 'FALSE_LOCK'
+                            is_err = True
+                        else:
+                            gt_status_str = 'TN'
+                    if is_err and not prev_gt_err:
+                        gt_fail_episodes += 1
+                    prev_gt_err = is_err
+                else:
+                    gt_status_str = 'UNLABELED'
+
             rec = {
                 'frame_idx': total_imgs,
                 't_sec': round(rel_sec, 4),
@@ -836,6 +942,9 @@ def _run_single_experiment(
                     loc_res.map_xyz[1] if (loc_res is not None and loc_res.map_xyz is not None) else None, 3
                 ),
                 'search_reason': m.search_reason,
+                'gt_present': gt_entry['present'] if gt_entry is not None else '',
+                'gt_iou': _round_opt(gt_iou_val, 4) if gt_map is not None else '',
+                'gt_status': gt_status_str,
             }
             frame_records.append(rec)
 
@@ -1006,6 +1115,14 @@ def _run_single_experiment(
         'lidar_jumps': lidar_jumps,
         'far_camest': far_camest,
         'amcl_wall_out': amcl_wall_or_out,
+        'gt_pos_frames': gt_pos_frames if gt_map is not None else '',
+        'gt_neg_frames': gt_neg_frames if gt_map is not None else '',
+        'gt_true_lock_pct': round(100.0 * gt_true_lock_frames / gt_pos_frames, 1) if gt_pos_frames > 0 else '',
+        'gt_hijack_pct': round(100.0 * gt_hijack_frames / gt_pos_frames, 1) if gt_pos_frames > 0 else '',
+        'gt_miss_pct': round(100.0 * gt_miss_frames / gt_pos_frames, 1) if gt_pos_frames > 0 else '',
+        'gt_false_lock_pct': round(100.0 * gt_false_lock_frames / gt_neg_frames, 1) if gt_neg_frames > 0 else '',
+        'gt_mean_iou': round(float(np.mean(gt_ious)), 3) if gt_ious else '',
+        'gt_fail_episodes': gt_fail_episodes if gt_map is not None else '',
     }
     return summary, {
         't': series_t,
@@ -1446,6 +1563,7 @@ def _write_markdown_report(
     key_centers: List[Tuple[str, int]],
     seq_delta: int,
     saved_snaps: List[str],
+    gt_iou_thresh: float = 0.5,
 ):
     lines = [
         f'# Bag Benchmark Report: `{os.path.basename(bag_dir.rstrip("/"))}`',
@@ -1554,6 +1672,26 @@ def _write_markdown_report(
             '',
         ]
 
+    gt_rows = [r for r in (model_rows + mode_rows) if r.get('gt_pos_frames', '') != '']
+    if gt_rows:
+        lines += [
+            f'## 5.5 Ground Truth(GT) 기반 실제 추적 정확도 (IoU >= {gt_iou_thresh})',
+            '',
+            '| Experiment | Mode | GT Pos / Neg (f) | GT True Lock % | GT Hijack % | GT Miss % | GT False Lock % | Mean IoU | Fail Episodes (예상 개입) |',
+            '|---|---|---:|---:|---:|---:|---:|---:|---:|',
+        ]
+        for r in gt_rows:
+            fl_s = f'{r["gt_false_lock_pct"]}%' if r['gt_false_lock_pct'] != '' else '-'
+            iou_s = str(r['gt_mean_iou']) if r['gt_mean_iou'] != '' else '-'
+            tl_s = f'**{r["gt_true_lock_pct"]}%**' if r['gt_true_lock_pct'] != '' else '-'
+            hj_s = f'{r["gt_hijack_pct"]}%' if r['gt_hijack_pct'] != '' else '-'
+            ms_s = f'{r["gt_miss_pct"]}%' if r['gt_miss_pct'] != '' else '-'
+            lines.append(
+                f'| {r["run_name"]} | {r["mode"]} | {r["gt_pos_frames"]} / {r["gt_neg_frames"]} | '
+                f'{tl_s} | {hj_s} | {ms_s} | {fl_s} | {iou_s} | {r["gt_fail_episodes"]} |'
+            )
+        lines.append('')
+
     if saved_snaps:
         lines += ['## 6. 시각 검증 스냅샷 (`snapshots/`)', '']
         for fn in saved_snaps:
@@ -1585,6 +1723,12 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
     print(f'Loaded {n_imgs} image frames ({len(events)} total messages).')
 
     reid_kwargs = dict(REID_SCALE_KWARGS) if args.reid_scale else {}
+    gt_map = None
+    if getattr(args, 'gt', ''):
+        gt_path = os.path.abspath(os.path.expanduser(args.gt))
+        gt_map = _load_gt_csv(gt_path)
+        print(f'Loaded GT annotations: {len(gt_map)} frames from {gt_path} (IoU >= {args.gt_iou})')
+
     lock_point = None
     if args.lock_point:
         px, py = args.lock_point.split(',')
@@ -1657,6 +1801,8 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
             auto_cache_all_for_centers=(args.save_snapshots and is_ref and not manual_centers),
             capture_pixel_strips=(args.save_snapshots and mk in TASK_COMPARE_MODELS),
             seq_delta=args.seq_delta,
+            gt_map=gt_map,
+            gt_iou_thresh=args.gt_iou,
         )
         model_rows_map[mk] = row
         model_series_map[mk] = s
@@ -1709,6 +1855,8 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
             save_dashboard_snaps=False,
             enable_reid_viz=False,
             snap_dir=snap_dir,
+            gt_map=gt_map,
+            gt_iou_thresh=args.gt_iou,
         )
         mode_rows.append(row)
         mode_series[m_label] = s
@@ -1733,6 +1881,8 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
                 save_dashboard_snaps=False,
                 enable_reid_viz=False,
                 snap_dir=snap_dir,
+                gt_map=gt_map,
+                gt_iou_thresh=args.gt_iou,
             )
             loc_rows.append(row)
             loc_series[lbl] = s
@@ -1752,6 +1902,7 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
         key_centers,
         args.seq_delta,
         saved_snaps,
+        gt_iou_thresh=args.gt_iou,
     )
     _plot_model_charts(model_rows, model_series, charts_dir)
     _plot_mode_charts(mode_rows, mode_series, charts_dir)
@@ -1803,6 +1954,12 @@ def main():
     parser.add_argument('--reid-scale', action='store_true', help='follow_test REID_SCALE 완화 파라미터 적용')
     parser.add_argument('--no-localizer-compare', dest='compare_localizer', action='store_false')
     parser.add_argument('--no-snapshots', dest='save_snapshots', action='store_false')
+    parser.add_argument(
+        '--gt',
+        default='',
+        help='gt_annotator.py로 생성한 정답(GT) CSV 파일 경로 (진짜 True Lock / Hijack / Miss / Fail Episodes 집계)',
+    )
+    parser.add_argument('--gt-iou', type=float, default=0.5, help='GT BBox 매칭 IoU 임계값 (기본 0.5)')
     args = parser.parse_args()
 
     out_root = os.path.abspath(
