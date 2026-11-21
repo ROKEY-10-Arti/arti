@@ -363,9 +363,12 @@ class PrepareMixin:
         if self.face_log_at is None or now - self.face_log_at >= 1.0:
             self.face_log_at = now
             subscribers = self.cmd_pub.get_subscription_count()
-            level = self.get_logger().warn if not self.enabled or subscribers == 0 else self.get_logger().info
-            level(f'START_FACE 회전 명령: 남은 {math.degrees(err):.1f}°, angular.z={w:.3f} rad/s, '
-                  f'enabled={self.enabled}, cmd_vel 구독자={subscribers}')
+            text = (f'START_FACE 회전 명령: 남은 {math.degrees(err):.1f}°, angular.z={w:.3f} rad/s, '
+                    f'enabled={self.enabled}, cmd_vel 구독자={subscribers}')
+            if not self.enabled or subscribers == 0:    # 레벨마다 호출 줄을 따로 (rclpy: 같은 줄에서 레벨이 바뀌면 ValueError)
+                self.get_logger().warn(text)
+            else:
+                self.get_logger().info(text)
         return self.drive(*self.ramp(0.0, w))
 
     def wait_visitor(self, now, pose, here):

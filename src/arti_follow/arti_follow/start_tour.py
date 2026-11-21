@@ -157,8 +157,8 @@ class TourMixin:
             reachable = path is not None and path < 49.0   # 약 50 = 길이 안 보임 → 진척 아님 (3 s 뒤 막힘)
             if reachable and (self.best_dist is None or path < self.best_dist - p['search_stall_dist']):
                 self.best_dist, self.progress_at = path, now      # 경로 거리가 줄어듦 = 진척
-            elif abs(wrap(math.atan2(last[1] - here[1], last[0] - here[0]) - pose[2])) > p['turn_first_angle']:
-                self.progress_at = now              # 목표가 뒤쪽이라 먼저 도는 중 (거리는 안 줄어도 진척)
+            elif self.turning_first:
+                self.progress_at = now              # 길 방향이 뒤쪽이라 먼저 도는 중 (거리는 안 줄어도 진척, go_to와 같은 기준)
             cap = p['search_move_time']             # 0이면 시간 상한 없음 (막힘 판정은 그대로)
             if dist <= p['search_arrive']:
                 why = '도착'
@@ -212,6 +212,8 @@ class TourMixin:
                 and not self.shutting_down:         # 노드가 꺼지는 중이면 돌아갈 수 없음 → 바로 끝
             # 언독했으면 돌아가 도킹한 뒤에 끝 (active는 그때 내림 → 액션 result도 도킹 뒤)
             self.final_state, self.ret_at, self.dock_future, self.dock_result = state, None, None, None
+            self.ret_best = self.ret_progress_at = self.ret_warn_at = None
+            self.return_lidar_only, self.turning_first, self.path_dist = False, False, None
             self.get_logger().info('언독 지점으로 돌아가 도킹 (RETURN)')
             return self.set_state('RETURN')
         self.active = False
@@ -221,7 +223,8 @@ class TourMixin:
         """[RETURN → DOCK_FACE → DOCK] step [3-1]: 관람이 끝난 뒤 도크로 돌아간다.
         목표는 return_target(): 지도의 언독 지점·도크(init_pose.yaml)를 지금 AMCL(map→odom)로 odom 좌표로 바꾼 값.
         AMCL이 없으면 예전처럼 언독 때 기록한 odom 값 (관람 중 바퀴 오차가 쌓여 20~30 cm 어긋남, 2026-11-20).
-        RETURN     언독 지점까지 go_to (return_timeout 넘으면 그 자리에서 다음)
+        RETURN     언독 지점까지 go_to. 도착(return_arrive 안)해야만 다음으로 (return_watch: 막히면 경고·지도 벽 빼고 계속).
+                   멀리서 dock을 부르면 도크 IR이 안 닿음 (2026-11-21: 3.7 m 떨어진 곳에서 도킹 시도)
         DOCK_FACE  언독 지점에서 도크 쪽으로 제자리 회전
         DOCK       Create 3 dock 액션 (Create 3가 IR로 도크를 찾아 스스로 올라감) → 끝나면 finish_return()
         받음: now, pose (x, y, yaw) odom, (home, ret_at, dock_future)
@@ -234,11 +237,13 @@ class TourMixin:
                                    f'지금 {math.hypot(hx - pose[0], hy - pose[1]):.2f} m')
         if self.state == 'RETURN':
             dist = math.hypot(hx - pose[0], hy - pose[1])
-            if dist > p['return_arrive'] and now - self.ret_at < p['return_timeout']:
-                self.dbg['reason'] = 'return'
-                return self.go_to(pose, (hx, hy))
             if dist > p['return_arrive']:
-                self.get_logger().warn(f'언독 지점까지 {dist:.2f} m 남았지만 {p["return_timeout"]:.0f} s 지남 → 여기서 도킹 시도')
+                self.dbg['reason'] = 'return'
+                self.go_to(pose, (hx, hy))
+                return self.return_watch(now, dist)
+            self.get_logger().info(f'언독 지점 도착 (남은 {dist:.2f} m, {now - self.ret_at:.0f} s 걸림'
+                                   f'{", 지도 벽 빼고 옴" if self.return_lidar_only else ""}) → 도크 쪽으로 돌기')
+            self.return_lidar_only = False
             self.ret_at = now
             self.set_state('DOCK_FACE')
         if self.state == 'DOCK_FACE':
@@ -274,6 +279,43 @@ class TourMixin:
         if now - self.ret_at > p['dock_timeout']:
             return self.finish_return('dock_timeout')
 
+    def return_watch(self, now, dist):
+        """[RETURN] 진척 확인. 경로 거리(path_dist, 길이 없으면 직선 거리)가 return_stall_time 동안
+        search_stall_dist만큼도 안 줄면 막힘: 이유를 경고하고, 처음 막혔을 때 지도 벽을 빼고(라이다만) 계속 간다
+        (AMCL이 어긋나 지도 벽이 통로를 막는 경우, 2026-11-21). 그래도 막히면 return_stall_time마다 경고만 하고 계속 시도.
+        도킹은 언독 지점에 도착한 뒤에만 한다. return_timeout마다 '아직 못 감' 경고.
+        받음: now, dist 언독 지점까지 직선 거리 [m], (path_dist, turning_first, dbg: go_to·dwa가 이번 주기에 남긴 것)
+        바뀜: ret_best, ret_progress_at, ret_warn_at, return_lidar_only"""
+        p = self.p
+        path = self.path_dist if self.path_dist is not None and self.path_dist < 49.0 else None
+        measure = path if path is not None else dist
+        if self.ret_progress_at is None or measure < self.ret_best - p['search_stall_dist']:
+            self.ret_best, self.ret_progress_at = measure, now
+            return
+        if self.ret_warn_at is None or now - self.ret_warn_at >= p['return_timeout']:
+            if now - self.ret_at >= p['return_timeout']:
+                self.ret_warn_at = now
+                self.get_logger().warn(f'언독 지점까지 아직 {dist:.2f} m ({now - self.ret_at:.0f} s째) → 도킹하지 않고 계속 감')
+        if now - self.ret_progress_at < p['return_stall_time']:
+            return
+        if path is None:
+            why = '길 없음'
+        elif self.dbg.get('blocked'):
+            why = '모든 궤적이 장애물에 걸림'
+        elif self.turning_first:
+            why = '길 방향으로 도는 중'
+        else:
+            why = '경로 거리가 안 줄어듦'
+        if not self.return_lidar_only and self.map_obs is not None:
+            self.return_lidar_only = True
+            self.field_cache = None
+            self.get_logger().warn(f'도크 복귀 막힘 ({why}, {p["return_stall_time"]:.0f} s, 남은 {dist:.2f} m) '
+                                   f'→ 지도 벽 빼고 라이다만 보며 언독 지점까지 계속 감')
+        else:
+            self.get_logger().warn(f'도크 복귀 막힘 ({why}, {p["return_stall_time"]:.0f} s, 남은 {dist:.2f} m, '
+                                   f'라이다만) → 계속 시도 (주변 사람·물체 확인)')
+        self.ret_best, self.ret_progress_at = measure, now
+
     def return_target(self):
         """도크 복귀 목표 (odom): 언독 지점 (x, y)과 거기서 도크를 바라볼 방향 yaw.
         return_use_map이고 AMCL TF(map→odom)가 있으면 init_pose.yaml의 언독 지점(face_from)·도크(start)를
@@ -291,9 +333,12 @@ class TourMixin:
     def finish_return(self, how):
         """도크 복귀 끝: 로그 → active = False (액션 result가 나감) → final_state.
         받음: how  'docked' / 'dock_timeout' / 'dock_rejected' / 'no_dock_server' ..."""
-        log = self.get_logger().info if how == 'docked' else self.get_logger().warn
-        log(f'도크 복귀 끝 ({how}, dock_status is_docked={self.docked}) → 관람 결과 {self.end_reason}')
-        self.home, self.dock_future, self.dock_result = None, None, None
+        text = f'도크 복귀 끝 ({how}, dock_status is_docked={self.docked}) → 관람 결과 {self.end_reason}'
+        if how == 'docked':                         # 레벨마다 호출 줄을 따로 (rclpy: 같은 줄에서 레벨이 바뀌면 ValueError)
+            self.get_logger().info(text)
+        else:
+            self.get_logger().warn(text)
+        self.home, self.dock_future, self.dock_result, self.return_lidar_only = None, None, None, False
         self.active = False
         self.set_state(self.final_state)
 

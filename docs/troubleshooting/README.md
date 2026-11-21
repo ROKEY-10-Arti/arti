@@ -58,3 +58,5 @@ grep -rl "nodes:.*follow_node" docs/troubleshooting/ # 특정 노드 관련 기�
 | 2026-11-17 | env | [nav2가 활성화되지 않음 (lifecycle 서비스 응답이 Discovery Server 지연으로 사라짐)](env/2026-11-17-nav2-lifecycle-stuck-discovery.md) | 확인 중 | jsy0605 |
 | 2026-11-20 | env | [prepare_tour가 dock_status_unavailable로 실패 (같은 때 /arti/description도 못 받음, Discovery 일시 끊김 의심)](env/2026-11-20-dock-status-unavailable-discovery.md) | 미해결 | 이정욱 |
 | 2026-11-20 | follow | [관람객이 화면에 보이는데 놓침·제자리 회전 (인식 좌표가 벽 점으로 튐) → LiDAR 다리 후보로 이어 감](follow/2026-11-20-target-lost-wall-coords-leg-assist.md) | 우회 | 이정욱 |
+| 2026-11-21 | follow | [도크 복귀 60 s 제자리 + 3.7 m 밖에서 도킹 시도, 관람객 좌표가 뒤쪽 벽 위로 나와 놓침](follow/2026-11-21-return-stuck-wall-coords.md) | 확인 중 | 이정욱 |
+| 2026-11-21 | robot | [robot1에서 꺼 둔 OAK-D가 다시 켜짐 (turtlebot4-setup이 launch 링크를 되돌림)](robot/2026-11-21-oakd-back-after-turtlebot4-setup.md) | 해결 | 이정욱 |

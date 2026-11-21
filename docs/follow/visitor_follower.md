@@ -225,6 +225,7 @@ ros2 topic echo /robot1/follow/state
 | `lost_timeout` | 1.5 | 좌표가 이만큼 안 오면 SEARCH [s] |
 | `search_move_time` / `search_arrive` | 20 / 0.35 | 마지막 위치로 이동하는 안전 시간 상한 [s] / 도착 거리 [m] |
 | `person_wall_margin` / `map_file` | 0.0 / '' | 관람객 좌표가 지도의 벽(이만큼 넓혀 봄)·지도 밖이면 버림 [m] / 지도 yaml ('' = $ARTI_MAP) |
+| `wall_leg` / `wall_leg_angle` / `wall_leg_margin` | true / 0.17 / 0.15 | 벽 안 좌표를 버리기 전에 같은 방향(이 각도 [rad] 안)에서 벽보다 이만큼 [m] 앞선 라이다 다리 후보가 있으면 그 위치로 대체 (인식 모듈이 사람 뒤 벽 거리를 잰 경우, 2026-11-21) |
 | `reacquire_radius` / `reacquire_speed` / `reacquire_max` | 1.0 / 1.0 / 4.0 | 놓친 뒤 다시 잡을 때 마지막 확인 위치에서 허용 거리 = radius + speed × 지난 시간 (최대 max) [m, m/s, m]. 넘으면 버림 |
 | `search_confirm_time` | 0.5 | 탐색 중 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW [s] (그동안 마지막 위치 탐색 계속) |
 | `search_stall_time` / `search_stall_dist` | 3 / 0.05 | 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 이만큼도 안 줄면 막힘 → 그 자리에서 회전 탐색 [s] / [m] |
@@ -238,7 +239,11 @@ ros2 topic echo /robot1/follow/state
 | `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
 | `return_to_dock` | true | 관람이 끝나면 언독 지점으로 돌아와 도킹 |
 | `end_zone` / `end_guide_wait` / `end_min_time` | exit / 3 / 10 | 이 구역에 들어가면 관람 끝 / 종료 안내 듣는 시간 [s] / start_tour 뒤 이 시간 안 진입은 무시 [s] |
-| `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점까지 이동 / Create 3 도킹 대기 [s] |
+| `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점에 못 가면 이 주기마다 경고하고 계속 감 (도킹은 언독 지점 도착 뒤에만, 2026-11-21) / Create 3 도킹 대기 [s] |
+| `detour_margin` / `w_path_align` | 0.3 / 0.15 | 경로 거리가 직선보다 이만큼 [m] 넘게 길거나 길 방향이 사람 방향에서 `view_half_angle` 넘게 벗어나면 '벽 너머' → 화면 유지 벌점(`w_view`) 끔 / 1.5 s 뒤 방향이 길 방향과 어긋난 각도 [rad]당 벌점 (모퉁이에서 제자리 회전을 고르게, 2026-11-21) |
+| `follow_progress_first` / `follow_progress_min` / `follow_progress_ratio` / `follow_view_hold` / `view_off_on_detour` | true / 0.05 / 0.5 / 2.0 / true | **따라가기 우선**: 화면 유지 벌점 때문에 고른 궤적이 경로 거리를 거의 못 줄이면(min [m] 이하 또는 가장 잘 가는 후보의 ratio 이하) 화면 벌점 없이 다시 고르고, hold [s] 동안 계속 포기 (관람객이 잠깐 화면 밖으로 나가도 먼 길로 돌아감, 2026-11-21) / 벽 너머 판단이면 화면 벌점 끔 |
+| `return_stall_time` | 5 | 도크 복귀 중 이만큼 경로 거리가 안 줄면 막힘 경고. 처음 막히면 지도 벽을 빼고 라이다만 보며 계속 감 [s] |
+| `path_fallback_lidar` / `path_heading_radius` | true / 0.3 | 지도 벽까지 넣어 길이 없으면 라이다만으로 다시 길 찾기 / go_to가 '먼저 돌기'를 직선 대신 길 방향(로봇 둘레 이 반지름 [m])으로 판단 (2026-11-21: 벽 너머 목표에서 제자리 흔들림) |
 
 ## 한계
 

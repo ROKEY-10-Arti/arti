@@ -92,7 +92,7 @@ from tf2_ros import Buffer
 from visualization_msgs.msg import Marker
 import yaml
 
-from arti_follow.motion import apply, find_people, MotionMixin, PersonKF, StaticClutter, yaw_of
+from arti_follow.motion import apply, find_people, MotionMixin, PersonKF, StaticClutter, wrap, yaw_of
 from arti_follow.prepare_tour import PrepareMixin
 from arti_follow.start_tour import RETURNING, TourMixin, TRACKING
 
@@ -153,7 +153,12 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.wait_at, self.spun, self.spin_yaw = None, 0.0, 0.0     # SEARCH: 회전 끝난 시각, 돈 각도, 지난 yaw
         self.best_dist, self.progress_at = None, 0.0                # SEARCH 이동: 가장 짧았던 경로 거리, 그때 시각
         self.path_dist = None                                       # dwa가 구한 로봇 → 목표 경로 거리 [m]
-        self.field_cache = None                                     # dwa: 지난 거리 지도 (시각, 목표, 로봇, field, origin)
+        self.field_cache = None                                     # goal_field: 지난 거리 지도 (시각, 목표, 로봇, field, origin, 라이다만)
+        self.turning_first = False                                  # go_to가 이번 주기 길 방향으로 먼저 돌았는지
+        self.view_drop_until = None                                 # 따라가기 우선으로 화면 유지를 포기한 상태가 끝나는 시각
+        self.return_lidar_only = False                              # RETURN이 막혀 지도 벽을 빼고 가는 중
+        self.ret_best = self.ret_progress_at = self.ret_warn_at = None   # RETURN 진척: 가장 짧았던 거리, 그때 시각, 마지막 경고
+        self.log_times = {}                                         # log_every: 종류별 마지막 로그 시각
         self.look_at = None                                         # SEARCH: 먼저 돌아볼 곳 (사람이 가던 쪽, odom)
         self.cam_seen = -1e9                        # 카메라(인식 모듈) 좌표를 마지막으로 받아들인 시각 (라이다 보조와 구분)
         self.people, self.people_time, self.people_used = np.zeros((0, 2)), -1e9, -1e9   # 라이다 사람 후보 (odom)
@@ -340,10 +345,19 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         if f is None:
             return
         p = self.p
-        # [A1] 지도 검사: 벽 안·지도 밖 좌표는 사람일 수 없음 (인식 모듈이 벽 점을 사람으로 고른 경우)
-        if msg.header.frame_id == p['map_frame'] and self.in_wall(msg.point.x, msg.point.y):
-            return self.reject_person('wall', f'벽 안·지도 밖 ({msg.point.x:.2f}, {msg.point.y:.2f})')
         q = apply(f, np.array([[msg.point.x, msg.point.y]]))[0]
+        # [A1] 지도 검사: 벽 안·지도 밖 좌표는 사람일 수 없음 (인식 모듈이 사람 뒤 벽까지 거리를 잰 경우).
+        # 방향은 카메라가 본 관람객 쪽이 맞으므로, 그 방향에 벽보다 앞선 라이다 다리 후보가 있으면 그걸 쓰고 (A1-1)
+        # 없을 때만 버린다
+        if msg.header.frame_id == p['map_frame'] and self.in_wall(msg.point.x, msg.point.y):
+            leg = self.leg_on_bearing(q)
+            if leg is None:
+                return self.reject_person('wall', f'벽 안·지도 밖 ({msg.point.x:.2f}, {msg.point.y:.2f})')
+            if self.diag is not None:
+                self.diag.add('person_wall_leg')
+            self.log_every('wall_leg', 1.0, f'벽 좌표 ({msg.point.x:.2f}, {msg.point.y:.2f}) → 같은 방향 라이다 다리 후보로 대체 '
+                                            f'(벽보다 {np.linalg.norm(q - leg):.2f} m 앞), 상태 {self.state}', 'info')
+            q = leg
         now = self.now()
         # [A2] 다시 잡을 때 거리 검사: 놓친 뒤(또는 탐색 중) 들어온 좌표가 마지막으로 확인한 위치(anchor)에서
         # 사람이 그동안 걸어갈 수 있는 거리(reacquire_radius + reacquire_speed × 지난 시간, 최대 reacquire_max)보다 멀면
@@ -365,6 +379,31 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.seen = self.cam_seen = now
         if self.state in ('FOLLOW', 'REGISTERED'):  # 확인된 관람객 위치 = 다음에 다시 잡을 때의 기준
             self.anchor = (self.kf.x[:2].copy(), now)
+
+    def leg_on_bearing(self, q):
+        """[A1-1] 벽 안에 떨어진 관람객 좌표 → 같은 방향의 라이다 다리 후보.
+        인식 모듈은 카메라 방향 부채꼴 안에서 '가장 가까운 라이다 무리'의 거리를 쓰는데, 다리 점이 부채꼴에 안 들면
+        뒤쪽 벽 거리가 뽑힌다 (2026-11-21: 버린 좌표가 늘 관람객 뒤쪽 벽 위 — 키오스크 앞은 아래 벽, 그림1·2는 왼쪽 벽).
+        로봇에서 그 좌표 쪽으로 wall_leg_angle 안, 그 좌표보다 wall_leg_margin 이상 앞에 있는 후보
+        (people: 다리 모양, 지도 벽·고정 물체 뺀 것) 중 방향이 가장 가까운 것을 돌려준다.
+        받음: q 벽 좌표 (x, y) odom, (people, people_time, TF odom→base_link)
+        돌려줌: 후보 (x, y) odom, 없으면 None"""
+        p = self.p
+        if not p['wall_leg'] or len(self.people) == 0 or self.now() - self.people_time > p['scan_timeout']:
+            return None
+        pose = self.lookup(p['odom_frame'], p['base_frame'])
+        if pose is None:
+            return None
+        here = np.array(pose[:2])
+        dq = float(np.linalg.norm(q - here))
+        rel = self.people - here
+        d = np.hypot(rel[:, 0], rel[:, 1])
+        off = np.abs(wrap(np.arctan2(rel[:, 1], rel[:, 0]) - math.atan2(q[1] - here[1], q[0] - here[0])))
+        ok = (off <= p['wall_leg_angle']) & (d <= dq - p['wall_leg_margin']) & (d > p['robot_radius'])
+        if not ok.any():
+            return None
+        i = np.flatnonzero(ok)[int(np.argmin(off[ok]))]
+        return self.people[i].copy()
 
     def reject_person(self, key, why):
         """관람객 좌표를 버릴 때: 1 s에 한 번 WARN (diag면 종류별로 셈).
@@ -503,9 +542,11 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             rr = np.clip(dt.shape[0] - 1 - ((m[:, 1] - oy) / res).astype(int), 0, dt.shape[0] - 1)
             off_wall = dt[rr, c] > self.p['person_map_clear']
             cand, m = cand[off_wall], m[off_wall]
-            # 계속 그 자리에 있는 후보(모서리·받침대)는 뺀다. 관람객 근처(static_learn_dist 안)에서는 새로 배우지 않음
+            # 계속 그 자리에 있는 후보(모서리·받침대)는 뺀다. 관람객 근처(static_learn_dist 안)에서는 새로 배우지 않음.
+            # 등록 중(WAIT_VISITOR·REGISTERED)도 보호: 키오스크 앞에 3 s 넘게 선 관람객이 고정 물체가 되면
+            # 출발 직후 다리 후보(A1-1·라이다 보조)가 사라짐 (2026-11-21)
             learn = np.ones(len(cand), bool)
-            if self.kf.x is not None and self.state in TRACKING:
+            if self.kf.x is not None and self.state in LISTEN:
                 last, vel = self.person()
                 ps = last + vel * min(self.now() - self.kf.t, self.p['predict_max'])
                 learn = np.hypot(cand[:, 0] - ps[0], cand[:, 1] - ps[1]) > self.p['static_learn_dist']

@@ -27,9 +27,10 @@
       "end_guide_wait": "출구에 들어간 뒤 종료 안내 음성을 들을 시간만큼 서서 기다림 [s]",
       "end_min_time": "start_tour 뒤 이 시간 안의 출구 진입은 무시 (시작하자마자 끝나지 않게) [s]",
       "return_to_dock": "관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)",
-      "return_timeout": "언독 지점까지 돌아가는 시간 상한. 넘으면 그 자리에서 도킹 시도 [s]",
+      "return_timeout": "도크 복귀 경고 주기 [s]: 언독 지점에 이만큼 못 가면 이 주기마다 경고하고 계속 간다. 도킹은 언독 지점(return_arrive 안)에 도착한 뒤에만 (2026-11-21: 예전에는 넘으면 그 자리에서 도킹 시도 → 3.7 m 밖에서 dock)",
       "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]",
-      "return_use_map": "도크 복귀 목표를 지도의 언독 지점(init_pose.yaml)으로 (AMCL map→odom 사용). false면 언독 때 기록한 odom 위치 (바퀴 오차가 쌓임)"
+      "return_use_map": "도크 복귀 목표를 지도의 언독 지점(init_pose.yaml)으로 (AMCL map→odom 사용). false면 언독 때 기록한 odom 위치 (바퀴 오차가 쌓임)",
+      "return_stall_time": "도크 복귀 중 이 시간 동안 경로 거리가 search_stall_dist만큼도 안 줄면 막힘 경고 [s]. 처음 막히면 지도 벽을 빼고 라이다만 보며 계속 감 (AMCL 어긋남으로 지도 벽이 통로를 막는 경우)"
     },
     "auto_start": false,
     "start_enabled": true,
@@ -46,7 +47,8 @@
     "return_to_dock": true,
     "return_use_map": true,
     "return_timeout": 60.0,
-    "return_arrive": 0.15
+    "return_arrive": 0.15,
+    "return_stall_time": 5.0
   },
   "start_face": {
     "_설명": {
@@ -125,7 +127,7 @@
       "search_stall_time": "최종 좌표로 가는 중 이 시간 동안 경로 거리(장애물을 돌아가는 거리)가 search_stall_dist만큼도 안 줄면 막힌 것으로 보고 그 자리에서 회전 탐색 [s] (길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음. 먼저 제자리 회전하는 동안은 셈하지 않음)",
       "search_stall_dist": "막힘 판정에서 '경로 거리가 줄었다'로 치는 최소 거리 [m]",
       "search_arrive": "최종 좌표에서 이 거리 안이면 도착 [m] (0.5 → 0.35: 거의 제자리에서 돌던 문제)",
-      "turn_first_angle": "SEARCH에서 마지막 위치로 갈 때 목표 방향이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°) DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤",
+      "turn_first_angle": "마지막 위치·언독 지점으로 갈 때(go_to) 길 방향(path_heading)이 이보다 틀어져 있으면 먼저 제자리 회전 [rad] (약 57°). DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈춤. 2026-11-21: 직선 방향 대신 길 방향으로 판단 (벽 너머 목표에서 제자리 흔들림)",
       "search_time": "최종 좌표에 도착한 뒤 한 바퀴 회전 탐색 시간 → 2π/20 = 0.31 rad/s [s] 10 → 20 (2026-11-19: 0.63 rad/s는 너무 빨라 탑캠이 다시 못 잡음)",
       "search_spin": "회전 탐색 최소 속도 [rad/s] (보통은 2π/search_time)",
       "search_spin_extra": "한 바퀴(odom 기준 360°)를 다 못 돌아도 search_time + 이만큼 지나면 끝 [s]",
@@ -189,10 +191,16 @@
       "reacquire_radius": "놓친 뒤 다시 잡을 때, 마지막으로 확인한 위치에서 기본 허용 거리 [m]",
       "reacquire_speed": "다시 잡을 때 허용 거리가 지난 시간만큼 늘어나는 속도 [m/s] (사람 걷는 속도)",
       "reacquire_max": "다시 잡을 때 허용 거리 상한 [m] (오래 놓쳐도 이보다 먼 좌표는 버림 → 결국 LOST)",
-      "search_confirm_time": "탐색 중(SEARCH·WAIT) 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW로 돌아감 [s]"
+      "search_confirm_time": "탐색 중(SEARCH·WAIT) 다시 보이면 이만큼 끊김 없이 보여야 FOLLOW로 돌아감 [s]",
+      "wall_leg": "벽 안에 떨어진 관람객 좌표를 버리기 전에, 같은 방향에서 벽보다 앞선 라이다 다리 후보가 있으면 그 위치로 대체 (인식 모듈이 사람 뒤 벽 거리를 잰 경우, 2026-11-21). lidar_assist가 켜져 있어야 후보가 있음",
+      "wall_leg_angle": "벽 좌표 방향에서 이 각도 [rad] 안의 다리 후보만 (약 10°)",
+      "wall_leg_margin": "다리 후보는 벽 좌표보다 이만큼 [m] 이상 로봇 쪽에 있어야 함 (벽에 붙은 조각 빼기)"
     },
     "map_file": "",
     "person_wall_margin": 0.0,
+    "wall_leg": true,
+    "wall_leg_angle": 0.17,
+    "wall_leg_margin": 0.15,
     "reacquire_radius": 1.0,
     "reacquire_speed": 1.0,
     "reacquire_max": 4.0,
@@ -227,7 +235,7 @@
       "clearance_zone": "이 거리 [m] 안으로 장애물에 가까워지면 벌점 (0.4 → 0.5, 2026-11-20: robot_radius 0.28로 키워 금지선 0.30과의 완충 0.2 m 유지)",
       "w_clearance": "비용: 장애물 근접 (clearance_zone 안)",
       "w_heading": "비용: 목표 근처에서 관람객을 바라보는 방향",
-      "w_view": "비용: 추종 중 관람객이 탑캠 화면 가장자리(view_half_angle) 밖으로 나간 각도 [rad]당 (2026-11-20 저녁 추가: 이동 중 화면 밖으로 빠져 인식을 놓침)",
+      "w_view": "비용: 추종 중 관람객이 탑캠 화면 가장자리(view_half_angle) 밖으로 나간 각도 [rad]당 (2026-11-20 저녁 추가: 이동 중 화면 밖으로 빠져 인식을 놓침) 벽을 돌아가야 할 때(detour)는 끔 (2026-11-21)",
       "view_half_angle": "로봇 정면에서 이 각도 [rad] 안이면 관람객이 화면 안에 있다고 봄 (0.4 = 약 23°, 노트북 웹캠 화각 절반보다 조금 작게)",
       "w_turn": "비용: 회전 (같은 조건이면 직진)",
       "control_period": "제어 주기 [s] (2026-11-20: 0.2도 시험했으나 개선 없어 0.1 유지)",
@@ -239,7 +247,16 @@
       "map_obstacles": "지도(map_file)의 벽 칸도 장애물로 피함 (AMCL map→odom이 있을 때). 라이다(약 20 cm 높이)가 못 보는 높은 물체·유리는 지도에 벽으로 그려 둔다 (2026-11-20 저녁 추가). false = 라이다만",
       "map_obstacle_dock_clear": "도크·언독 지점(init_pose.yaml)에서 이 거리 [m] 안의 지도 벽 점은 뺌 (지도에서 도크가 벽에 붙어 있어 출발·복귀가 막히지 않게)",
       "goal_wall_clear": "추종·탐색 목표가 지도 벽에서 이 거리 [m] 안(또는 벽 속)이면 벽에서 멀어지는 쪽으로 밀어냄. 못 가는 목표면 우회 길을 못 찾음 (2026-11-20: 가운데 벽 끝에서 막힘). 0 = 안 함",
-      "goal_shift_max": "목표를 밀어내는 최대 거리 [m]"
+      "goal_shift_max": "목표를 밀어내는 최대 거리 [m]",
+      "path_fallback_lidar": "지도 벽까지 넣어 길이 없으면 라이다 점만으로 길을 다시 찾음 (안전 판정은 그대로 지도 벽까지). AMCL이 어긋나면 지도 벽과 라이다 벽이 두 겹이 되어 통로가 닫힘 (2026-11-21)",
+      "path_heading_radius": "길 방향(path_heading)을 볼 로봇 둘레 원 반지름 [m]. 목표가 이보다 가까우면 직선 방향",
+      "detour_margin": "경로 거리(장애물을 돌아가는 거리)가 직선 거리보다 이만큼 [m] 넘게 길면 '벽 너머' → w_view 벌점을 끄고 길을 따라감 (2026-11-21: 첫 벽 앞에서 사람 쪽을 본 채 멈춤)",
+      "w_path_align": "비용: 1.5 s 뒤 방향이 길 방향(path_heading)과 어긋난 각도 [rad]당. 모퉁이에서 제자리 회전 후보가 모두 같은 점수라 못 도는 것 방지 (2026-11-21). 0 = 안 씀",
+      "view_off_on_detour": "벽 너머 판단(detour_margin·길 방향)이면 w_view 벌점을 끔 (2026-11-21)",
+      "follow_progress_first": "따라가기 우선: w_view 때문에 경로 거리를 못 줄이는 후보(정지·제자리 회전)가 뽑혔는데 줄이는 안전한 후보가 있으면 w_view 없이 다시 고름. 관람객이 화면 밖으로 잠깐 나가도 먼 길로 돌아가는 편이 서서 놓치는 것보다 낫다 (2026-11-21)",
+      "follow_progress_min": "따라가기 우선에서 '앞으로 간다'로 치는 1.5 s 동안 경로 거리 감소 [m]",
+      "follow_progress_ratio": "따라가기 우선: 화면 유지로 고른 후보가 가장 잘 가는 후보의 이 비율도 못 가면 화면 벌점 없이 다시 고름 (조금씩만 가다 모퉁이에 갇히는 것 방지)",
+      "follow_view_hold": "따라가기 우선으로 화면 유지를 포기하면 이 시간 [s] 동안 계속 포기 (모퉁이에서 길 쪽 ↔ 관람객 쪽을 번갈아 당기며 갇히는 것 방지)"
     },
     "robot_radius": 0.28,
     "safety_margin": 0.02,
@@ -251,6 +268,13 @@
     "w_clearance": 1.0,
     "w_heading": 0.3,
     "w_view": 0.5,
+    "detour_margin": 0.3,
+    "w_path_align": 0.15,
+    "view_off_on_detour": true,
+    "follow_progress_first": true,
+    "follow_progress_min": 0.05,
+    "follow_progress_ratio": 0.5,
+    "follow_view_hold": 2.0,
     "view_half_angle": 0.4,
     "w_turn": 0.02,
     "control_period": 0.1,
@@ -262,7 +286,9 @@
     "map_obstacles": true,
     "map_obstacle_dock_clear": 0.5,
     "goal_wall_clear": 0.35,
-    "goal_shift_max": 0.6
+    "goal_shift_max": 0.6,
+    "path_fallback_lidar": true,
+    "path_heading_radius": 0.3
   },
   "diag": {
     "_설명": {
