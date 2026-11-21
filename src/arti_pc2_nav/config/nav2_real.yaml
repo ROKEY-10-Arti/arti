@@ -91,21 +91,25 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.06
-      footprint: "[[ 0.189,  0.000],
-                  [ 0.134, -0.134],
-                  [ 0.000, -0.189],
-                  [-0.134, -0.134],
-                  [-0.189,  0.000],
-                  [-0.134,  0.134],
-                  [ 0.000,  0.189],
-                  [ 0.134,  0.134]]"
+      # [코스 관람 변경 ⑬] 로봇 위 노트북까지 감싸게 팔각형 반지름 0.189 → 0.28 (2026-11-21).
+      #   노트북이 로봇 몸통 밖으로 나와 장애물에 부딪힘. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
+      #   LiDAR(약 20 cm 높이)는 노트북을 못 보므로 footprint로 크기를 알려 줘야 한다. collision_monitor도 이 footprint를 씀.
+      footprint: "[[ 0.280,  0.000],
+                  [ 0.198, -0.198],
+                  [ 0.000, -0.280],
+                  [-0.198, -0.198],
+                  [-0.280,  0.000],
+                  [-0.198,  0.198],
+                  [ 0.000,  0.280],
+                  [ 0.198,  0.198]]"
       plugins: ["static_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
-        # 팽창 반경(m), 현재 0.22. 이후 변경은 이 값을 수정한다.
-        # cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
-        inflation_radius: 0.22
+        # 팽창 반경(m). cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
+        # [코스 관람 변경 ⑬] 0.22 → 0.45 (2026-11-21): 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다
+        #   약 10 cm 더 크다. 장애물에서 더 떨어져 다니게 비용 구역을 넓힘 (footprint 내접 반경 0.26보다 커야 함).
+        inflation_radius: 0.45
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -140,14 +144,17 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      footprint: "[[ 0.189,  0.000],
-                  [ 0.134, -0.134],
-                  [ 0.000, -0.189],
-                  [-0.134, -0.134],
-                  [-0.189,  0.000],
-                  [-0.134,  0.134],
-                  [ 0.000,  0.189],
-                  [ 0.134,  0.134]]"
+      # [코스 관람 변경 ⑬] 로봇 위 노트북까지 감싸게 팔각형 반지름 0.189 → 0.28 (2026-11-21).
+      #   노트북이 로봇 몸통 밖으로 나와 장애물에 부딪힘. follow 팀 visitor_follower robot_radius 0.28과 같은 값 (같은 노트북).
+      #   LiDAR(약 20 cm 높이)는 노트북을 못 보므로 footprint로 크기를 알려 줘야 한다. collision_monitor도 이 footprint를 씀.
+      footprint: "[[ 0.280,  0.000],
+                  [ 0.198, -0.198],
+                  [ 0.000, -0.280],
+                  [-0.198, -0.198],
+                  [-0.280,  0.000],
+                  [-0.198,  0.198],
+                  [ 0.000,  0.280],
+                  [ 0.198,  0.198]]"
       resolution: 0.06
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -171,9 +178,10 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
-        # 팽창 반경(m), 현재 0.22. 이후 변경은 이 값을 수정한다.
-        # cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
-        inflation_radius: 0.22
+        # 팽창 반경(m). cost_scaling_factor를 높이면 장애물에서 멀어질수록 비용이 빠르게 감소한다.
+        # [코스 관람 변경 ⑬] 0.22 → 0.45 (2026-11-21): 다른 로봇(robot1)도 같은 노트북을 올려 LiDAR에 보이는 몸통보다
+        #   약 10 cm 더 크다. 장애물에서 더 떨어져 다니게 비용 구역을 넓힘 (footprint 내접 반경 0.26보다 커야 함).
+        inflation_radius: 0.45
       always_send_full_costmap: true
 
 planner_server:
