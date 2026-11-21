@@ -36,7 +36,7 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.12  # ArtI 실물: 작품4 반원(r=0.43)이 작아 0.25면 반원 밖에 정지 (기본 0.25)
+      xy_goal_tolerance: 0.12  # ArtI 실물: 작품4 반원(당시 r=0.43, ⑭에서 0.6)이 작아 0.25면 반원 밖에 정지 (기본 0.25)
       yaw_goal_tolerance: 0.25
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
