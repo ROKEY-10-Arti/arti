@@ -242,6 +242,9 @@ ros2 topic echo /robot1/follow/state
 | `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점에 못 가면 이 주기마다 경고하고 계속 감 (도킹은 언독 지점 도착 뒤에만, 2026-11-21) / Create 3 도킹 대기 [s] |
 | `detour_margin` / `w_path_align` | 0.3 / 0.15 | 경로 거리가 직선보다 이만큼 [m] 넘게 길거나 길 방향이 사람 방향에서 `view_half_angle` 넘게 벗어나면 '벽 너머' → 화면 유지 벌점(`w_view`) 끔 / 1.5 s 뒤 방향이 길 방향과 어긋난 각도 [rad]당 벌점 (모퉁이에서 제자리 회전을 고르게, 2026-11-21) |
 | `follow_progress_first` / `follow_progress_min` / `follow_progress_ratio` / `follow_view_hold` / `view_off_on_detour` | true / 0.05 / 0.5 / 2.0 / true | **따라가기 우선**: 화면 유지 벌점 때문에 고른 궤적이 경로 거리를 거의 못 줄이면(min [m] 이하 또는 가장 잘 가는 후보의 ratio 이하) 화면 벌점 없이 다시 고르고, hold [s] 동안 계속 포기 (관람객이 잠깐 화면 밖으로 나가도 먼 길로 돌아감, 2026-11-21) / 벽 너머 판단이면 화면 벌점 끔 |
+| `follow_progress_far` / `follow_progress_best_min` | 0.5 / 0.1 | 따라가기 우선은 목표가 이보다 멀고 [m], 가장 잘 가는 후보가 1.5 s에 이만큼 [m] 이상 줄일 수 있을 때만 (거의 도착했을 때 켜져 화면 유지를 놓고 돌던 것, 2026-11-21) |
+| `w_turn_change` / `w_turn_flip` / `w_spin` / `spin_window` / `spin_budget` | 0.05 / 0.1 / 1.0 / 4.0 / 1.57 | 회전 부드러움: 회전 속도 변화·방향 뒤집기 벌점 / 최근 4 s 돈 각 + 이번 회전이 90°를 넘는 만큼 벌점 (계속 한 방향으로 도는 것을 늦춤. 진짜 뒤돌기는 약 3 s 늦어짐) |
+| `wall_leg_gate` / `follow_jump_dist` / `follow_jump_radius` / `follow_jump_confirm` | 0.8 / 1.0 / 0.5 / 0.5 | 따라가는 중: 벽 좌표 대체 후보는 예측 위치 0.8 m 안만 / 예측에서 1 m 넘게 튄 좌표는 0.5 m 안에서 0.5 s 계속 와야 받아들임 (한두 번 튄 좌표로 목표가 옮겨 크게 도는 것 방지) |
 | `return_stall_time` | 5 | 도크 복귀 중 이만큼 경로 거리가 안 줄면 막힘 경고. 처음 막히면 지도 벽을 빼고 라이다만 보며 계속 감 [s] |
 | `path_fallback_lidar` / `path_heading_radius` | true / 0.3 | 지도 벽까지 넣어 길이 없으면 라이다만으로 다시 길 찾기 / go_to가 '먼저 돌기'를 직선 대신 길 방향(로봇 둘레 이 반지름 [m])으로 판단 (2026-11-21: 벽 너머 목표에서 제자리 흔들림) |
 

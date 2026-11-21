@@ -351,6 +351,18 @@ class MotionMixin:
         cost = end_dist \
             + p['w_clearance'] * np.clip(p['clearance_zone'] - clear, 0, None) \
             + p['w_turn'] * np.abs(W)                       # 비용이 같으면 덜 도는 쪽
+        # 회전 부드러움 (2026-11-21: 추종 중 갑자기 한 바퀴 돌거나 좌우로 흔들려 관람객이 화면에서 빠짐)
+        #   + w_turn_change × |W - 지금 회전|                 회전 속도를 급하게 바꾸지 않게
+        #   + w_turn_flip  × (지금과 반대 방향으로 돌기)       좌우로 흔들지 않게
+        #   + w_spin × max(|최근 spin_window 동안 돈 각 + W × sim_time| - spin_budget, 0)
+        #     한 방향으로 계속 도는 것(한 바퀴)에 벌점. 길이 정말 그쪽이면 경로 거리·길 방향 항목이 이긴다
+        cost += p['w_turn_change'] * np.abs(W - w0)
+        if abs(w0) > p['turn_flip_min']:
+            cost += p['w_turn_flip'] * ((W * w0 < 0) & (np.abs(W) > p['turn_flip_min']))
+        if p['w_spin'] > 0:
+            turned = self.recent_turn(p['spin_window'])
+            cost += p['w_spin'] * np.clip(np.abs(turned + W * p['sim_time']) - p['spin_budget'], 0, None)
+            self.dbg['recent_turn_deg'] = round(math.degrees(turned))
         off = np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))   # 후보별 도착 때 사람 쪽과 어긋난 각도 [rad]
         straight = math.hypot(goal[0] - x0, goal[1] - y0)
         if straight < 0.3:                                  # 거의 도착 → 관람객 쪽을 바라봄
@@ -394,17 +406,36 @@ class MotionMixin:
         #     (w_path_align). 화면 벌점이 있으면 관람객 쪽(벽 너머)으로만 돌아 계속 막힘 (2026-11-21 시뮬레이션)
         # 관람객이 잠깐 화면 밖으로 나가도 먼 길로 돌아가는 편이 서서 놓치는 것보다 낫다 (2026-11-21 팀 판단).
         # 놓치면 lost_timeout 동안 칼만 예측 + 라이다 보조로 이어 가고, 그 뒤는 SEARCH가 마지막 위치로 간다
-        if keep_view and p['follow_progress_first'] and self.path_dist is not None and self.path_dist < 49.0:
+        # 목표가 follow_progress_far 안(거의 도착)이거나 가장 잘 가는 후보도 follow_progress_best_min을 못 줄이면 켜지 않음:
+        # 그때는 어느 후보도 크게 못 가는 게 당연한데 '못 간다'로 보고 화면 유지를 2 s 놓아 엉뚱하게 돎
+        # (2026-11-21 11:48 주행: 6번 중 4번이 목표 0.06~0.27 m에서 켜짐)
+        if keep_view and p['follow_progress_first'] and self.path_dist is not None and self.path_dist < 49.0 \
+                and straight > p['follow_progress_far']:
             gain = self.path_dist - end_dist                # 후보별 1.5 s 동안 줄어드는 경로 거리 [m]
             moving = np.isfinite(base) & (gain > p['follow_progress_min'])
             best_gain = float(gain[np.isfinite(base)].max()) if np.isfinite(base).any() else 0.0
-            if not detour and gain[i] <= max(p['follow_progress_min'], p['follow_progress_ratio'] * best_gain):
+            if not detour and best_gain >= p['follow_progress_best_min'] \
+                    and gain[i] <= max(p['follow_progress_min'], p['follow_progress_ratio'] * best_gain):
                 i = int(np.argmin(np.where(moving, base, np.inf) if moving.any() else base))
                 self.view_drop_until = now + p['follow_view_hold']
                 self.dbg['view_dropped'] = True
                 self.log_every('view_dropped', 3.0, f'화면 유지보다 따라가기 우선: 관람객이 화면 밖으로 나가도 길을 따라감 '
                                                     f'(경로 {self.path_dist:.2f} m, 직선 {straight:.2f} m)', 'info')
         return float(V[i]), float(W[i])
+
+    def recent_turn(self, window):
+        """최근 window [s] 동안 보낸 회전 명령을 더한 각도 [rad] (+ 왼쪽). cmd_hist (시각, v, w)에서 다음 명령까지 시간 × w.
+        dwa의 w_spin(한 방향으로 계속 도는 것 벌점)이 쓴다."""
+        hist = list(self.cmd_hist)
+        if len(hist) < 2:
+            return 0.0
+        now = self.now()
+        total = 0.0
+        for (t0, _, w), (t1, _, _) in zip(hist, hist[1:] + [(now, 0.0, 0.0)]):
+            if t1 <= now - window:
+                continue
+            total += w * max(0.0, min(t1, now) - max(t0, now - window))
+        return total
 
     def goal_field(self, goal, here, obs=None):
         """goal까지 '돌아가는 거리' 지도 (dwa 벌점·go_to 방향 공용).

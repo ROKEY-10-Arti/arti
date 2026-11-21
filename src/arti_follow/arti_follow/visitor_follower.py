@@ -156,6 +156,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.field_cache = None                                     # goal_field: 지난 거리 지도 (시각, 목표, 로봇, field, origin, 라이다만)
         self.turning_first = False                                  # go_to가 이번 주기 길 방향으로 먼저 돌았는지
         self.view_drop_until = None                                 # 따라가기 우선으로 화면 유지를 포기한 상태가 끝나는 시각
+        self.jump_pending = None                                    # A3: 튄 좌표 확인 중 (좌표, 처음 시각, 마지막 시각)
         self.return_lidar_only = False                              # RETURN이 막혀 지도 벽을 빼고 가는 중
         self.ret_best = self.ret_progress_at = self.ret_warn_at = None   # RETURN 진척: 가장 짧았던 거리, 그때 시각, 마지막 경고
         self.log_times = {}                                         # log_every: 종류별 마지막 로그 시각
@@ -359,6 +360,25 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
                                             f'(벽보다 {np.linalg.norm(q - leg):.2f} m 앞), 상태 {self.state}', 'info')
             q = leg
         now = self.now()
+        # [A3] 따라가는 중 예측 위치에서 follow_jump_dist 넘게 튄 좌표: 그 근처(follow_jump_radius)에서 follow_jump_confirm 동안
+        # 계속 와야 받아들이고 필터를 그 자리에서 새로 시작. 한두 번 튄 좌표(다른 사람·벽·라이다 조각)로 목표가 옆·뒤로 옮겨 가
+        # 로봇이 크게 돌고 진짜 관람객이 화면에서 빠지는 것을 막음 (2026-11-21 11:48 주행)
+        jumped = False
+        if self.state == 'FOLLOW' and self.kf.x is not None and p['follow_jump_dist'] > 0:
+            last, vel = self.person()
+            pred = last + vel * min(now - self.kf.t, p['predict_max'])
+            jump = float(np.linalg.norm(q - pred))
+            if jump > p['follow_jump_dist']:
+                pj = self.jump_pending
+                if pj is None or np.linalg.norm(q - pj[0]) > p['follow_jump_radius'] or now - pj[2] > p['register_gap']:
+                    self.jump_pending = (q.copy(), now, now)
+                    return self.reject_person('jump', f'예측 위치에서 {jump:.1f} m 튐 → {p["follow_jump_confirm"]:.1f} s 확인')
+                self.jump_pending = (q.copy(), pj[1], now)
+                if now - pj[1] < p['follow_jump_confirm']:
+                    return self.reject_person('jump', f'예측 위치에서 {jump:.1f} m 튐 → 확인 중')
+                self.get_logger().info(f'튄 좌표가 {now - pj[1]:.1f} s 계속 옴 → 관람객이 옮긴 것으로 보고 받아들임 ({jump:.1f} m)')
+                jumped = True
+            self.jump_pending = None
         # [A2] 다시 잡을 때 거리 검사: 놓친 뒤(또는 탐색 중) 들어온 좌표가 마지막으로 확인한 위치(anchor)에서
         # 사람이 그동안 걸어갈 수 있는 거리(reacquire_radius + reacquire_speed × 지난 시간, 최대 reacquire_max)보다 멀면
         # 다른 사람·오인식으로 보고 버린다 (2026-11-20: 1초 만에 2~3 m 튄 좌표로 엉뚱한 곳을 따라감)
@@ -372,7 +392,7 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             self.run_since = now                    # 끊김 없이 보이기 시작한 시각 (탐색 중 확인용, A4)
         if self.state == 'WAIT_VISITOR' and (self.seen_since is None or now - self.seen > p['register_gap']):
             self.seen_since = now                   # 등록 확인 시작 (처음이거나 끊겼다 다시 보임)
-        if self.kf.x is None or now - self.seen >= p['lost_timeout']:
+        if self.kf.x is None or now - self.seen >= p['lost_timeout'] or jumped:
             self.kf.reset(q, now)                   # 처음이거나 한동안 못 봄 → 새로 시작
         else:
             self.kf.update(q, now)                  # 이상값이면 버리고 예측만 (사람은 보이는 중)
@@ -400,6 +420,12 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         d = np.hypot(rel[:, 0], rel[:, 1])
         off = np.abs(wrap(np.arctan2(rel[:, 1], rel[:, 0]) - math.atan2(q[1] - here[1], q[0] - here[0])))
         ok = (off <= p['wall_leg_angle']) & (d <= dq - p['wall_leg_margin']) & (d > p['robot_radius'])
+        # 따라가는 중(칼만 위치가 있음)이면 예측 위치에서 wall_leg_gate 안의 후보만 (2026-11-21 11:48: 벽 좌표보다 2.1 m 앞,
+        # 관람객과 상관없는 후보로 대체 → 목표가 튀어 로봇이 크게 돎)
+        if self.kf.x is not None and self.state in TRACKING and p['wall_leg_gate'] > 0:
+            last, vel = self.person()
+            pred = last + vel * min(self.now() - self.kf.t, p['predict_max'])
+            ok &= np.hypot(self.people[:, 0] - pred[0], self.people[:, 1] - pred[1]) <= p['wall_leg_gate']
         if not ok.any():
             return None
         i = np.flatnonzero(ok)[int(np.argmin(off[ok]))]
