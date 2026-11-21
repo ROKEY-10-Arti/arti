@@ -1,6 +1,6 @@
 import {connectSimulator,stopSimulator} from './simulator-feed.js';
 import { artworks, getArtwork, artImage, loadCatalog, tourArtworkId, catalogArtworkId } from './data.js';
-import { createSession, getSession, beginPreparation, registerVisitor, cancelPreparation, startSession, cancelSession, toggleDevAvailability, stopDevAvailability, injectDevPreparationReady, DEMO_MODE } from './services.js';
+import { createSession, getSession, beginPreparation, registerVisitor, cancelPreparation, startSession, cancelSession, injectDevPreparationReady } from './services.js';
 import { content } from './content.js';
 import { serviceTerms } from './terms.js';
 import { galleryMap } from './gallery-map.js';
@@ -32,7 +32,7 @@ const icons = {
 };
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.spark}</svg>`;
 const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-const state = { page: 'home', mode: null, selectedArtworkIds: [], session: null, stage: 'calling', visited: [], busy: false, termsAccepted: false, availabilityChecked: false, usageConfirmed: false, robotAvailability: {status:'waiting', available:null}, devReady:false, devValue:null, devBusy:false, devPreparationBusy:false };
+const state = { page: 'home', mode: null, selectedArtworkIds: [], session: null, stage: 'calling', visited: [], busy: false, termsAccepted: false, availabilityChecked: false, usageConfirmed: false, robotAvailability: {status:'waiting', available:null}, devPreparationBusy:false };
 let simulationEnabled=false;
 let simulatedRuntime={};
 let runtimeKey='';
@@ -100,7 +100,7 @@ function header() {
 }
 
 function footer() {
-  return `<footer class="footer"><span><b>ART I GALLERY</b><span class="footer-divider">/</span> YOUR PERSONAL ART COMPANION</span><a href="/data" target="_blank" rel="noopener">관리자 페이지</a><div class="dev-controls" ${adminAuthenticated ? '' : 'hidden'}><button class="dev-toggle" data-action="dev-toggle" title="/is_available에 true/false를 1초마다 테스트 발행" ${!state.devReady || state.devBusy ? 'disabled' : ''}>dev1 <span class="dev-value">${state.devValue === null ? '대기' : String(state.devValue)}</span></button><button class="dev-toggle dev-preparation" data-action="dev-ready" title="오류 화면에 테스트용 관람 준비 완료 신호를 넣습니다" ${canUseDevPreparation() ? '' : 'disabled'}>dev2 <span>준비 완료 신호</span></button><button class="dev-stop" data-action="dev-stop" ${state.devValue === null ? 'hidden' : ''}>테스트 종료</button><span class="dev-publishing" ${state.devValue === null ? 'hidden' : ''}>1Hz 테스트 발행 중</span></div><span class="footer-note">${DEMO_MODE ? '로봇 준비 연동' : ''}</span></footer>`;
+  return `<footer class="footer"><span><b>ART I GALLERY</b><span class="footer-divider">/</span> YOUR PERSONAL ART COMPANION</span><a href="/data" target="_blank" rel="noopener">관리자 페이지</a><div class="dev-controls" ${adminAuthenticated ? '' : 'hidden'}><button class="dev-preparation" data-action="dev-ready" title="오류 화면에 테스트용 관람 준비 완료 신호를 넣습니다" ${canUseDevPreparation() ? '' : 'disabled'}>dev2 <span>준비 완료 신호</span></button></div><span class="footer-note">로봇 준비 연동</span></footer>`;
 }
 
 function sectionTop(eyebrow, title, description, back = 'mode') {
@@ -263,10 +263,6 @@ function availabilityNotice() {
 function receiveRobotAvailability(snapshot) {
   const changed = snapshot.status !== state.robotAvailability.status || snapshot.available !== state.robotAvailability.available;
   state.robotAvailability = snapshot;
-  if (snapshot.devReady !== undefined) state.devReady = snapshot.devReady;
-  else if (snapshot.status === 'disconnected') state.devReady = false;
-  if (snapshot.devValue !== undefined) state.devValue = snapshot.devValue;
-  syncDeveloperControls();
   const status = document.querySelector('.robot-status');
   if (status && !state.session) { status.innerHTML = '<i></i> ' + robotStatusLabel(); status.classList.toggle('is-unavailable', !hasAvailableRobot()); }
   const button = document.querySelector('[data-action="begin-visit"]');
@@ -301,36 +297,6 @@ async function completeDeveloperPreparation() {
   } finally {
     state.devPreparationBusy = false;
     render();
-  }
-}
-
-function syncDeveloperControls() {
-  document.querySelectorAll('[data-action="dev-ready"]').forEach(button => { button.disabled = !canUseDevPreparation(); });
-  const button = document.querySelector('[data-action="dev-toggle"]');
-  if (!button) return;
-  button.disabled = !state.devReady || state.devBusy;
-  button.classList.toggle('is-publishing', state.devValue !== null);
-  button.querySelector('.dev-value').textContent = state.devValue === null ? '대기' : String(state.devValue);
-  const stop = document.querySelector('[data-action="dev-stop"]');
-  stop.hidden = state.devValue === null;
-  stop.disabled = state.devBusy;
-  document.querySelector('.dev-publishing').hidden = state.devValue === null;
-}
-
-async function changeDeveloperAvailability(action) {
-  if (state.devBusy) return;
-  state.devBusy = true;
-  syncDeveloperControls();
-  try {
-    const result = action === 'stop' ? await stopDevAvailability() : await toggleDevAvailability();
-    state.devReady = result.dev_ready;
-    state.devValue = result.dev_value;
-    announce(action === 'stop' ? '토픽 테스트 발행을 종료했어요.' : `is_available ${result.dev_value} 테스트 발행을 시작했어요.`);
-  } catch (error) {
-    toast(error.message || '테스트 값을 변경하지 못했어요. 다시 시도해 주세요.');
-  } finally {
-    state.devBusy = false;
-    syncDeveloperControls();
   }
 }
 
@@ -370,10 +336,6 @@ function confirmDialog(title, description, action) {
   showDialog(`<div class="confirm-content"><span class="confirm-icon">${icon('robot')}</span><h2>${title}</h2><p>${description}</p><div class="dialog-actions"><button class="button secondary" data-action="close-modal">계속 관람하기</button><button class="button primary" data-action="confirm">종료하기</button></div></div>`, title);
   dialogAction = action;
 }
-function help() {
-  return beginVisit();
-}
-
 async function callRobot() {
   if (!state.availabilityChecked || !state.usageConfirmed) { navigate('home'); return; }
   if (!state.termsAccepted) { navigate('terms'); return; }
@@ -455,8 +417,6 @@ document.addEventListener('click', async event => {
   try {
   const action = target.dataset.action;
   if (action === 'view-art') return showArtwork(target.dataset.id);
-  if (action === 'dev-toggle') return await changeDeveloperAvailability('toggle');
-  if (action === 'dev-stop') return await changeDeveloperAvailability('stop');
   if (action === 'dev-ready') return await completeDeveloperPreparation();
   if (['home','mode','exhibition','usage'].includes(action)) return navigate(action);
   if (action === 'begin-visit') return await beginVisit();
@@ -470,7 +430,6 @@ document.addEventListener('click', async event => {
     return navigate('mode');
   }
   if (action === 'back') return goBack();
-  if (action === 'help') return await help();
   if (action === 'close-modal') return closeDialog();
   if (action === 'confirm') { const fn=dialogAction; closeDialog(); await fn?.(); return; }
   if (action === 'choose-mode') { state.mode=target.dataset.mode; navigate(state.mode === 'course' ? 'course' : 'free'); }

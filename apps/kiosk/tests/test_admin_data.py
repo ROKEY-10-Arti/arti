@@ -117,18 +117,17 @@ class AdminDataTest(unittest.TestCase):
             self.assertIn(label, page)
 
     def test_fleet_uses_odometry_only_while_fresh(self):
-        from unittest.mock import patch
-
         fleet = self.app.extensions['robot_availability'].fleet
-        with patch('fleet.time.monotonic', return_value=10):
-            fleet.receive('tb1', 'moving', True)
-            fleet.receive('tb4', 'dock', True)
-            snapshot = self.client.get('/api/fleet').json
-            self.assertEqual(snapshot['tb1']['activity'], '이동 중')
-            self.assertEqual(snapshot['tb4']['activity'], '도크에 정차 중')
-        with patch('fleet.time.monotonic', return_value=14):
-            snapshot = self.client.get('/api/fleet').json
-            self.assertEqual(snapshot['tb1']['activity'], '활동 상태 미수신')
+        now = 10
+        fleet.clock = lambda: now
+        fleet.receive('tb1', moving=True)
+        fleet.receive('tb4', dock=True)
+        snapshot = self.client.get('/api/fleet').json
+        self.assertEqual(snapshot['tb1']['activity'], '이동 중')
+        self.assertEqual(snapshot['tb4']['activity'], '도크에 정차 중')
+        now = 14
+        snapshot = self.client.get('/api/fleet').json
+        self.assertEqual(snapshot['tb1']['activity'], '활동 상태 미수신')
 
     def test_invalid_filters_and_unauthorized_access_are_rejected(self):
         for query in ({'from':'2026-02-30'},{'from':'2026-1-1'},{'to':'2026-11-16','from':'2026-11-17'},

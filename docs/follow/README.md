@@ -45,7 +45,7 @@
 | LOCALIZE | undock 끝 | `initialpose`를 보내고 map 위치가 출발 지점 0.3 m 안으로 잡힐 때까지 (최대 10 s) |
 | START_FACE | 위치 잡힘 | 제자리 회전으로 키오스크(`artworks.yaml`의 `kiosk` 구역 중심) 쪽을 봄 (`face_zone` 파라미터) |
 | WAIT_VISITOR | 다 돎 | 관람객 인식 기다림 (이전까지 들어온 좌표는 버림). 좌표가 `register_confirm_time`(1 s) 동안 끊김 없이(`register_gap` 0.5 s 안) 들어오면 등록 완료(`on_registered`): "인식되었습니다" 안내 → REGISTERED. 확인 중에는 따라가지 않고 바라보기만, 끊기면 다시 기다림 |
-| REGISTERED | 등록 완료 | prepare_tour 성공. 그 자리에 서서 기다림 (돌지도 따라가지도 않음, 좌표는 받아 둠). `ready_timeout`(130 s, 키오스크 120 s보다 길게) 안에 `start_tour`가 안 오면 관람 끝(`not_started`) |
+| REGISTERED | 등록 완료 | prepare_tour 성공. 키오스크가 `start_tour`를 자동 요청한다. 로봇은 그 자리에서 최대 130 s(`ready_timeout`) 기다리고, 시간 초과 시 `not_started`로 종료한다. |
 | FOLLOW | start_tour 받음 | 80 cm 유지하며 이동. 0.85 m 안이면 감속해 서고(0.95 m 밖이 되면 다시 출발), 관람객 쪽으로 돎 |
 | SEARCH | 좌표가 3 s 안 옴 | 최종 좌표에 도착할 때까지 이동 → 거기서 10 s 동안 한 바퀴 회전 탐색 |
 | WAIT | 회전 탐색 끝 | 정지 대기 (10 s) — 상태 노드가 "로봇 쪽으로 와 주세요" 안내 |

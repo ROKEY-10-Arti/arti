@@ -31,13 +31,13 @@
 
 ```
 키오스크 쪽 규칙 (그래서 로봇은 busy·not_prepared 검사를 하지 않는다)
-  - [호출]은 /robot1/dock_status가 is_docked=true일 때만 켠다 (관람 중이면 로봇이 도크 밖)
-  - [관람 시작]은 prepare_tour 성공 뒤 한 번만, 120 s 안에만 켠다 (넘으면 처음 화면으로)
+  - 첫 화면의 [호출]은 배터리가 30%를 초과하고 도킹된 로봇이 있을 때 켠다.
+  - 자유 관람은 robot1에 배정하고, prepare_tour 성공 직후 start_tour를 자동 요청한다.
 
 ① prepare_tour {start: true}   호출·등록
   ├ start = false     → 바로 끝냄: success=false, message=not_requested
   └ 그 밖             → undock → 위치 잡기 → 키오스크 보기 → 관람객 등록
-                         등록되면 success=true, message=registered  ← 키오스크: "관람 시작" 버튼 켬
+                         등록되면 success=true, message=registered  → 키오스크가 start_tour 자동 요청
                          실패: dock_failed (도크 밖인데 도킹 못 함) / undock_failed / no_undock_server / dock_status_unavailable / canceled
 
 ② start_tour {artwork_ids: []}  관람 시작 (prepare_tour 성공 뒤에만 옴)
@@ -67,7 +67,7 @@ WAIT_VISITOR  관람객 인식 기다림. 이 전까지 들어온 좌표는 버�
   │                             → 로봇 정면 ±30°, 2.5 m 안 가장 가까운 사람 자동 등록 (인식 창 클릭도 됨)
   ▼ on_registered(): registered=true, guide_message "recognized" ("인식되었습니다")
 REGISTERED    prepare_tour 성공 (result success=true). 그 자리에 서서 기다림 (돌지도 따라가지도 않음) ┘ prepare_tour
-  │             130 s(ready_timeout, 키오스크 120 s보다 길게) 안에 start_tour가 안 오면 → 관람 끝 (not_started)
+  │             130 s(ready_timeout) 안에 start_tour가 안 오면 → 관람 끝 (not_started)
   │ start_tour                                         ┐
   ▼                                                    │ start_tour
 FOLLOW        관람객과 0.8 m 거리 유지하며 이동
@@ -235,7 +235,7 @@ ros2 topic echo /robot1/follow/state
 | `face_offset_deg` | -15 | 시작 때 바라볼 방향 보정 [deg] (+ 왼쪽, - 오른쪽) |
 | `undock` | true | 시작 때 undock |
 | `auto_start` | false | 액션 없이 바로 prepare → start (테스트) |
-| `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] (키오스크 120 s보다 길게) |
+| `ready_timeout` | 130 | 등록 뒤 start_tour를 기다리는 시간 [s] |
 | `return_to_dock` | true | 관람이 끝나면 언독 지점으로 돌아와 도킹 |
 | `end_zone` / `end_guide_wait` / `end_min_time` | exit / 3 / 10 | 이 구역에 들어가면 관람 끝 / 종료 안내 듣는 시간 [s] / start_tour 뒤 이 시간 안 진입은 무시 [s] |
 | `return_timeout` / `dock_timeout` | 60 / 90 | 언독 지점까지 이동 / Create 3 도킹 대기 [s] |

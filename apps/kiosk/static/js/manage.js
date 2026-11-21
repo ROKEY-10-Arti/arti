@@ -1,4 +1,4 @@
-import {artworkPayload, posePayload, robotRows, logRows} from './admin-data.js';
+import {artworkPayload, logRows} from './admin-data.js';
 import {bindLogReset} from './admin-log-reset.js';
 const csrf = () => document.querySelector('meta[name="csrf-token"]').content;
 async function jsonRequest(url, options = {}) {
@@ -23,7 +23,7 @@ const artworkForms = [...document.querySelectorAll('.artwork-row-form, .artwork-
 document.addEventListener('input', event => {
   const form = event.target.form;
   if (!form) return;
-  if (form.matches('.artwork-row-form, .artwork-form, #robot-edit-form')) form.dataset.dirty = 'true';
+  if (form.matches('.artwork-row-form, .artwork-form')) form.dataset.dirty = 'true';
 });
 function updateArtworkForms(artworkId, data, savedForm) {
   for (const form of artworkForms.filter(form => form.dataset.artworkId === artworkId)) {
