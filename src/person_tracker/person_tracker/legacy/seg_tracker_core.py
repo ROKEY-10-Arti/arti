@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
-from person_tracker.env_bootstrap import resolve_model_path
+from person_tracker.core.env_bootstrap import resolve_model_path
 
 
 @dataclass

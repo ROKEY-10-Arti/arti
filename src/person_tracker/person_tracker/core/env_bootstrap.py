@@ -35,6 +35,33 @@ def bootstrap_venv():
     return None
 
 
+def get_package_root_dir() -> str:
+    """`person_tracker/core/env_bootstrap.py` 기준 패키지 루트(config/, models/ 포함 폴더)를 반환합니다."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def load_phone_camera_config() -> dict:
+    """설치 share 폴더 또는 소스 config/phone_camera.yaml 설정을 로드합니다."""
+    candidates = [os.path.join(get_package_root_dir(), 'config', 'phone_camera.yaml')]
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        candidates.insert(
+            0,
+            os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
+        )
+    except Exception:
+        pass
+    for cfg_path in candidates:
+        if os.path.isfile(cfg_path):
+            try:
+                import yaml
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:
+                pass
+    return {}
+
+
 def resolve_model_path(model_name: str) -> str:
     """
     패키지 내부 models/ 폴더에 가중치 파일(.pt)이 있으면 우선 사용하여,
@@ -43,7 +70,7 @@ def resolve_model_path(model_name: str) -> str:
     if os.path.isabs(model_name) and os.path.isfile(model_name):
         return model_name
 
-    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pkg_root = get_package_root_dir()
     bundled = os.path.join(pkg_root, 'models', model_name)
     if os.path.isfile(bundled):
         return bundled
@@ -74,31 +101,14 @@ def resolve_image_topic(ns: str, use_compressed: bool, custom_topic: str = '') -
     if ns_prefix:
         return ns_prefix + sub_suffix
 
-    cfg_candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'phone_camera.yaml'),
-    ]
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        cfg_candidates.insert(
-            0,
-            os.path.join(get_package_share_directory('person_tracker'), 'config', 'phone_camera.yaml'),
-        )
-    except Exception:
-        pass
-    for cfg_path in cfg_candidates:
-        if os.path.isfile(cfg_path):
-            try:
-                import yaml
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    cfg = yaml.safe_load(f) or {}
-                cfg_ns = str(os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '')).rstrip('/')
-                topics_cfg = cfg.get('topics', {})
-                key = 'compressed_topic' if use_compressed else 'raw_topic'
-                topic_path = str(topics_cfg.get(key, sub_suffix))
-                if not topic_path.startswith('/'):
-                    topic_path = '/' + topic_path
-                return (cfg_ns + topic_path) if cfg_ns else topic_path
-            except Exception:
-                pass
+    cfg = load_phone_camera_config()
+    if cfg:
+        cfg_ns = str(os.environ.get('ARTI_ROBOT_NS') or cfg.get('namespace', '')).rstrip('/')
+        topics_cfg = cfg.get('topics', {})
+        key = 'compressed_topic' if use_compressed else 'raw_topic'
+        topic_path = str(topics_cfg.get(key, sub_suffix))
+        if not topic_path.startswith('/'):
+            topic_path = '/' + topic_path
+        return (cfg_ns + topic_path) if cfg_ns else topic_path
 
     return sub_suffix

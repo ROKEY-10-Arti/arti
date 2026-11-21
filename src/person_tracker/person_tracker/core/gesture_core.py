@@ -29,7 +29,7 @@ from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 import numpy as np
 
-from person_tracker.env_bootstrap import resolve_model_path
+from person_tracker.core.env_bootstrap import resolve_model_path
 
 
 HAND_CONNECTIONS: Tuple[Tuple[int, int], ...] = (

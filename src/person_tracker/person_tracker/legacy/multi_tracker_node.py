@@ -3,7 +3,7 @@ import os
 import sys
 import time
 
-from person_tracker.env_bootstrap import bootstrap_venv, resolve_image_topic
+from person_tracker.core.env_bootstrap import bootstrap_venv, resolve_image_topic
 bootstrap_venv()
 
 import cv2
@@ -20,8 +20,8 @@ from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
 
 from typing import Optional, Tuple
-from person_tracker.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
-from person_tracker.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
+from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.core.lidar_person_localizer import LidarPersonLocalizer, TargetLocalizationResult
 
 
 class MultiModelTrackerNode(Node):
@@ -157,6 +157,8 @@ class MultiModelTrackerNode(Node):
 
     def on_tour_end(self, _msg):
         self.tracker.select_target_by_id(None)     # target_id, anchor_bank·recent_bank(re-ID 특징), 마지막 위치 삭제
+        if self.localizer is not None:
+            self.localizer.reset_kinematics()
         self.last_loc_result = None
         self.get_logger().info('[관람 끝] 타겟과 re-ID 특징을 지웠습니다.')
 
@@ -203,7 +205,7 @@ class MultiModelTrackerNode(Node):
         w, h = self.frame_size
         best, best_dist = None, float('inf')
         for person in self.tracker.last_detections:
-            res = self.localizer.localize_target(person, w, h, publish=False)
+            res = self.localizer.localize_target(person, w, h, publish=False, use_kinematics=False)
             if res.base_xyz is None:
                 continue
             bx, by = res.base_xyz[0], res.base_xyz[1]
@@ -580,7 +582,7 @@ class MultiModelTrackerNode(Node):
             self._process_key(key)
 
     def _estimate_candidate_spatial(self, person: UnifiedTrackedPerson, w: int, h: int):
-        res = self.localizer.localize_target(person, w, h, publish=False)
+        res = self.localizer.localize_target(person, w, h, publish=False, use_kinematics=False)
         if res.map_xyz is not None:
             return (res.map_xyz[0], res.map_xyz[1]), 'map', res.source
         return (res.base_xyz[0], res.base_xyz[1]), 'base_link', res.source

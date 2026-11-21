@@ -7,19 +7,33 @@
 
 ## 1. 디렉토리 및 모듈 구성
 
-| 파일 | 역할 | 설계도 위치 |
-|---|---|---|
-| [`base_tracker_node.py`](./base_tracker_node.py#L38) | 공용 ROS 2 베이스 노드 (`BaseTrackerNode`): 영상 입력·위치추정·오버레이·`arti/tour_end`·`TrackerStateStore` | 공용 ROS 골격 |
-| [`tracker_state.py`](./tracker_state.py#L17) | 선택적(`enable_state_store`) 불변 상태 스냅샷(`TrackerState`) + 이벤트 콜백(`TrackerStateStore`) | 상태/콜백 인터페이스 |
-| [`gesture_test_node.py`](./gesture_test_node.py#L40) | 제스처 등록 노드 (`GestureTestNode`, `BaseTrackerNode` 상속): 손 제스처 등록·상태 발행·`ReID Monitor` GUI | 전체 루프(`handle_frame`) |
-| [`multi_tracker_core.py`](./multi_tracker_core.py#L85) | YOLO26n-pose + ByteTrack 1차 추적 및 Adaptive ReID (`COEX` / `SAFE` / `GUARD` / `SEARCH`) | 사람 탐지 · 인식 판별 |
-| [`feature_extractors.py`](./feature_extractors.py#L441) | 304D HSV 히스토그램 + Pose 17관절 해부학 부위 마스킹(`upper`/`mid`/`lower`/`full`) 및 유사도 비교 | 외형 특징 추출 · EMA |
-| [`gesture_core.py`](./gesture_core.py#L145) | 손목 정사각 ROI, MediaPipe 21관절 분류, 2단계 얼굴 오검출 필터, 1:1 손목 매칭, `Fist->Open` 상태머신 | 등록 모듈 |
-| [`lidar_person_localizer.py`](./lidar_person_localizer.py#L100) | 카메라-라이다-TF 타임스탬프 정합(`_select_scan_for_stamp`) + 거리 추정 + `base_link`/`map` TF 좌표 변환 및 토픽 발행 | 인식 모듈 거리·좌표 변환 |
-| [`reid_visualizer.py`](./reid_visualizer.py#L34) | `ReID Monitor` 실시간 그래프, 부위 막대, 304D HSV 히트맵 (`Anchor` / `Recent EMA` / `Compare`) | 디버그 시각화 |
-| [`camera_publisher_node.py`](./camera_publisher_node.py#L1) | 로컬 웹캠/DroidCam을 `/robot1/top_cam/image_raw/compressed` ROS 토픽으로 발행 | 영상 입력 퍼블리셔 |
-| [`top_cam_tf_node.py`](./top_cam_tf_node.py#L1) | 상단 카메라 정적 TF (`oakd_rgb_camera_frame` -> `top_cam_link` -> `top_cam_optical_frame`) 발행 | `/tf_static` 퍼블리셔 |
-| [`env_bootstrap.py`](./env_bootstrap.py#L1) | `rokey_venv` 파이썬 경로 부트스트랩 및 네임스페이스 토픽·모델 경로 해석 | 공통 유틸 |
+```text
+person_tracker/
+├── core/    # 공용 인식·제스처·LiDAR 핵심 엔진 (ROS 노드 아님)
+├── nodes/   # 실전 주행·카메라·TF 연동 ROS 2 노드
+├── debug/   # 제스처 테스트·ReID 시각화·네트워크 모니터 도구
+└── legacy/  # 초기 단일 모델·9종 벤치마크 노드/코어
+```
+
+| 구분 | 파일 | 역할 | 설계도 위치 |
+|---|---|---|---|
+| **Core** | [`multi_tracker_core.py`](./core/multi_tracker_core.py#L85) | YOLO26n-pose + ByteTrack 1차 추적 및 Adaptive ReID (`COEX` / `SAFE` / `GUARD` / `SEARCH`) | 사람 탐지 · 인식 판별 |
+| **Core** | [`feature_extractors.py`](./core/feature_extractors.py#L441) | 304D HSV 히스토그램 + Pose 17관절 해부학 부위 마스킹(`upper`/`mid`/`lower`/`full`) 및 유사도 비교 | 외형 특징 추출 · EMA |
+| **Core** | [`gesture_core.py`](./core/gesture_core.py#L145) | 손목 정사각 ROI, MediaPipe 21관절 분류, 2단계 얼굴 오검출 필터, 1:1 손목 매칭, `Fist->Open` 상태머신 | 등록 모듈 |
+| **Core** | [`lidar_person_localizer.py`](./core/lidar_person_localizer.py#L102) | 카메라-라이다-TF 타임스탬프 정합(`_select_scan_for_stamp`) + 거리 추정 + `base_link`/`map` TF 좌표 변환 및 토픽 발행 | 인식 모듈 거리·좌표 변환 |
+| **Core** | [`tracker_state.py`](./core/tracker_state.py#L17) | 선택적(`enable_state_store`) 불변 상태 스냅샷(`TrackerState`) + 이벤트 콜백(`TrackerStateStore`) | 상태/콜백 인터페이스 |
+| **Core** | [`env_bootstrap.py`](./core/env_bootstrap.py#L1) | `rokey_venv` 파이썬 경로 부트스트랩 및 설정(`phone_camera.yaml`)·토픽·모델 경로 해석 | 공통 유틸 |
+| **Nodes** | [`base_tracker_node.py`](./nodes/base_tracker_node.py#L38) | 공용 ROS 2 베이스 노드 (`BaseTrackerNode`): 영상 입력·동적 소스전환·위치추정·오버레이·`arti/tour_end` | 공용 ROS 골격 |
+| **Nodes** | [`front_tracker_node.py`](./nodes/front_tracker_node.py#L28) | 정면 자동(`register_front`)/클릭 등록 실전 노드 (`FrontTrackerNode`, `tracker:=front`) | 실전 등록 노드 |
+| **Nodes** | [`camera_publisher_node.py`](./nodes/camera_publisher_node.py#L1) | 로컬 웹캠/DroidCam을 `/robot1/top_cam/image_raw/compressed` ROS 토픽으로 발행 (`camera_pub`) | 영상 입력 퍼블리셔 |
+| **Nodes** | [`top_cam_tf_node.py`](./nodes/top_cam_tf_node.py#L1) | 상단 카메라 정적 TF (`oakd_rgb_camera_frame` -> `top_cam_link` -> `top_cam_optical_frame`) 발행 | `/tf_static` 퍼블리셔 |
+| **Nodes** | [`init_pose_node.py`](./nodes/init_pose_node.py#L1) | AMCL 초기 위치 발행 및 `map -> base_link / top_cam_link` TF 확인 (`init_pose`) | 초기 위치 퍼블리셔 |
+| **Debug** | [`gesture_test_node.py`](./debug/gesture_test_node.py#L41) | 제스처 등록 + `ReID Monitor` GUI 노드 (`GestureTestNode`, 실주행 기본 `tracker:=gesture` 겸용) | 전체 루프(`handle_frame`) |
+| **Debug** | [`reid_visualizer.py`](./debug/reid_visualizer.py#L34) | `ReID Monitor` 실시간 그래프, 부위 막대, 304D HSV 히트맵 (`Anchor` / `Recent EMA` / `Compare`) | 디버그 시각화 |
+| **Debug** | [`net_monitor_node.py`](./debug/net_monitor_node.py#L1) | 토픽 수신 FPS·대역폭·지연 측정 모니터 (`net_monitor`) | 네트워크 진단 |
+| **Legacy** | [`multi_tracker_node.py`](./legacy/multi_tracker_node.py#L27) | 9모델 × 5모드 실시간 비교 벤치마크 노드 (`tracker:=all` / `bringup.launch.py`) | 비교 벤치마크 |
+| **Legacy** | [`tracker_core.py`](./legacy/tracker_core.py#L36) · [`tracker_node.py`](./legacy/tracker_node.py#L23) | 초기 BBox Detect 단일 모델 추적 코어·노드 (`tracker_node`) | 초기 Detect 레거시 |
+| **Legacy** | [`seg_tracker_core.py`](./legacy/seg_tracker_core.py#L1) · [`seg_tracker_node.py`](./legacy/seg_tracker_node.py#L23) | 초기 Segmentation 단일 모델 추적 코어·노드 (`seg_tracker_node`) | 초기 Seg 레거시 |
 
 ---
 
@@ -78,10 +92,10 @@ flowchart TD
 ```
 
 - **함수 바로 이동 (등록 모듈 순서)**:
-  - 입력·탐지: [`_compressed_cb()`](./base_tracker_node.py#L329) / [`_raw_cb()`](./base_tracker_node.py#L338) / [`_poll_local_frame()`](./base_tracker_node.py#L320) → [`handle_frame()`](./gesture_test_node.py#L408) → [`process_frame()`](./multi_tracker_core.py#L521)
-  - 손 ROI·분류: [`build_person_hand_rois()`](./gesture_core.py#L578) ([`_clamp_square_roi()`](./gesture_core.py#L561) / [`build_person_gesture_roi()`](./gesture_core.py#L516)) → [`detect_in_roi()`](./gesture_core.py#L169) → [`classify_hand_gesture()`](./gesture_core.py#L89)
-  - 얼굴 제외·손목 1:1 매칭: [`find_best_hand_owner_slot()`](./gesture_core.py#L769) → [`match_hand_to_person_wrist_slot()`](./gesture_core.py#L687) ([`is_false_face_detection()`](./gesture_core.py#L625)) → [`pick_primary_observation()`](./gesture_core.py#L240)
-  - 상태머신·잠금: [`MultiTargetGestureManager.update_person_hands()`](./gesture_core.py#L451) → [`FistOpenStateMachine.update()`](./gesture_core.py#L302) → [`select_target_by_id()`](./multi_tracker_core.py#L501) → [`_activate_target()`](./multi_tracker_core.py#L483) → [`_lock_target_bank()`](./multi_tracker_core.py#L458)
+  - 입력·탐지: [`_compressed_cb()`](./nodes/base_tracker_node.py#L335) / [`_raw_cb()`](./nodes/base_tracker_node.py#L346) / [`_poll_local_frame()`](./nodes/base_tracker_node.py#L324) → [`handle_frame()`](./debug/gesture_test_node.py#L408) → [`process_frame()`](./core/multi_tracker_core.py#L521)
+  - 손 ROI·분류: [`build_person_hand_rois()`](./core/gesture_core.py#L578) ([`_clamp_square_roi()`](./core/gesture_core.py#L561) / [`build_person_gesture_roi()`](./core/gesture_core.py#L516)) → [`detect_in_roi()`](./core/gesture_core.py#L169) → [`classify_hand_gesture()`](./core/gesture_core.py#L89)
+  - 얼굴 제외·손목 1:1 매칭: [`find_best_hand_owner_slot()`](./core/gesture_core.py#L769) → [`match_hand_to_person_wrist_slot()`](./core/gesture_core.py#L687) ([`is_false_face_detection()`](./core/gesture_core.py#L625)) → [`pick_primary_observation()`](./core/gesture_core.py#L240)
+  - 상태머신·잠금: [`MultiTargetGestureManager.update_person_hands()`](./core/gesture_core.py#L451) → [`FistOpenStateMachine.update()`](./core/gesture_core.py#L302) → [`select_target_by_id()`](./core/multi_tracker_core.py#L501) → [`_activate_target()`](./core/multi_tracker_core.py#L483) → [`_lock_target_bank()`](./core/multi_tracker_core.py#L458)
 
 ---
 
@@ -113,16 +127,16 @@ flowchart TD
 ```
 
 - **함수 바로 이동 (인식 모듈 순서)**:
-  - 외형 추출·유사도: [`BaseFeatureExtractor.extract()`](./feature_extractors.py#L165) / [`extract_part_masks()`](./feature_extractors.py#L129) ([`PoseKeypointFeatureExtractor._prepare_part_masks()`](./feature_extractors.py#L452) · [`BBoxFeatureExtractor._prepare_part_masks()`](./feature_extractors.py#L350)) → [`calc_hsv_hist()`](./feature_extractors.py#L62) → [`PartFeatureBank`](./feature_extractors.py#L30) → [`compute_dual_similarity_detail()`](./feature_extractors.py#L271) → [`compare_banks_detail()`](./feature_extractors.py#L202) / [`hist_sim()`](./feature_extractors.py#L85)
-  - Adaptive ReID 상태머신·보충: [`MODE_ADAPTIVE`](./multi_tracker_core.py#L721) (`COEX` [`L722`](./multi_tracker_core.py#L722) · `SAFE` [`L755`](./multi_tracker_core.py#L755) · `SEARCH` [`L777`](./multi_tracker_core.py#L777) · `GUARD` [`L867`](./multi_tracker_core.py#L867)), [`_update_target_banks_safely()`](./multi_tracker_core.py#L385) (`UPGRADE`·`BACKFILL`), [`backfill_part()`](./feature_extractors.py#L313), [`update_recent_bank()`](./feature_extractors.py#L330), [`_apply_exclude_boxes()`](./feature_extractors.py#L93), [`_is_crowded_near_target()`](./multi_tracker_core.py#L297), [`_compute_spatial_score()`](./multi_tracker_core.py#L314), [`_score_candidate()`](./multi_tracker_core.py#L367)
-  - 센서 동기화·좌표 변환·발행: [`LidarPersonLocalizer.__init__()`](./lidar_person_localizer.py#L112), [`_on_scan()`](./lidar_person_localizer.py#L297), [`_estimate_clock_offset_sec()`](./lidar_person_localizer.py#L312), [`_select_scan_for_stamp()`](./lidar_person_localizer.py#L349), [`_compute_half_sector()`](./lidar_person_localizer.py#L379), [`_select_cluster_distance()`](./lidar_person_localizer.py#L418), [`_on_tf_msg()`](./lidar_person_localizer.py#L289), [`_on_tf_static_msg()`](./lidar_person_localizer.py#L293), [`_estimate_candidate_spatial()`](./base_tracker_node.py#L420) → [`localize_target()`](./lidar_person_localizer.py#L539) → [`_get_map_from_base_matrix()`](./lidar_person_localizer.py#L458) → [`_publish_target_outputs()`](./lidar_person_localizer.py#L677)
-  - 상태·콜백·수동 제어: [`TrackerStateStore.update()`](./tracker_state.py#L82) / [`register_state_hook()`](./base_tracker_node.py#L180), [`_on_mouse_click()`](./base_tracker_node.py#L376), [`_process_key()`](./base_tracker_node.py#L393), [`_reset_target()`](./base_tracker_node.py#L357), [`_on_tour_end()`](./base_tracker_node.py#L369), [`_on_set_parameters()`](./base_tracker_node.py#L261)
+  - 외형 추출·유사도: [`BaseFeatureExtractor.extract()`](./core/feature_extractors.py#L165) / [`extract_part_masks()`](./core/feature_extractors.py#L129) ([`PoseKeypointFeatureExtractor._prepare_part_masks()`](./core/feature_extractors.py#L452) · [`BBoxFeatureExtractor._prepare_part_masks()`](./core/feature_extractors.py#L350)) → [`calc_hsv_hist()`](./core/feature_extractors.py#L62) → [`PartFeatureBank`](./core/feature_extractors.py#L30) → [`compute_dual_similarity_detail()`](./core/feature_extractors.py#L271) → [`compare_banks_detail()`](./core/feature_extractors.py#L202) / [`hist_sim()`](./core/feature_extractors.py#L85)
+  - Adaptive ReID 상태머신·보충: [`MODE_ADAPTIVE`](./core/multi_tracker_core.py#L721) (`COEX` [`L722`](./core/multi_tracker_core.py#L722) · `SAFE` [`L755`](./core/multi_tracker_core.py#L755) · `SEARCH` [`L777`](./core/multi_tracker_core.py#L777) · `GUARD` [`L867`](./core/multi_tracker_core.py#L867)), [`_update_target_banks_safely()`](./core/multi_tracker_core.py#L385) (`UPGRADE`·`BACKFILL`), [`backfill_part()`](./core/feature_extractors.py#L313), [`update_recent_bank()`](./core/feature_extractors.py#L330), [`_apply_exclude_boxes()`](./core/feature_extractors.py#L93), [`_is_crowded_near_target()`](./core/multi_tracker_core.py#L297), [`_compute_spatial_score()`](./core/multi_tracker_core.py#L314), [`_score_candidate()`](./core/multi_tracker_core.py#L367)
+  - 센서 동기화·좌표 변환·발행: [`LidarPersonLocalizer.__init__()`](./core/lidar_person_localizer.py#L113), [`_on_scan()`](./core/lidar_person_localizer.py#L279), [`_estimate_clock_offset_sec()`](./core/lidar_person_localizer.py#L294), [`_select_scan_for_stamp()`](./core/lidar_person_localizer.py#L331), [`_compute_half_sector()`](./core/lidar_person_localizer.py#L361), [`_select_cluster_distance()`](./core/lidar_person_localizer.py#L400), [`reset_kinematics()`](./core/lidar_person_localizer.py#L522), [`_on_tf_msg()`](./core/lidar_person_localizer.py#L271), [`_on_tf_static_msg()`](./core/lidar_person_localizer.py#L275), [`_estimate_candidate_spatial()`](./nodes/base_tracker_node.py#L421) → [`localize_target()`](./core/lidar_person_localizer.py#L613) → [`_get_map_from_base_matrix()`](./core/lidar_person_localizer.py#L440) → [`_publish_target_outputs()`](./core/lidar_person_localizer.py#L829)
+  - 상태·콜백·수동 제어: [`TrackerStateStore.update()`](./core/tracker_state.py#L82) / [`register_state_hook()`](./nodes/base_tracker_node.py#L180), [`_on_mouse_click()`](./nodes/base_tracker_node.py#L377), [`_process_key()`](./nodes/base_tracker_node.py#L394), [`_reset_target()`](./nodes/base_tracker_node.py#L357), [`_on_tour_end()`](./nodes/base_tracker_node.py#L370), [`_on_set_parameters()`](./nodes/base_tracker_node.py#L261)
 
 ---
 
 ### ③ 공통 디버그 시각화 (`ReID Monitor` & GUI)
-- [`_draw_pose_and_mask_overlays()`](./base_tracker_node.py#L508): Pose 스켈레톤·관절 마커 및 3부위 히스토그램 마스킹 영역 반투명(`0.34`)·외곽선 오버레이 렌더링 (`show_pose_mask`)
-- [`ReIDDebugVisualizer.render()`](./reid_visualizer.py#L125) / [`_render_hsv_vector_patch()`](./reid_visualizer.py#L65) / [`_ensure_reid_window()`](./gesture_test_node.py#L109): 120f 유사도 시계열 그래프, 인원별 `Tot/U/M/L/F` 막대, `Anchor` / `Recent (EMA)` / `Other(Target)` 행별 4부위(`Upper`/`Mid`/`Lower`/`Full`) 304D 히트맵 및 `Total Sim`·`A-R Sim`·`EMA` 상태 렌더링 (기동 진입점: [`main()`](./gesture_test_node.py#L576) → [`run_tracker_node()`](./base_tracker_node.py#L646), [`__init__()`](./gesture_test_node.py#L50))
+- [`_draw_pose_and_mask_overlays()`](./nodes/base_tracker_node.py#L510): Pose 스켈레톤·관절 마커 및 3부위 히스토그램 마스킹 영역 반투명(`0.34`)·외곽선 오버레이 렌더링 (`show_pose_mask`)
+- [`ReIDDebugVisualizer.render()`](./debug/reid_visualizer.py#L125) / [`_render_hsv_vector_patch()`](./debug/reid_visualizer.py#L65) / [`_ensure_reid_window()`](./debug/gesture_test_node.py#L110): 120f 유사도 시계열 그래프, 인원별 `Tot/U/M/L/F` 막대, `Anchor` / `Recent (EMA)` / `Other(Target)` 행별 4부위(`Upper`/`Mid`/`Lower`/`Full`) 304D 히트맵 및 `Total Sim`·`A-R Sim`·`EMA` 상태 렌더링 (기동 진입점: [`main()`](./debug/gesture_test_node.py#L576) → [`run_tracker_node()`](./nodes/base_tracker_node.py#L666), [`__init__()`](./debug/gesture_test_node.py#L51))
 
 ---
 
@@ -148,5 +162,5 @@ ros2 daemon stop
   ros2 param set /robot1/gesture_test_node video_source ""
   ros2 param set /robot1/gesture_test_node video_source "0"
   ```
-- **주요 ReID/EMA·동기화/상태 ROS 2 파라미터** (`--ros-args -p <이름>:=<값>`): `enable_state_store` (`true` on test node), `auto_start_lidar_motor` (`publish_target_topics` 따라감), `compensate_clock_offset` (`true`), `clock_offset_threshold_sec` (`0.12`), `lidar_cluster_mode` (`front_valid`), `lidar_cluster_tol_m` (`0.35`), `lidar_min_cluster_rays` (`2`), `use_pose_sector` (`true`), `ema_min_sim` (`0.60`), `ema_alpha` (`0.04`), `ema_require_single` (`true`), `scan_sync_slop_sec` (`0.25`), `require_scan_sync` (`true`), `tracker_conf` (`0.15`), `tracker_iou` (`0.55`), `reid_match_thresh` (`0.50`), `search_min_sim` (`0.48`), `coexist_min_sim` (`0.74`), `recover_margin` (`0.06`), `recover_confirm_frames` (`2`), `id_switch_thresh` (`0.48`), `safe_mismatch_limit` (`4`)
+- **주요 ReID/EMA·동기화/상태 ROS 2 파라미터** (`--ros-args -p <이름>:=<값>`): `enable_state_store` (`true` on test node), `auto_start_lidar_motor` (`publish_target_topics` 따라감), `compensate_clock_offset` (`true`), `clock_offset_threshold_sec` (`0.12`), `lidar_cluster_mode` (`front_valid`), `lidar_cluster_tol_m` (`0.35`), `lidar_min_cluster_rays` (`2`), `use_pose_sector` (`true`), `use_kinematic_gating` (`true`), `ema_min_sim` (`0.60`), `ema_alpha` (`0.04`), `ema_require_single` (`true`), `scan_sync_slop_sec` (`0.25`), `require_scan_sync` (`true`), `tracker_conf` (`0.15`), `tracker_iou` (`0.55`), `reid_match_thresh` (`0.50`), `search_min_sim` (`0.48`), `coexist_min_sim` (`0.74`), `recover_margin` (`0.06`), `recover_confirm_frames` (`2`), `id_switch_thresh` (`0.48`), `safe_mismatch_limit` (`4`)
 - **GUI 단축키**: `[Y]` YOLO+ROI 전환 · `[R]` 타겟 초기화 · `[1/2]` Fist 프레임 · `[3/4]` Open 프레임 · `[D]` CPU/GPU 전환 · `[V]` ReID 모니터 창 토글 · `[M]` 포즈/마스크 오버레이 토글 · `[P]` 타겟 토픽 발행 토글
