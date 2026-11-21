@@ -16,7 +16,7 @@ class RobotLogMigrationTest(unittest.TestCase):
             client.patch('/api/artworks/001',json={'artwork_title':'보존할 작품','location':'room-9','x':4.2})
             record=client.post('/api/sessions',json={'mode':'free','artworkIds':['art-01']}).json
             with sqlite3.connect(path) as db:
-                before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in ('Art','Pose','admin_users','admin_sessions','courses')}
+                before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in ('Art','admin_users','admin_sessions')}
                 db.execute('DROP TABLE Log')
                 db.execute('ALTER TABLE TourSession RENAME TO Log')
                 db.execute('DROP INDEX tour_session_created_time')

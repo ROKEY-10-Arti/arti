@@ -142,7 +142,7 @@ class AdminDataTest(unittest.TestCase):
         sender=self.app.test_client()
         payload={'robot_id':'tb1','sent_at':'2026-11-17T19:23:45+09:00','message':'키오스크 도착'}
         with sqlite3.connect(self.config['DATABASE']) as db:
-            before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in ('Art','Pose','TourSession')}
+            before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in ('Art','TourSession')}
         self.assertEqual(sender.post('/api/logs',json=payload).status_code,401)
         self.assertEqual(sender.post('/api/logs',json=payload,headers={'Authorization':'Bearer wrong'}).status_code,401)
         headers={'Authorization':'Bearer '+self.config['LOG_API_TOKEN']}
@@ -170,7 +170,7 @@ class AdminDataTest(unittest.TestCase):
 
     def test_log_reset_preserves_sessions_and_restarts_index_at_one(self):
         self.client.post('/api/sessions',json={'mode':'free','artworkIds':['art-01']})
-        tables=('Art','Pose','TourSession','courses','catalog_migrations','admin_users','admin_sessions')
+        tables=('Art','TourSession','catalog_migrations','admin_users','admin_sessions')
         with sqlite3.connect(self.config['DATABASE']) as db:before={table:db.execute(f'SELECT * FROM {table} ORDER BY 1').fetchall() for table in tables}
         response=self.client.delete('/api/logs',json={'confirm':'RESET_LOGS','expected_count':4})
         self.assertEqual(response.json,{'deleted':4,'total':0})

@@ -16,7 +16,7 @@ from database import initialize_database, ARTWORK_SELECT, SESSION_SELECT
 from log_query import log_page
 from session_query import session_page
 from robot_logs import initialize_log_token, register_robot_logs
-from managed_data import register_managed_data, robot_data
+from managed_data import register_managed_data
 from robot_availability import register_robot_availability
 from robot_preparation import register_robot_preparation
 from central_ros import apply_ros_environment
@@ -83,7 +83,6 @@ def create_app(test_config=None):
         ROS_PREPARATION_REQUIRED=True,
         CENTRAL_ROS_ENABLED=True,
         SECRET_KEY=os.environ.get("ARTI_SECRET_KEY"),
-        ROBOT_API_TOKEN=os.environ.get("ARTI_ROBOT_API_TOKEN"),
         TRUSTED_HOSTS=os.environ.get("ARTI_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(","),
         LOG_API_TOKEN=os.environ.get("ARTI_LOG_API_TOKEN"),
     )
@@ -119,7 +118,7 @@ def create_app(test_config=None):
     register_admin_auth(app, get_db)
     register_robot_logs(app, get_db, json_body)
     register_system_monitor(app)
-    register_managed_data(app, get_db, json_body, now_ms)
+    register_managed_data(app, get_db, json_body)
     register_robot_availability(app)
     @app.errorhandler(HTTPException)
     def http_error(error):
@@ -141,7 +140,6 @@ def create_app(test_config=None):
         db = get_db()
         return {
             "artworks": [dict(row) for row in db.execute(ARTWORK_SELECT + " ORDER BY artwork_id")],
-            "courses": [json.loads(row["data"]) for row in db.execute("SELECT data FROM courses ORDER BY id")],
         }
 
     def find_session(session_id):
@@ -251,18 +249,11 @@ def create_app(test_config=None):
         ids = validate_ids(body.get("artworkIds"), {f"art-{int(art['artwork_id']):02d}" for art in catalog["artworks"]})
         if not ids:
             abort(400, description="관람할 작품을 하나 이상 선택해 주세요.")
-        if mode == "free" and course_id is not None:
-            abort(400, description="자유 관람의 courseId는 null이어야 합니다.")
+        if course_id is not None:
+            # 추천 코스 목록은 없어졌다. 코스 관람도 화면에서 고른 작품(artworkIds)으로만 요청한다.
+            abort(400, description="courseId는 null이어야 합니다. 관람할 작품은 artworkIds로 보내 주세요.")
         if mode == "course":
-            if course_id is not None:
-                # 이전 클라이언트가 보낸 코스 ID는 호환을 위해 처리합니다.
-                courses = {course["id"]: course for course in catalog["courses"]}
-                if not isinstance(course_id, str) or course_id not in {*courses, "custom"}:
-                    abort(400, description="존재하지 않는 코스입니다.")
-                if course_id != "custom" and ids != courses[course_id]["ids"]:
-                    abort(400, description="선택한 코스와 작품 순서가 일치하지 않습니다.")
             # 현재 배치의 시계 방향 방문 순서: 001 → 002 → 003 → 004.
-            # 이전 클라이언트의 코스 요청도 같은 방향으로 정규화합니다.
             ids.sort(key=lambda artwork_id: int(artwork_id.split('-')[-1]))
         session_id = str(uuid4())
         db = get_db()

@@ -1,4 +1,4 @@
-"""Art / Pose / Log 구조 생성과 기존 SQLite 데이터의 원자적 이전."""
+"""Art / TourSession / Log 구조 생성과 기존 SQLite 데이터의 원자적 이전."""
 
 import json
 
@@ -78,10 +78,10 @@ def initialize_database(db, root):
                 if {'x', 'y'} & old.keys():
                     stored_coordinate_ids.add(artwork_id)
             db.execute('DROP TABLE artworks')
-        if 'robots' in old_tables:
-            db.execute('''INSERT INTO Pose (robot_id, x, y, theta, active, frame_id, pose_updated_at)
-                SELECT robot_id, pose_x, pose_y, pose_theta, active, frame_id, pose_updated_at FROM robots''')
-            db.execute('DROP TABLE robots')
+        # 쓰지 않는 테이블: 로봇 위치(robots → Pose)는 키오스크가 ROS /odom 구독으로 직접 받고,
+        # 추천 코스(courses)는 화면이 작품을 직접 골라 보내면서 쓰지 않게 되었다.
+        for unused in ('robots', 'Pose', 'courses'):
+            db.execute(f'DROP TABLE IF EXISTS {unused}')
         if 'sessions' in old_tables:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(sessions)')}
             optional = ', '.join(key if key in columns else 'NULL'
@@ -132,27 +132,6 @@ def initialize_database(db, root):
                            [(art['description'], art['artwork_id'], previous_descriptions[art['artwork_id']])
                             for art in catalog['artworks'] if art['artwork_id'] in previous_descriptions])
             db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (description_update['version'],))
-        for course in catalog['courses']:
-            db.execute('INSERT OR IGNORE INTO courses (id, data) VALUES (?, ?)',
-                       (course['id'], json.dumps(course, ensure_ascii=False)))
-        version = catalog.get('version')
-        if version and not db.execute(
-            'SELECT 1 FROM catalog_migrations WHERE version=?', (version,)
-        ).fetchone():
-            for course in catalog['courses']:
-                db.execute('UPDATE courses SET data=? WHERE id=?',
-                           (json.dumps(course, ensure_ascii=False), course['id']))
-            db.execute('INSERT INTO catalog_migrations (version) VALUES (?)', (version,))
-        for row in db.execute('SELECT id, data FROM courses').fetchall():
-            old = json.loads(row['data'])
-            if any(item not in {'art-01', 'art-02', 'art-03'} for item in old['ids']):
-                old.update(ids=['art-03', 'art-02', 'art-01'], minutes=15, theme='추상 · 색채 · 자연')
-                db.execute('UPDATE courses SET data=? WHERE id=?',
-                           (json.dumps(old, ensure_ascii=False), row['id']))
-
-        # 위치 미수신 상태는 NULL입니다. robot-02는 수신/활성화 전까지 비활성입니다.
-        db.execute("INSERT OR IGNORE INTO Pose (robot_id, active) VALUES ('robot-01', 1)")
-        db.execute("INSERT OR IGNORE INTO Pose (robot_id, active) VALUES ('robot-02', 0)")
         if 'x_min' not in previous_art_columns:
             ranges = [(-2.56,-2.51,1.02,1.45), (-2.52,3.51,2.5,4.01),
                       (-1.51,-1.02,5.14,5.15), (0.06,0.43,3.51,3.96)]

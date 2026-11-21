@@ -113,7 +113,6 @@ def register_admin_auth(app, get_db):
             or (path == "/api/sessions" and request.method == "GET")
             or (path == "/api/logs" and request.method in WRITE_METHODS | {"GET"})
             or (path.startswith("/api/artworks/") and request.method in WRITE_METHODS)
-            or (path.startswith("/api/robots/") and request.method in WRITE_METHODS)
             or (path.startswith("/api/dev/") and request.method in WRITE_METHODS)
         )
 
@@ -128,14 +127,6 @@ def register_admin_auth(app, get_db):
                 if expected and same_token(authorization, 'Bearer ' + expected):
                     return None
                 abort(401, description='로봇 로그 전송 토큰을 확인해 주세요.')
-        # 로봇 프로그램의 pose 전송은 별도 설정된 전용 토큰으로도 허용합니다.
-        if request.method == "PUT" and re.fullmatch(r"/api/robots/[^/]+", request.path):
-            authorization = request.headers.get("Authorization", "")
-            if authorization:
-                expected = app.config.get("ROBOT_API_TOKEN")
-                if expected and same_token(authorization, "Bearer " + expected):
-                    return None
-                abort(401, description="로봇 전송 인증 정보를 확인해 주세요.")
         if current_admin() is None:
             if request.path.startswith("/api/"):
                 abort(401, description="관리자 로그인이 필요합니다.")

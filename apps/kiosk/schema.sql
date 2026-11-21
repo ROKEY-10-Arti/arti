@@ -18,25 +18,6 @@ CREATE TABLE IF NOT EXISTS Art (
     CHECK (y IS NULL OR y BETWEEN -1e12 AND 1e12)
 );
 
-CREATE TABLE IF NOT EXISTS Pose (
-    robot_id TEXT NOT NULL PRIMARY KEY,
-    x REAL,
-    y REAL,
-    theta REAL,
-    active INTEGER NOT NULL CHECK (active IN (0, 1)),
-    frame_id TEXT NOT NULL DEFAULT 'map',
-    pose_updated_at INTEGER,
-    CHECK (
-        (x IS NULL AND y IS NULL AND theta IS NULL AND pose_updated_at IS NULL)
-        OR (x IS NOT NULL AND y IS NOT NULL AND theta IS NOT NULL AND pose_updated_at IS NOT NULL)
-    )
-);
-
-CREATE TABLE IF NOT EXISTS courses (
-    id TEXT PRIMARY KEY,
-    data TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS catalog_migrations (
     version TEXT PRIMARY KEY
 );

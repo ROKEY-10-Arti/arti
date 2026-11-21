@@ -48,42 +48,10 @@ class ManagedDataTest(unittest.TestCase):
         long_description = "작품🌱" * 2500
         self.assertEqual(self.client.patch("/api/artworks/001", json={"description": long_description}).status_code, 200)
 
-    def test_robot_pose_upsert_filter_and_restart(self):
-        initial = self.client.get("/api/robots").json["robots"]
-        self.assertEqual(len(initial), 1)
-        self.assertIsNone(initial[0]["pose"])
-        self.assertIsNone(initial[0]["pose_updated_at"])
-        for robot_id, active in (("robot-01", True), ("robot-02", False)):
-            result = self.client.put(f"/api/robots/{robot_id}", json={
-                "active": active, "pose": {"x": 1.2, "y": -0.5, "theta": 1.57}, "frame_id": "map",
-            })
-            self.assertEqual(result.status_code, 200)
-            self.assertEqual(result.json["active"], active)
-            self.assertIsInstance(result.json["pose_updated_at"], int)
-        self.assertEqual([r["robot_id"] for r in self.client.get("/api/robots").json["robots"]], ["robot-01"])
-        self.assertEqual([r["robot_id"] for r in self.client.get("/api/robots?active=false").json["robots"]], ["robot-02"])
-        restarted = login_admin(create_app(self.config).test_client())
-        robots = restarted.get("/api/robots?active=all").json["robots"]
-        self.assertEqual(len(robots), 2)
-        self.assertEqual(robots[0]["pose"], {"x": 1.2, "y": -0.5, "theta": 1.57})
-        self.assertEqual(restarted.put("/api/robots/robot-01", json={"active": False, "pose": None}).status_code, 200)
-        self.assertEqual(restarted.get("/api/robots").json["robots"], [])
-        self.assertIsNone(restarted.get("/api/robots/robot-01").json["pose_updated_at"])
-
-    def test_bad_robot_poses_do_not_overwrite_latest(self):
-        url = "/api/robots/robot-01"
-        original = self.client.put(url, json={"active": True, "pose": {"x": 1, "y": 2, "theta": 0}}).json
-        for pose in ({"x": 0, "y": 0}, {"x": True, "y": 0, "theta": 0},
-                     {"x": "0", "y": 0, "theta": 0}, {"x": float("nan"), "y": 0, "theta": 0},
-                     {"x": float("inf"), "y": 0, "theta": 0}, {"x": 10**1000, "y": 0, "theta": 0},
-                     {"x": 0, "y": 0, "theta": 0, "z": 1}, []):
-            self.assertEqual(self.client.put(url, json={"active": True, "pose": pose}).status_code, 400)
-        self.assertEqual(self.client.put(url, json={"active": 1, "pose": None}).status_code, 400)
-        self.assertEqual(self.client.put(url, json={"active": True}).status_code, 400)
-        self.assertEqual(self.client.put(url, json={"active": True, "pose": None, "frame_id": ""}).status_code, 400)
-        self.assertEqual(self.client.get(url).json, original)
-        self.assertEqual(self.client.get("/api/robots?active=yes").status_code, 400)
-        self.assertEqual(self.client.get("/api/robots/missing").status_code, 404)
+    def test_robot_pose_api_is_removed(self):
+        # 로봇 위치는 키오스크가 ROS /robotN/odom을 직접 구독한다. DB·HTTP로 받지 않는다.
+        self.assertEqual(self.client.get("/api/robots").status_code, 404)
+        self.assertEqual(self.client.put("/api/robots/robot-01", json={"active": True, "pose": None}).status_code, 404)
 
 
 if __name__ == "__main__":

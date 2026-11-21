@@ -14,11 +14,11 @@ class ServerTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.config = {"TESTING": True, "DATABASE": Path(self.temp.name) / "test.sqlite3", "ROS_PREPARATION_REQUIRED": False}
         self.client = login_admin(create_app(self.config).test_client())
-        self.course = self.client.get("/api/catalog").json["courses"][0]
+        self.artwork_ids = ["art-01", "art-02", "art-03"]
 
     def create_session(self):
         response = self.client.post("/api/sessions", json={
-            "mode": "course", "courseId": self.course["id"], "artworkIds": self.course["ids"],
+            "mode": "course", "courseId": None, "artworkIds": self.artwork_ids,
         })
         self.assertEqual(response.status_code, 201)
         return response.json, response.headers["Location"]
@@ -38,7 +38,7 @@ class ServerTest(unittest.TestCase):
         started = self.client.patch(url, json={"status": "active"})
         self.assertEqual(started.status_code, 200)
         self.assertIsInstance(started.json["startedAt"], int)
-        visited = self.course["ids"][:2]
+        visited = self.artwork_ids[:2]
         self.assertEqual(self.client.patch(url, json={"visitedIds": visited}).status_code, 200)
         completed = self.client.patch(url, json={"status": "completed", "visitedIds": visited})
         self.assertEqual(completed.status_code, 200)
@@ -61,21 +61,13 @@ class ServerTest(unittest.TestCase):
                 artwork_id = f"art-{index:02d}"
                 db.execute("INSERT INTO artworks VALUES (?, ?)",
                            (artwork_id, json.dumps({"id": artwork_id, "title": "이전 예시 작품"})))
-            db.execute("UPDATE courses SET data=? WHERE id='B'", (
-                json.dumps({"id": "B", "ids": ["art-04", "art-05", "art-02", "art-03"]}),))
         restarted = login_admin(create_app(self.config).test_client())
         catalog = restarted.get("/api/catalog").json
         self.assertEqual([art["artwork_id"] for art in catalog["artworks"]], ["001", "002", "003", "004"])
         with sqlite3.connect(self.config["DATABASE"]) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM artworks_legacy_v1").fetchone()[0], 5)
-        self.assertEqual(catalog["courses"][0]["ids"], ["art-01", "art-02", "art-03"])
-        self.assertEqual(catalog["courses"][1]["ids"], ["art-03", "art-02", "art-01"])
+        self.assertNotIn("courses", catalog)
         self.assertEqual(restarted.get(url).json, session)
-        for course in catalog["courses"]:
-            result = restarted.post("/api/sessions", json={
-                "mode": "course", "courseId": course["id"], "artworkIds": course["ids"],
-            })
-            self.assertEqual(result.status_code, 201)
 
         # 다음 실행 때는 기존 데이터를 다시 덮어쓰지 않습니다.
         with sqlite3.connect(self.config["DATABASE"]) as db:
@@ -97,8 +89,9 @@ class ServerTest(unittest.TestCase):
     def test_invalid_creation_does_not_write(self):
         cases = [
             {}, {"mode": "wrong"}, {"mode": [], "artworkIds": []},
-            {"mode": "course", "courseId": "A", "artworkIds": ["missing"]},
+            {"mode": "course", "courseId": None, "artworkIds": ["missing"]},
             {"mode": "course", "courseId": "A", "artworkIds": ["art-01"]},
+            {"mode": "course", "courseId": "custom", "artworkIds": ["art-01"]},
             {"mode": "course", "courseId": [], "artworkIds": ["art-01"]},
             {"mode": "free", "artworkIds": ["art-01", "art-01"]},
             {"mode": "free", "artworkIds": [None]},
@@ -132,17 +125,15 @@ class ServerTest(unittest.TestCase):
         for limit in ("0", "501", "abc", "9" * 5000):
             self.assertEqual(self.client.get("/api/sessions", query_string={"limit": limit}).status_code, 400)
 
-    def test_free_and_custom_courses(self):
-        for mode, course in (("free", None), ("course", "custom")):
+    def test_free_and_checklist_course(self):
+        for mode in ("free", "course"):
             response = self.client.post("/api/sessions", json={
-                "mode": mode, "courseId": course, "artworkIds": ["art-01"],
+                "mode": mode, "courseId": None, "artworkIds": ["art-01"],
             })
             self.assertEqual(response.status_code, 201)
             self.assertTrue(response.json["simulation"])
 
     def test_checklist_tour_sorts_selection_without_creating_a_course(self):
-        with sqlite3.connect(self.config['DATABASE']) as db:
-            courses_before = db.execute('SELECT id,data FROM courses ORDER BY id').fetchall()
         response = self.client.post('/api/sessions', json={
             'mode': 'course', 'courseId': None, 'artworkIds': ['art-04', 'art-01', 'art-03'],
         })
@@ -150,25 +141,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(response.json['artworkIds'], ['art-01', 'art-03', 'art-04'])
         self.assertIsNone(response.json['courseId'])
         with sqlite3.connect(self.config['DATABASE']) as db:
-            self.assertEqual(db.execute('SELECT id,data FROM courses ORDER BY id').fetchall(), courses_before)
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='courses'").fetchone())
             self.assertEqual(db.execute('SELECT route,artwork_ids FROM TourSession').fetchone(),
                              (None, '["art-01", "art-03", "art-04"]'))
         for ids in ([], ['art-04', 'art-04'], ['art-05']):
             self.assertEqual(self.client.post('/api/sessions', json={
                 'mode': 'course', 'artworkIds': ids,
             }).status_code, 400)
-
-    def test_legacy_course_requests_also_store_clockwise_artwork_order(self):
-        for course_id, ids in (('B', ['art-03', 'art-02', 'art-01']),
-                               ('custom', ['art-04', 'art-02'])):
-            with self.subTest(course_id=course_id):
-                response = self.client.post('/api/sessions', json={
-                    'mode': 'course', 'courseId': course_id, 'artworkIds': ids,
-                })
-                self.assertEqual(response.status_code, 201)
-                expected = sorted(ids)
-                self.assertEqual(response.json['artworkIds'], expected)
-                self.assertEqual(self.client.get(response.headers['Location']).json['artworkIds'], expected)
 
 
 if __name__ == "__main__":

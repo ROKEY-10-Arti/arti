@@ -1,7 +1,6 @@
-"""관리 대상: 작품 정보와 로봇의 최신 평면 pose."""
+"""관리 대상: 작품 정보."""
 
 import math
-import re
 
 from flask import abort, jsonify
 from database import ARTWORK_SELECT
@@ -11,28 +10,12 @@ ARTWORK_FIELDS = {"artist_name": 200, "theme": 200, "artwork_title": 200, "descr
                   "image_alt": 500, "location": 64}
 
 
-def robot_data(row):
-    return {
-        "robot_id": row["robot_id"], "active": bool(row["active"]),
-        "pose": None if row["x"] is None else {
-            "x": row["x"], "y": row["y"], "theta": row["theta"],
-        },
-        "frame_id": row["frame_id"], "pose_updated_at": row["pose_updated_at"],
-    }
-
-
-def register_managed_data(app, get_db, json_body, now_ms):
+def register_managed_data(app, get_db, json_body):
     def find_artwork(artwork_id):
         row = get_db().execute(ARTWORK_SELECT + " WHERE artwork_id = ?", (artwork_id,)).fetchone()
         if row is None:
             abort(404, description="등록되지 않은 작품 ID입니다.")
         return dict(row)
-
-    def find_robot(robot_id):
-        row = get_db().execute("SELECT * FROM Pose WHERE robot_id = ?", (robot_id,)).fetchone()
-        if row is None:
-            abort(404, description="등록되지 않은 로봇입니다.")
-        return row
 
     @app.get("/api/artworks")
     def list_artworks():
@@ -66,53 +49,3 @@ def register_managed_data(app, get_db, json_body, now_ms):
             db.execute(f"UPDATE Art SET {fields} WHERE artwork_id = ?",
                        [value.strip() if isinstance(value, str) else value for value in body.values()] + [artwork_id])
         return jsonify(find_artwork(artwork_id))
-
-    @app.get("/api/robots")
-    def list_robots():
-        from flask import request
-        active = request.args.get("active", "true")
-        if active not in {"true", "false", "all"}:
-            abort(400, description="active는 true, false 또는 all이어야 합니다.")
-        if active == "all":
-            rows = get_db().execute("SELECT * FROM Pose ORDER BY robot_id")
-        else:
-            rows = get_db().execute("SELECT * FROM Pose WHERE active = ? ORDER BY robot_id",
-                                    (int(active == "true"),))
-        return jsonify(robots=[robot_data(row) for row in rows])
-
-    @app.get("/api/robots/<robot_id>")
-    def get_robot(robot_id):
-        return jsonify(robot_data(find_robot(robot_id)))
-
-    @app.put("/api/robots/<robot_id>")
-    def update_robot(robot_id):
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", robot_id):
-            abort(400, description="로봇 ID는 영문, 숫자, 밑줄, 하이픈 1~64자입니다.")
-        body = json_body({"active", "pose", "frame_id"})
-        if not isinstance(body.get("active"), bool):
-            abort(400, description="active는 true 또는 false여야 합니다.")
-        if "pose" not in body:
-            abort(400, description="pose를 보내 주세요. 위치를 모르면 null을 사용하세요.")
-        pose = body["pose"]
-        if pose is not None:
-            if not isinstance(pose, dict) or set(pose) != {"x", "y", "theta"}:
-                abort(400, description="pose는 x, y, theta를 모두 포함해야 합니다.")
-            for value in pose.values():
-                if (isinstance(value, bool) or not isinstance(value, (int, float))
-                        or not -1e12 <= value <= 1e12 or not math.isfinite(value)):
-                    abort(400, description="pose에는 유한한 숫자를 사용하세요. 허용 범위는 ±1e12입니다.")
-        frame = body.get("frame_id", "map")
-        if not isinstance(frame, str) or not frame.strip() or len(frame) > 100:
-            abort(400, description="frame_id는 비어 있지 않은 100자 이내 문자열이어야 합니다.")
-        db = get_db()
-        with db:
-            db.execute(
-                "INSERT INTO Pose (robot_id, active, x, y, theta, frame_id, pose_updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(robot_id) DO UPDATE SET "
-                "active=excluded.active, x=excluded.x, y=excluded.y, "
-                "theta=excluded.theta, frame_id=excluded.frame_id, pose_updated_at=excluded.pose_updated_at",
-                (robot_id, int(body["active"]), pose["x"] if pose else None,
-                 pose["y"] if pose else None, pose["theta"] if pose else None,
-                 frame.strip(), now_ms() if pose else None),
-            )
-        return jsonify(robot_data(find_robot(robot_id)))

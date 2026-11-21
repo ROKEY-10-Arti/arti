@@ -179,7 +179,7 @@ class PreparationApiTest(unittest.TestCase):
         self.manager = self.app.extensions['robot_preparation']
         self.addCleanup(self.manager.stop)
         self.client = self.app.test_client()
-        self.session = self.client.post('/api/sessions', json=dict(mode='course', courseId='A', artworkIds=['art-01','art-02','art-03'])).json
+        self.session = self.client.post('/api/sessions', json=dict(mode='course', courseId=None, artworkIds=['art-01','art-02','art-03'])).json
         self.url = '/api/sessions/' + self.session['id']
 
     def test_start_gate_persistence_stream_and_duplicate_requests(self):

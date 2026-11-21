@@ -27,7 +27,7 @@ class AdminAuthTest(unittest.TestCase):
                                                 "csrf_token": self.token()})
 
     def test_public_kiosk_still_works_and_management_requires_login(self):
-        for path in ("/", "/api/catalog", "/api/artworks", "/api/robots", "/api/health"):
+        for path in ("/", "/api/catalog", "/api/artworks", "/api/health"):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             response.close()
@@ -43,7 +43,6 @@ class AdminAuthTest(unittest.TestCase):
     def test_direct_api_writes_are_rejected_without_login(self):
         original = self.client.get("/api/artworks/001").json
         self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "forbidden"}).status_code, 401)
-        self.assertEqual(self.client.put("/api/robots/robot-01", json={"active": False, "pose": None}).status_code, 401)
         self.assertEqual(self.client.get("/api/artworks/001").json, original)
 
     def test_first_account_is_local_only_and_cannot_be_overwritten(self):
@@ -139,17 +138,3 @@ class AdminAuthTest(unittest.TestCase):
         result = self.client.post("/login?next=https://example.com", data=form)
         self.assertEqual(result.headers["Location"], "/data")
         self.assertEqual(self.client.get("/data").headers["Cache-Control"], "no-store")
-
-    def test_machine_token_only_allows_robot_pose_ingestion(self):
-        self.app.config["ROBOT_API_TOKEN"] = "test-only-machine-token"
-        headers = {"Authorization": "Bearer test-only-machine-token"}
-        response = self.client.put("/api/robots/robot-01", headers=headers, json={
-            "active": True, "pose": {"x": 1, "y": 2, "theta": 0},
-        })
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/sessions", headers=headers).status_code, 401)
-        self.assertEqual(self.client.patch("/api/artworks/001", headers=headers, json={"artwork_title": "no"}).status_code, 401)
-        self.assertEqual(self.client.put("/api/robots/robot-01", headers={"Authorization": "Bearer wrong"},
-                                         json={"active": False, "pose": None}).status_code, 401)
-        self.assertEqual(self.client.put("/api/robots/robot-01", headers={"Authorization": "Bearer 틀린토큰"},
-                                         json={"active": False, "pose": None}).status_code, 401)

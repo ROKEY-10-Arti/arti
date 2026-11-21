@@ -53,7 +53,7 @@ class SimulatorTest(unittest.TestCase):
         self.assertEqual(self.client.patch('/api/sessions/'+sid, json={'status': 'active'}).status_code, 200)
 
     def test_normal_kiosk_call_and_register_still_work(self):
-        session = self.client.post('/api/sessions', json={'mode': 'course', 'courseId': 'A', 'artworkIds': ['art-01','art-02','art-03']}).json
+        session = self.client.post('/api/sessions', json={'mode': 'course', 'courseId': None, 'artworkIds': ['art-01','art-02','art-03']}).json
         sid = session['id']
         self.assertEqual(self.client.post('/api/sessions/'+sid+'/preparation', json={}).status_code, 202)
         self.send('arrived', session_id=sid)

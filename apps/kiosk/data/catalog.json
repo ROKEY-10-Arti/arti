@@ -49,37 +49,6 @@
       "y": 3.735
     }
   ],
-  "courses": [
-    {
-      "id": "A",
-      "name": "왼쪽부터 둘러보기",
-      "label": "추천 A 코스",
-      "description": "작품 1 → 작품 2 → 작품 3 · 왼쪽 통로에서 시작해요.",
-      "ids": [
-        "art-01",
-        "art-02",
-        "art-03"
-      ],
-      "minutes": 15,
-      "tag": "왼쪽부터",
-      "theme": "자연 · 색채 · 추상"
-    },
-    {
-      "id": "B",
-      "name": "오른쪽부터 둘러보기",
-      "label": "추천 B 코스",
-      "description": "작품 3 → 작품 2 → 작품 1 · 오른쪽 통로에서 시작해요.",
-      "ids": [
-        "art-03",
-        "art-02",
-        "art-01"
-      ],
-      "minutes": 15,
-      "tag": "오른쪽부터",
-      "theme": "추상 · 색채 · 자연"
-    }
-  ],
-  "version": "gallery-three-artworks-v1",
   "artwork_version": "seoul-collection-v1",
   "artwork_content_version": "simple-artwork-content-v1",
   "artwork_artist_version": "seoul-artist-names-v1",

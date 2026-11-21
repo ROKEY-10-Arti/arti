@@ -17,7 +17,7 @@ class DatabaseSchemaTest(unittest.TestCase):
         self.path = Path(self.temp.name) / 'test.sqlite3'
         self.config = {'TESTING': True, 'DATABASE': self.path, 'ROS_PREPARATION_REQUIRED': False}
 
-    def test_requested_tables_values_and_unknown_pose(self):
+    def test_requested_tables_values_and_removed_tables(self):
         client = create_app(self.config).test_client()
         with sqlite3.connect(self.path) as db:
             rows = db.execute('SELECT artwork_id, artwork_title, artist_name, location, theme, x, y FROM Art ORDER BY artwork_id').fetchall()
@@ -27,11 +27,10 @@ class DatabaseSchemaTest(unittest.TestCase):
                 ('003', 'A Fold in Silver', '이준혁', 'location3', 'abstract', -1.265, 5.145),
                 ('004', 'A Spectrum over the River', '전유한', 'location4', 'color', 0.245, 3.735),
             ])
-            self.assertEqual(db.execute('SELECT robot_id, x, y, theta FROM Pose ORDER BY robot_id').fetchall(),
-                             [('robot-01', None, None, None), ('robot-02', None, None, None)])
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertTrue({'Pose', 'courses', 'robots'}.isdisjoint(tables))
             self.assertEqual(db.execute('SELECT COUNT(*) FROM Log').fetchone()[0], 0)
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 7)
-        self.assertEqual(len(client.get('/api/robots?active=all').json['robots']), 2)
 
     def test_management_and_tour_write_to_requested_columns(self):
         client = login_admin(create_app(self.config).test_client())
@@ -39,18 +38,15 @@ class DatabaseSchemaTest(unittest.TestCase):
         result = client.patch('/api/artworks/001', json=body)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json['artwork_id'], '001')
-        pose = {'x': 0.5, 'y': 1, 'theta': -1.2}
-        self.assertEqual(client.put('/api/robots/robot-02', json={'active': True, 'pose': pose}).status_code, 200)
-        session = client.post('/api/sessions', json={'mode': 'course', 'courseId': 'A', 'artworkIds': ['art-01', 'art-02', 'art-03']}).json
+        session = client.post('/api/sessions', json={'mode': 'course', 'courseId': None, 'artworkIds': ['art-01', 'art-02', 'art-03']}).json
         url = '/api/sessions/' + session['id']
         client.patch(url, json={'status': 'active'})
         completed = client.patch(url, json={'status': 'completed'}).json
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute("SELECT artwork_title, artist_name, location, x, y FROM Art WHERE artwork_id='001'").fetchone(),
                              ('Edited Title', 'Edited Artist', '009', -2.5, 8))
-            self.assertEqual(db.execute("SELECT x,y,theta FROM Pose WHERE robot_id='robot-02'").fetchone(), (.5, 1, -1.2))
             self.assertEqual(db.execute('SELECT created_time, mode, route, status, end_time, record_id FROM TourSession').fetchone(),
-                             (session['createdAt'], 'course', 'A', 'completed', completed['endedAt'], session['id']))
+                             (session['createdAt'], 'course', None, 'completed', completed['endedAt'], session['id']))
         restarted = create_app(self.config).test_client()
         self.assertEqual(restarted.get('/api/artworks/001').json, result.json)
         self.assertEqual(restarted.get(url).json, completed)
@@ -65,7 +61,7 @@ class DatabaseSchemaTest(unittest.TestCase):
                 self.assertEqual(client.get('/api/artworks/001').json, original)
         self.assertEqual(client.patch('/api/artworks/001', json={'x': None, 'y': None}).status_code, 200)
 
-    def create_legacy_database(self, bad_pose=False):
+    def create_legacy_database(self, bad_session=False):
         catalog = json.loads((ROOT / 'data/catalog.json').read_text())
         fields = ('artwork_index', 'title', 'title_en', 'artist_name', 'theme', 'description')
         with sqlite3.connect(self.path) as db:
@@ -80,37 +76,37 @@ class DatabaseSchemaTest(unittest.TestCase):
             db.execute('INSERT INTO catalog_migrations VALUES (?)', (catalog['artwork_version'],))
             db.execute('INSERT INTO catalog_migrations VALUES (?)', (catalog['artwork_content_version'],))
             db.execute('CREATE TABLE robots (robot_id TEXT PRIMARY KEY, active INTEGER, pose_x REAL, pose_y REAL, pose_theta REAL, frame_id TEXT, pose_updated_at INTEGER)')
-            db.execute("INSERT INTO robots VALUES ('robot-01', ?, 2.5, 3, 1.5, 'map', 1234)", (2 if bad_pose else 1,))
+            db.execute("INSERT INTO robots VALUES ('robot-01', 1, 2.5, 3, 1.5, 'map', 1234)")
             # 로봇 배정 컬럼이 없던 버전에서도 이전할 수 있어야 합니다.
             db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, mode TEXT, course_id TEXT, artwork_ids TEXT, visited_ids TEXT, status TEXT, created_at INTEGER, started_at INTEGER, ended_at INTEGER)')
-            db.execute("INSERT INTO sessions VALUES ('old-record', 'course', 'A', '[\"art-01\"]', '[\"art-01\"]', 'completed', 1000, 2000, 3000)")
+            db.execute("INSERT INTO sessions VALUES ('old-record', 'course', 'A', '[\"art-01\"]', '[\"art-01\"]', ?, 1000, 2000, 3000)",
+                       ('broken' if bad_session else 'completed',))
 
-    def test_migration_preserves_edits_pose_logs_and_runs_once(self):
+    def test_migration_preserves_edits_logs_and_runs_once(self):
         self.create_legacy_database()
         client = create_app(self.config).test_client()
         art = client.get('/api/artworks/001').json
         self.assertEqual((art['artwork_title'], art['description'], art['theme']),
                          ('My Edited Title', '보존할 설명', 'nature'))
-        self.assertEqual(client.get('/api/robots/robot-01').json['pose'], {'x': 2.5, 'y': 3, 'theta': 1.5})
         record = client.get('/api/sessions/old-record').json
         self.assertEqual((record['courseId'], record['createdAt'], record['endedAt']), ('A', 1000, 3000))
         with sqlite3.connect(self.path) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            self.assertTrue({'Art', 'Pose', 'Log'}.issubset(tables))
-            self.assertTrue({'artworks', 'robots', 'sessions'}.isdisjoint(tables))
+            self.assertTrue({'Art', 'TourSession', 'Log'}.issubset(tables))
+            self.assertTrue({'artworks', 'robots', 'sessions', 'Pose', 'courses'}.isdisjoint(tables))
             self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         restarted = create_app(self.config).test_client()
         self.assertEqual(restarted.get('/api/artworks/001').json, art)
         self.assertEqual(restarted.get('/api/sessions/old-record').json, record)
 
     def test_failed_migration_rolls_back_original_tables_and_data(self):
-        self.create_legacy_database(bad_pose=True)
+        self.create_legacy_database(bad_session=True)
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             with self.assertRaises(sqlite3.IntegrityError):
                 initialize_database(db, ROOT)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM artworks').fetchone()[0], 3)
-            self.assertEqual(db.execute('SELECT active FROM robots').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT active FROM robots').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 1)
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='Art'").fetchone())
 
