@@ -137,6 +137,7 @@ ros2 launch arti_pc2_nav a_course.launch.py enable_motion:=true
 - localization·Nav2를 따로 띄웠다면 `nav:=false`.
 
 Nav2는 이 패키지의 `config/nav2_real.yaml`을 쓴다. TurtleBot4 기본 `nav2.yaml`과 다른 값:
+- 회전 최고 속도 1.0 → **0.5** rad/s: DWB `max_vel_theta`, spin `max_rotational_vel`, velocity_smoother 회전 상한 (변경 ⑮, 2026-11-21: 회전이 너무 빠름)
 - footprint 팔각형 반지름 0.189 → **0.28**, `inflation_radius` 0.22 → **0.45** (변경 ⑬, 2026-11-21: 위에 올린 노트북이 장애물에 부딪힘. 다른 로봇도 같은 노트북이라 더 떨어져 다님. follow 팀 robot_radius 0.28과 같음)
 - `xy_goal_tolerance` 0.25 → **0.12** (작품 4 반원이 작아서(당시 r=0.43, ⑭에서 0.6) 0.25면 반원 밖에 정지)
 - local·global costmap `transform_tolerance` 0.3 → **1.0** s (와이파이·서버 경유로 AMCL TF가 0.9 s 늦게 와서 Nav2가 출발하자마자 실패한 적 있음)

@@ -45,7 +45,14 @@ controller_server:
       min_vel_y: 0.0
       max_vel_x: 0.26
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      # [코스 관람 변경 ⑮] 회전 최고 속도 1.0 → 0.5 rad/s (약 57°/s → 29°/s, 2026-11-21)
+      #   문제점: 현장 시험에서 제자리 회전·방향 전환이 너무 빨랐다.
+      #   바꾼 것: 회전 상한 세 곳을 같이 50%로 — DWB max_vel_theta(주행 중 방향 틀기), behavior_server spin
+      #           max_rotational_vel(키오스크⑦·도크⑨ 앞 제자리 회전), velocity_smoother 회전 상한(최종 cmd_vel). 하나만 낮추면 나머지가 그대로라
+      #           일부 회전만 느려진다. 우리 노드는 cmd_vel을 직접 안 내므로 이 세 값이 모든 회전에 적용된다.
+      #   주의:   회전 시간이 약 2배 (180° ≈ 6~7 s, face_timeout 20 s 안). spin min_rotational_vel 0.4는 0.5보다 작아야 한다.
+      #           가속도(acc_lim_theta·rotational_acc_lim 3.2)는 그대로.
+      max_vel_theta: 0.5
       min_speed_xy: 0.0
       max_speed_xy: 0.26
       min_speed_theta: 0.0
@@ -245,7 +252,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    # [코스 관람 변경 ⑮] 1.0 → 0.5 (회전이 너무 빠름. 이유는 controller_server FollowPath max_vel_theta 주석)
+    max_rotational_vel: 0.5
     min_rotational_vel: 0.4
     rotational_acc_lim: 3.2
 
@@ -267,8 +275,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
+    # [코스 관람 변경 ⑮] 회전(세 번째 값) ±1.0 → ±0.5 (회전이 너무 빠름. 이유는 controller_server FollowPath max_vel_theta 주석)
+    max_velocity: [0.26, 0.0, 0.5]
+    min_velocity: [-0.26, 0.0, -0.5]
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
     odom_topic: "odom"
