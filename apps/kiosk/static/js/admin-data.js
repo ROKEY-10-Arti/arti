@@ -13,15 +13,6 @@ export function artworkPayload(values) {
   for (const axis of ['x','y']) if (axis in payload) payload[axis] = numericValue(payload[axis]);
   return payload;
 }
-export function posePayload(values, active) {
-  const pose = Object.fromEntries(['x','y','theta'].map(key => [key, numericValue(values[key])]));
-  const present = Object.values(pose).filter(value => value !== null).length;
-  if (present !== 0 && present !== 3) throw new Error('위치는 x·y·theta를 모두 입력하거나 모두 비워 주세요.');
-  return {active, frame_id: values.frame_id, pose: present ? pose : null};
-}
-export function robotRows(robots) {
-  return robots.length ? robots.map(robot => `<tr><th scope="row">${escape(robot.robot_id)}</th><td>${robot.pose ? escape(robot.pose.x) : '수신 전'}</td><td>${robot.pose ? escape(robot.pose.y) : '수신 전'}</td><td>${robot.pose ? escape(robot.pose.theta) : '수신 전'}</td><td>${robot.active ? '활성' : '비활성'}</td><td>${escape(robot.frame_id)}</td><td>${escape(formatTime(robot.pose_updated_at))}</td></tr>`).join('') : '<tr><td colspan="7" class="empty">등록된 로봇이 없습니다.</td></tr>';
-}
 export function logRows(logs, openDetails = new Set()) {
   if (!logs.length) return '<tr><td colspan="4" class="empty">조건에 맞는 수신 로그가 없습니다.</td></tr>';
   return logs.map(entry => {

@@ -29,7 +29,6 @@ class Preparation:
     manual_registration: bool = False
     tour_started: bool = False
     preparation_state: str = ''
-    ready_at: float = 0.0
     tour_state: str = ""
     artwork_id: int = 0
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -219,6 +218,8 @@ class RosPreparationTransport:
                         job.motion_pending = False
                     terminal.set()
                 else:
+                    if kind == 'start_tour':
+                        job.update('touring', '아티와 함께 관람 중이에요.', 1.0)
                     handle.get_result_async().add_done_callback(result_done)
                     if job.cancel.is_set():
                         request_cancel(handle)
@@ -289,9 +290,9 @@ class RosPreparationTransport:
 
 
 class PreparationManager:
-    def __init__(self, transport, persist, finish, record_artwork):
+    def __init__(self, transport, persist, activate, finish, record_artwork):
         self.transport, self.persist = transport, persist
-        self.finish, self.record_artwork = finish, record_artwork
+        self.activate, self.finish, self.record_artwork = activate, finish, record_artwork
         self.jobs = {}
         self.robot_jobs = {}
         self.lock = threading.Lock()
@@ -309,7 +310,7 @@ class PreparationManager:
                     with previous.lock:
                         if previous.robot_id == job.robot_id and (
                             previous.motion_pending or previous.phase in {
-                                'calling', 'moving', 'arrived', 'registering', 'ready', 'touring', 'cancelling'
+                                'calling', 'moving', 'arrived', 'registering', 'ready', 'starting', 'touring', 'cancelling'
                             }
                         ):
                             raise PreparationError('이 관람을 담당하는 아티가 사용 중이에요.')
@@ -334,11 +335,11 @@ class PreparationManager:
                 return '취소 및 정지 확인 중'
             if job.phase == 'error' and job.motion_pending:
                 return '로봇 작업 종료 미확인'
+            if job.phase == 'starting':
+                return '관람 시작 응답 대기 중'
             if job.phase == 'touring':
                 return (feedback_activity('start_tour', job.tour_state, job.artwork_id)
                         or '관람 진행 중 · 세부 상태 미수신')
-            if job.phase == 'ready' and time.monotonic() - job.ready_at < 120:
-                return '관람 준비 완료 · 관람 시작 대기 중'
             if job.phase in {'calling', 'moving', 'arrived', 'registering'}:
                 return feedback_activity('prepare_tour', job.preparation_state) or '관람 준비 응답 대기 중'
             return None
@@ -356,7 +357,7 @@ class PreparationManager:
                     if previous.phase != 'error':
                         raise PreparationError('오류 화면에서 dev2 준비 완료 신호를 사용할 수 있어요.')
                     previous.cancel.set()
-            job = Preparation(session, phase='ready', message='dev2 테스트 신호로 관람 준비를 완료했어요. 관람 시작하기를 눌러 주세요.',
+            job = Preparation(session, phase='ready', message='dev2 테스트 신호로 관람 준비를 완료했어요. 관람 화면으로 이동해요.',
                               robot_id='DEV-ARTI', robot_namespace='/dev_arti',
                               visitor_id='dev-visitor-' + session['id'], progress=1.0,
                               dev_mode=True)
@@ -387,14 +388,24 @@ class PreparationManager:
                         job.preparation_state = message.state
 
         try:
-            result = self.transport.action(job, 'prepare_tour', feedback)
+            self.transport.action(job, 'prepare_tour', feedback)
             with job.lock:
-                if job.update('ready', result.message or '관람을 시작할 준비가 됐어요.', 1.0):
-                    job.ready_at = time.monotonic()
+                if job.cancel.is_set():
+                    return
+                job.tour_started = True
+                try:
+                    if not self.activate(job):
+                        raise PreparationError('이미 상태가 변경된 관람이에요.')
+                except Exception:
+                    job.tour_started = False
+                    raise
+                job.update('starting', '아티가 관람을 시작하고 있어요.', 1.0)
         except Exception as error:
             with job.lock:
                 if job.phase != 'cancelling' or job.motion_pending:
                     self._error(job, error)
+            return
+        self._tour(job)
 
     def register(self, job):
         with job.lock:
@@ -402,23 +413,13 @@ class PreparationManager:
                 raise PreparationError('현재 등록을 수동으로 시작할 수 없어요.')
             job.update('registering', '정면을 바라보고 잠시 기다려 주세요.')
 
-    def start_tour(self, job):
-        with job.lock:
-            if job.dev_mode or job.manual_registration or job.tour_started:
-                return
-            job.tour_started = True
-            launch = job.update('touring', '아티와 함께 관람 중이에요.')
-        if launch:
-            threading.Thread(target=self._tour, args=(job,), daemon=True).start()
-        else:
-            self.finish(job, 'cancelled')
-            job.tour_done.set()
-
     def _tour(self, job):
         def feedback(message):
             with job.lock:
                 if job.cancel.is_set():
                     return
+                if job.phase == 'starting':
+                    job.update('touring', '아티와 함께 관람 중이에요.', 1.0)
                 job.tour_state, job.artwork_id = message.state, message.artwork_id
             if message.state == 'ARTWORK_COMPLETED' and message.artwork_id > 0:
                 self.record_artwork(job, message.artwork_id)
@@ -479,9 +480,9 @@ class PreparationManager:
         self.transport.stop()
 
 
-def register_robot_preparation(app, get_session, serialize_session, persist, finish, record_artwork, description, record_event):
+def register_robot_preparation(app, get_session, serialize_session, persist, activate, finish, record_artwork, description, record_event):
     transport = app.config.get('PREPARATION_TRANSPORT') or RosPreparationTransport(description, record_event)
-    manager = PreparationManager(transport, persist, finish, record_artwork)
+    manager = PreparationManager(transport, persist, activate, finish, record_artwork)
     app.extensions['robot_preparation'] = manager
     if not app.testing or app.config.get('PREPARATION_TRANSPORT'):
         transport.start()

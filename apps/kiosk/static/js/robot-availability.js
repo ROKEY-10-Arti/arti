@@ -1,4 +1,4 @@
-// ROS 2 Bool 토픽을 구독하는 Flask가 이 연결 하나로 1초마다 최신 상태를 전달합니다.
+// Flask가 로봇 배터리·도킹 상태로 계산한 호출 가능 여부를 1초마다 전달합니다.
 export function subscribeRobotAvailability(onChange, {
   EventSourceImpl = globalThis.EventSource,
   now = Date.now,
@@ -26,10 +26,7 @@ export function subscribeRobotAvailability(onChange, {
         throw new Error('Invalid availability event');
       }
       lastFrameAt = now();
-      const state = {status:snapshot.status, available:snapshot.available};
-      if (typeof snapshot.dev_ready === 'boolean') state.devReady = snapshot.dev_ready;
-      if (snapshot.dev_value === null || typeof snapshot.dev_value === 'boolean') state.devValue = snapshot.dev_value;
-      emit(state);
+      emit({status:snapshot.status, available:snapshot.available});
     } catch {
       emit({status:'disconnected', available:null});
     }

@@ -1,6 +1,6 @@
 import {connectSimulator,stopSimulator} from './simulator-feed.js';
 import { artworks, getArtwork, artImage, loadCatalog, tourArtworkId, catalogArtworkId } from './data.js';
-import { createSession, getSession, beginPreparation, registerVisitor, cancelPreparation, startSession, cancelSession, toggleDevAvailability, stopDevAvailability, injectDevPreparationReady, DEMO_MODE } from './services.js';
+import { createSession, getSession, beginPreparation, registerVisitor, cancelPreparation, startSession, cancelSession, injectDevPreparationReady } from './services.js';
 import { content } from './content.js';
 import { serviceTerms } from './terms.js';
 import { galleryMap } from './gallery-map.js';
@@ -32,7 +32,7 @@ const icons = {
 };
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.spark}</svg>`;
 const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-const state = { page: 'home', mode: null, selectedArtworkIds: [], session: null, stage: 'calling', visited: [], busy: false, termsAccepted: false, availabilityChecked: false, usageConfirmed: false, robotAvailability: {status:'waiting', available:null}, devReady:false, devValue:null, devBusy:false, devPreparationBusy:false };
+const state = { page: 'home', mode: null, selectedArtworkIds: [], session: null, stage: 'calling', visited: [], busy: false, termsAccepted: false, availabilityChecked: false, usageConfirmed: false, robotAvailability: {status:'waiting', available:null}, devPreparationBusy:false };
 let simulationEnabled=false;
 let simulatedRuntime={};
 let runtimeKey='';
@@ -45,12 +45,37 @@ let overlayTrigger;
 const handedOffSessions = new Set();
 const autoReturn = createAutoReturn({onReturn: returnHome});
 function rememberPreparation(id) { try { if (id) sessionStorage.setItem('arti-preparation', id); else sessionStorage.removeItem('arti-preparation'); } catch {} }
+let simulatedStart = null;
+async function startSimulatedTour() {
+  const session = state.session;
+  if (simulatedStart === session.id || session.status !== 'calling') return;
+  simulatedStart = session.id;
+  try {
+    const active = await startSession(session);
+    if (state.session?.id !== session.id || state.page !== 'session') return;
+    state.session = active;
+    showFarewell();
+  } catch (error) {
+    toast(error.message || '관람 화면을 열지 못했어요.');
+  } finally {
+    if (simulatedStart === session.id) simulatedStart = null;
+  }
+}
 function connectPreparation() {
   stopPreparation?.();
   const sessionId = state.session.id;
   stopPreparation = subscribePreparation(sessionId, snapshot => {
     if (state.session?.id !== sessionId) return;
     const next = snapshot.connected ? snapshot : {...preparation, connected:false};
+    if (state.page === 'session' && next.connected) {
+      if (['touring', 'completed'].includes(next.phase)) {
+        state.session.status = next.phase === 'completed' ? 'completed' : 'active';
+        return showFarewell();
+      }
+      if (next.phase === 'ready' && (next.dev_mode || next.manual_registration)) {
+        startSimulatedTour();
+      }
+    }
     if (JSON.stringify(preparation) === JSON.stringify(next)) return;
     preparation = next;
     if (next.connected) {
@@ -75,7 +100,7 @@ function header() {
 }
 
 function footer() {
-  return `<footer class="footer"><span><b>ART I GALLERY</b><span class="footer-divider">/</span> YOUR PERSONAL ART COMPANION</span><a href="/data" target="_blank" rel="noopener">관리자 페이지</a><div class="dev-controls" ${adminAuthenticated ? '' : 'hidden'}><button class="dev-toggle" data-action="dev-toggle" title="/is_available에 true/false를 1초마다 테스트 발행" ${!state.devReady || state.devBusy ? 'disabled' : ''}>dev1 <span class="dev-value">${state.devValue === null ? '대기' : String(state.devValue)}</span></button><button class="dev-toggle dev-preparation" data-action="dev-ready" title="오류 화면에 테스트용 관람 준비 완료 신호를 넣습니다" ${canUseDevPreparation() ? '' : 'disabled'}>dev2 <span>준비 완료 신호</span></button><button class="dev-stop" data-action="dev-stop" ${state.devValue === null ? 'hidden' : ''}>테스트 종료</button><span class="dev-publishing" ${state.devValue === null ? 'hidden' : ''}>1Hz 테스트 발행 중</span></div><span class="footer-note">${DEMO_MODE ? '로봇 준비 연동' : ''}</span></footer>`;
+  return `<footer class="footer"><span><b>ART I GALLERY</b><span class="footer-divider">/</span> YOUR PERSONAL ART COMPANION</span><a href="/data" target="_blank" rel="noopener">관리자 페이지</a><div class="dev-controls" ${adminAuthenticated ? '' : 'hidden'}><button class="dev-preparation" data-action="dev-ready" title="오류 화면에 테스트용 관람 준비 완료 신호를 넣습니다" ${canUseDevPreparation() ? '' : 'disabled'}>dev2 <span>준비 완료 신호</span></button></div><span class="footer-note">로봇 준비 연동</span></footer>`;
 }
 
 function sectionTop(eyebrow, title, description, back = 'mode') {
@@ -146,7 +171,7 @@ function freePage() {
 function sessionPage() {
   const s = state.session;
   const phase = state.stage;
-  const titles = {calling:'아티를 호출하고 있어요', moving:'아티가 당신을 만나러 가고 있어요', arrived:'아티가 도착했어요!', registering:'함께할 관람객을 확인하고 있어요', waiting_ready:'관람 준비를 마무리하고 있어요', ready:'반가워요, 이제 함께 걸어볼까요?', error:'로봇 상태를 확인해 주세요', cancelling:'호출을 취소하고 있어요', cancelled:'호출이 취소됐어요'};
+  const titles = {calling:'아티를 호출하고 있어요', moving:'아티가 당신을 만나러 가고 있어요', arrived:'아티가 도착했어요!', registering:'함께할 관람객을 확인하고 있어요', waiting_ready:'관람 준비를 마무리하고 있어요', ready:'아티가 관람을 시작하고 있어요', starting:'아티가 관람을 시작하고 있어요', error:'로봇 상태를 확인해 주세요', cancelling:'호출을 취소하고 있어요', cancelled:'호출이 취소됐어요'};
   const registrationFailed = phase === 'error' && ['registering','waiting_ready'].includes(preparation.failure_phase);
   if (registrationFailed) titles.error = '관람객 등록에 실패했어요';
   const moving = ['calling','moving'].includes(phase === 'error' ? preparation.failure_phase : phase);
@@ -157,7 +182,6 @@ function sessionPage() {
   const message = connected ? preparation.message : '진행 상태 연결을 확인하고 있어요. 연결이 복구되면 이어서 표시해요.';
   const controls = phase === 'arrived' && preparation.manual_registration
     ? `<button class="button primary full" data-action="register" ${connected ? '' : 'disabled'}>아티 앞에 섰어요 · 등록 시작 ${icon('arrow')}</button>`
-    : phase === 'ready' ? `<button class="button primary full" data-action="start-tour" ${connected ? '' : 'disabled'}>관람 시작하기 ${icon('arrow')}</button>`
     : phase === 'error' && adminAuthenticated ? `<button class="button secondary full" data-action="dev-ready" ${canUseDevPreparation() ? '' : 'disabled'}>dev2 · 준비 완료 신호 넣기 ${icon('arrow')}</button>` : ['error','cancelled'].includes(phase) ? '' : `<div class="waiting-label"><span class="spinner"></span>${['moving','registering'].includes(phase) && connected ? `${Math.round(preparation.progress * 100)}%` : '응답 대기 중…'}</div>`;
   return `<div class="session-top"><div class="eyebrow">LET’S MEET</div><h1>${titles[phase] || titles.calling}</h1><p role="status">${esc(message)}</p></div><div class="session-layout"><div class="robot-panel session-robot-panel"><img class="session-robot-image" src="${robotImage.src}" alt="${robotImage.alt}" width="${robotImage.width}" height="${robotImage.height}" decoding="async"><div class="robot-name">${esc(s.robotId)}</div><span class="robot-panel-caption">YOUR PERSONAL ART COMPANION</span></div><div class="session-details"><ol class="session-steps">${['아티 호출','만남 장소 도착','관람객 등록 완료'].map((name,i) => `<li class="${i < prepStep ? 'done' : i === prepStep ? 'current' : ''}"><span>${i < prepStep ? icon('check') : String(i+1).padStart(2,'0')}</span><div><b>${name}</b>${i === prepStep ? '<small>로봇 응답 확인 중</small>' : ''}</div></li>`).join('')}</ol><div class="session-meeting">${icon('pin')}<div><b>키오스크 앞 · 관람객 스캔 지점</b><p>${s.mode === 'free' ? '자유 관람' : '코스 관람'} · ${s.artworkIds.length}개 작품</p></div></div>${controls}<p class="preview-note">${preparation.dev_mode ? 'dev2 화면 테스트 · 실제 로봇의 이동·등록 신호가 아닙니다.' : phase === 'error' && adminAuthenticated ? 'dev2로 준비 완료 신호를 넣어 다음 관람 화면을 테스트할 수 있어요.' : '아티 정면에 한 분만 서서 기다려 주세요.'}</p><button class="cancel-link" data-action="cancel-session">호출 취소하기</button></div></div>`;
 }
@@ -239,10 +263,6 @@ function availabilityNotice() {
 function receiveRobotAvailability(snapshot) {
   const changed = snapshot.status !== state.robotAvailability.status || snapshot.available !== state.robotAvailability.available;
   state.robotAvailability = snapshot;
-  if (snapshot.devReady !== undefined) state.devReady = snapshot.devReady;
-  else if (snapshot.status === 'disconnected') state.devReady = false;
-  if (snapshot.devValue !== undefined) state.devValue = snapshot.devValue;
-  syncDeveloperControls();
   const status = document.querySelector('.robot-status');
   if (status && !state.session) { status.innerHTML = '<i></i> ' + robotStatusLabel(); status.classList.toggle('is-unavailable', !hasAvailableRobot()); }
   const button = document.querySelector('[data-action="begin-visit"]');
@@ -270,42 +290,13 @@ async function completeDeveloperPreparation() {
     state.session.robotId = snapshot.robot_id;
     prepStep = 3;
     connectPreparation();
-    announce('dev2 준비 완료 신호를 넣었어요. 관람 시작하기를 눌러 주세요.');
+    announce('dev2 준비 완료 신호를 넣었어요.');
+    await startSimulatedTour();
   } catch (error) {
     toast(error.message || '테스트 신호를 넣지 못했어요. 다시 시도해 주세요.');
   } finally {
     state.devPreparationBusy = false;
     render();
-  }
-}
-
-function syncDeveloperControls() {
-  document.querySelectorAll('[data-action="dev-ready"]').forEach(button => { button.disabled = !canUseDevPreparation(); });
-  const button = document.querySelector('[data-action="dev-toggle"]');
-  if (!button) return;
-  button.disabled = !state.devReady || state.devBusy;
-  button.classList.toggle('is-publishing', state.devValue !== null);
-  button.querySelector('.dev-value').textContent = state.devValue === null ? '대기' : String(state.devValue);
-  const stop = document.querySelector('[data-action="dev-stop"]');
-  stop.hidden = state.devValue === null;
-  stop.disabled = state.devBusy;
-  document.querySelector('.dev-publishing').hidden = state.devValue === null;
-}
-
-async function changeDeveloperAvailability(action) {
-  if (state.devBusy) return;
-  state.devBusy = true;
-  syncDeveloperControls();
-  try {
-    const result = action === 'stop' ? await stopDevAvailability() : await toggleDevAvailability();
-    state.devReady = result.dev_ready;
-    state.devValue = result.dev_value;
-    announce(action === 'stop' ? '토픽 테스트 발행을 종료했어요.' : `is_available ${result.dev_value} 테스트 발행을 시작했어요.`);
-  } catch (error) {
-    toast(error.message || '테스트 값을 변경하지 못했어요. 다시 시도해 주세요.');
-  } finally {
-    state.devBusy = false;
-    syncDeveloperControls();
   }
 }
 
@@ -345,10 +336,6 @@ function confirmDialog(title, description, action) {
   showDialog(`<div class="confirm-content"><span class="confirm-icon">${icon('robot')}</span><h2>${title}</h2><p>${description}</p><div class="dialog-actions"><button class="button secondary" data-action="close-modal">계속 관람하기</button><button class="button primary" data-action="confirm">종료하기</button></div></div>`, title);
   dialogAction = action;
 }
-function help() {
-  return beginVisit();
-}
-
 async function callRobot() {
   if (!state.availabilityChecked || !state.usageConfirmed) { navigate('home'); return; }
   if (!state.termsAccepted) { navigate('terms'); return; }
@@ -370,6 +357,7 @@ async function callRobot() {
   finally { state.busy=false; render(); }
 }
 function showFarewell() {
+  if (overlay.firstElementChild) closeDialog();
   stopPreparation?.(); stopPreparation = null;
   rememberPreparation(null);
   handedOffSessions.add(state.session.id);
@@ -412,6 +400,7 @@ function watchSimulatedSession(){
       preparation={...data.preparation,connected:true};state.stage=preparation.phase;
       prepStep=({calling:0,moving:1,arrived:2,registering:2,waiting_ready:3,ready:3})[state.stage]??0;
       state.page='session';rememberPreparation(state.session.id);
+      if (state.stage === 'ready') startSimulatedTour();
     }else{
       showFarewell();
       return;
@@ -428,8 +417,6 @@ document.addEventListener('click', async event => {
   try {
   const action = target.dataset.action;
   if (action === 'view-art') return showArtwork(target.dataset.id);
-  if (action === 'dev-toggle') return await changeDeveloperAvailability('toggle');
-  if (action === 'dev-stop') return await changeDeveloperAvailability('stop');
   if (action === 'dev-ready') return await completeDeveloperPreparation();
   if (['home','mode','exhibition','usage'].includes(action)) return navigate(action);
   if (action === 'begin-visit') return await beginVisit();
@@ -443,7 +430,6 @@ document.addEventListener('click', async event => {
     return navigate('mode');
   }
   if (action === 'back') return goBack();
-  if (action === 'help') return await help();
   if (action === 'close-modal') return closeDialog();
   if (action === 'confirm') { const fn=dialogAction; closeDialog(); await fn?.(); return; }
   if (action === 'choose-mode') { state.mode=target.dataset.mode; navigate(state.mode === 'course' ? 'course' : 'free'); }
@@ -460,11 +446,6 @@ document.addEventListener('click', async event => {
     if (state.stage !== 'arrived' || !preparation.manual_registration) return;
     if (!preparation.connected) return;
     await registerVisitor(state.session);
-  }
-  if (action === 'start-tour') {
-    if (state.stage !== 'ready' || !preparation.connected) return;
-    state.session = await startSession(state.session);
-    showFarewell();
   }
   if (action === 'cancel-session') confirmDialog('아티 호출을 취소할까요?', '호출을 취소하면 관람 방법 선택으로 돌아가요.', async () => { await cancelCurrent(); history=['home','usage','terms']; state.page='mode'; render({focus:true,scroll:true}); });
   if (action === 'reset') return returnHome();
@@ -538,7 +519,7 @@ loadCatalog().then(async () => {
   if (pending) {
     try {
       const session=await getSession(pending);
-      if (session.status === 'calling') { state.session=session; state.mode=session.mode; state.selectedArtworkIds=session.artworkIds.map(catalogArtworkId); state.page='session'; history=['mode']; connectPreparation(); }
+      if (['calling', 'active'].includes(session.status)) { state.session=session; state.mode=session.mode; state.selectedArtworkIds=session.artworkIds.map(catalogArtworkId); state.page='session'; history=['mode']; connectPreparation(); }
       else rememberPreparation(null);
     } catch { rememberPreparation(null); }
   }

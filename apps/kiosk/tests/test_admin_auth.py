@@ -44,7 +44,6 @@ class AdminAuthTest(unittest.TestCase):
         original = self.client.get("/api/artworks/001").json
         self.assertEqual(self.client.patch("/api/artworks/001", json={"artwork_title": "forbidden"}).status_code, 401)
         self.assertEqual(self.client.put("/api/robots/robot-01", json={"active": False, "pose": None}).status_code, 401)
-        self.assertEqual(self.client.post("/api/dev/availability", json={"action": "toggle"}).status_code, 401)
         self.assertEqual(self.client.get("/api/artworks/001").json, original)
 
     def test_first_account_is_local_only_and_cannot_be_overwritten(self):

@@ -69,7 +69,7 @@ class FakeTransport:
 class PreparationTest(unittest.TestCase):
     def setUp(self):
         self.transport = FakeTransport()
-        self.manager = PreparationManager(self.transport, lambda _: None, lambda *_: None, lambda *_: None)
+        self.manager = PreparationManager(self.transport, lambda _: None, lambda _: True, lambda *_: None, lambda *_: None)
         self.addCleanup(self.manager.stop)
 
     def test_mode_assignment_and_same_robot_exclusion(self):
@@ -80,7 +80,7 @@ class PreparationTest(unittest.TestCase):
         with self.assertRaises(PreparationError):
             self.manager.start(dict(id='other', mode='free'))
         self.transport.prepare_release.set()
-        until(lambda: free.phase == course.phase == 'ready')
+        until(lambda: free.phase == course.phase == 'completed')
 
     def test_cancel_requires_terminal_action_and_ignores_late_feedback(self):
         self.transport.allow_stop.clear()
@@ -130,7 +130,7 @@ class ActionResponseTest(unittest.TestCase):
 
     def test_lost_server_keeps_job_blocked_until_late_terminal_result(self):
         finish = Mock()
-        manager = PreparationManager(self.transport, Mock(), finish, Mock())
+        manager = PreparationManager(self.transport, Mock(), Mock(), finish, Mock())
         manager.jobs[self.job.session['id']] = self.job
         self.goal_response.set_result(self.handle)
         self.client.server_is_ready.return_value = False
@@ -195,9 +195,10 @@ class PreparationApiTest(unittest.TestCase):
         self.assertEqual(self.client.post(self.url+'/preparation/register', json={}).status_code, 409)
         self.assertEqual(self.client.patch(self.url, json=dict(status='active')).status_code, 409)
         self.transport.prepare_release.set()
-        until(lambda: job.phase == 'ready')
+        until(lambda: job.phase == 'touring')
+        self.assertEqual(self.client.get(self.url).json['status'], 'active')
         stream = self.client.get(self.url+'/preparation/events', buffered=False)
-        self.assertIn(b'"phase": "ready"', next(iter(stream.response)))
+        self.assertIn(b'"phase": "touring"', next(iter(stream.response)))
         stream.close()
         self.assertEqual(self.client.patch(self.url, json=dict(status='active')).status_code, 200)
         self.assertEqual(self.client.patch(self.url, json=dict(status='active')).status_code, 200)
@@ -216,9 +217,6 @@ class PreparationApiTest(unittest.TestCase):
         self.addCleanup(self.transport.tour_release.set)
         self.client.post(self.url + '/preparation', json={})
         job = self.manager.get(self.session['id'])
-        until(lambda: job.phase == 'ready')
-        self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '관람 준비 완료 · 관람 시작 대기 중')
-        self.client.patch(self.url, json={'status':'active'})
         until(lambda: job.tour_state == 'MOVING')
         self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '1번 작품으로 이동 중')
         self.transport.explanation_release.set()
@@ -229,10 +227,18 @@ class PreparationApiTest(unittest.TestCase):
         self.assertEqual(admin.get('/api/fleet').json['tb4']['activity'], '활동 상태 미수신')
 
     def test_cancel_route_then_record_cancel(self):
+        self.transport.prepare_release.clear()
+        self.addCleanup(self.transport.prepare_release.set)
         self.client.post(self.url+'/preparation', json={})
         job = self.manager.get(self.session['id'])
-        until(lambda: job.phase == 'ready')
+        until(lambda: job.phase == 'arrived')
+        def release_after_cancel():
+            job.cancel.wait(2)
+            self.transport.prepare_release.set()
+
+        threading.Thread(target=release_after_cancel, daemon=True).start()
         self.assertEqual(self.client.post(self.url+'/preparation/cancel', json={}).status_code, 200)
+        self.assertEqual(self.transport.calls, ['prepare_tour'])
         self.assertEqual(self.client.patch(self.url, json=dict(status='cancelled')).status_code, 200)
         self.assertEqual(self.client.post(self.url+'/preparation', json={}).status_code, 409)
 

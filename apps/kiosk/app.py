@@ -168,6 +168,14 @@ def create_app(test_config=None):
             app.logger.exception("ROS description lookup failed")
             return None
 
+    def activate_tour(job):
+        with sqlite3.connect(app.config["DATABASE"], timeout=10) as db:
+            updated = db.execute(
+                "UPDATE TourSession SET status='active', started_at=? WHERE record_id=? AND status='calling'",
+                (now_ms(), job.session["id"]),
+            )
+            return updated.rowcount == 1
+
     def finish_tour(job, status):
         with app.app_context():
             g.database_path = app.config["DATABASE"]
@@ -201,7 +209,7 @@ def create_app(test_config=None):
             app.logger.exception("ROS 로그 저장 실패: %s %s", robot_id, message)
 
     register_robot_preparation(app, find_session, session_data, persist_assignment,
-                               finish_tour, record_artwork, lookup_description, record_ros_event)
+                               activate_tour, finish_tour, record_artwork, lookup_description, record_ros_event)
     register_signal_simulator(app, get_db, session_data)
 
     @app.get("/")
@@ -279,19 +287,18 @@ def create_app(test_config=None):
         db = get_db()
         manager = app.extensions["robot_preparation"]
         job = manager.get(session_id)
-        start_job = None
+        preparation = job.snapshot() if job else None
         # 상태 확인과 변경을 하나의 쓰기 트랜잭션으로 처리합니다.
         with db:
             db.execute("BEGIN IMMEDIATE")
             row = find_session(session_id)
             status = body.get("status", row["status"])
             if app.config["ROS_PREPARATION_REQUIRED"] and row["status"] == "calling":
-                if status == "active" and (not job or job.snapshot()["phase"] != "ready"):
+                if status == "active" and not (preparation and preparation["phase"] == "ready"
+                                               and (preparation["manual_registration"] or preparation["dev_mode"])):
                     abort(409, description="로봇의 관람 준비 완료 신호를 기다려 주세요.")
-                if status == "cancelled" and job and job.snapshot()["phase"] != "cancelled":
+                if status == "cancelled" and preparation and preparation["phase"] != "cancelled":
                     abort(409, description="로봇 작업을 먼저 취소하고 종료 상태를 확인해 주세요.")
-                if status == "active":
-                    start_job = job
             if row["status"] == "active" and status in {"completed", "cancelled"}:
                 if job and job.tour_started:
                     abort(409, description="로봇 액션 결과 또는 취소 확인을 기다려 주세요.")
@@ -321,8 +328,6 @@ def create_app(test_config=None):
                 "UPDATE TourSession SET status=?, visited_ids=?, started_at=?, end_time=? WHERE record_id=?",
                 (status, json.dumps(visited), started, ended, session_id),
             )
-        if start_job:
-            manager.start_tour(start_job)
         return jsonify(session_data(find_session(session_id)))
 
     @app.template_filter("localtime")

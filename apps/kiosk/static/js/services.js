@@ -1,6 +1,3 @@
-// 준비 단계는 ROS 2에 연결되며 관람 시작 뒤에는 키오스크 안내를 마칩니다.
-export const DEMO_MODE = true;
-
 async function request(path, method, body, options = {}) {
   let response;
   const headers = { 'Content-Type': 'application/json' };
@@ -27,11 +24,7 @@ async function request(path, method, body, options = {}) {
 
 export const createSession = body => request('/api/sessions', 'POST', body);
 export const startSession = session => request(`/api/sessions/${session.id}`, 'PATCH', { status: 'active' });
-export const saveProgress = (session, visitedIds) => request(`/api/sessions/${session.id}`, 'PATCH', { visitedIds });
-export const endSession = (session, visitedIds) => request(`/api/sessions/${session.id}`, 'PATCH', { status: 'completed', visitedIds });
 export const cancelSession = (session, visitedIds) => request(`/api/sessions/${session.id}`, 'PATCH', { status: 'cancelled', visitedIds });
-export const toggleDevAvailability = () => request('/api/dev/availability', 'POST', {action:'toggle'});
-export const stopDevAvailability = () => request('/api/dev/availability', 'POST', {action:'stop'});
 export const injectDevPreparationReady = session => request(`/api/dev/preparation/${encodeURIComponent(session.id)}/ready`, 'POST', {});
 
 export const getSession = id => request(`/api/sessions/${encodeURIComponent(id)}`, 'GET');

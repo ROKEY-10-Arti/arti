@@ -1,4 +1,4 @@
-# ArtI 프로젝트 — ROS 2 통신 명세서
+# Art I 프로젝트 — ROS 2 통신 명세서
 
 > 원본: Notion "ROS2 통신 명세서" · 환경: ROS 2 Jazzy / Fast DDS Discovery Server
 
@@ -30,26 +30,24 @@
 
 Robot1·Robot4는 동일 Action 타입을 쓰고 네임스페이스로 구분한다.
 
-### 2.1 키오스크 흐름 (로봇별, 2026-11-19)
+### 2.1 키오스크 흐름
 
-두 로봇 모두 `prepare_tour` → `start_tour` 순서. 차이는 `start_tour`를 보내는 때.
+첫 화면의 호출 버튼은 도킹 상태이고 배터리가 30%를 초과하는 로봇이 있을 때 활성화한다.
+키오스크 서버는 선택한 관람 방식에 따라 로봇을 배정하고, `prepare_tour`가 성공하면 `start_tour`를 자동으로 보낸다.
 
 ```
  robot1 (자유 관람)                                robot4 (코스 관람)
  [호출] ─▶ /robot1/arti/prepare_tour              [호출] ─▶ /robot4/arti/prepare_tour
           ◀─ success                                       ◀─ success
- [관람 시작] 버튼 ─▶ /robot1/arti/start_tour {[]}   바로 자동 ─▶ /robot4/arti/start_tour {[1, 3, 4]}
+ 자동 시작 ─▶ /robot1/arti/start_tour {[]}         자동 시작 ─▶ /robot4/arti/start_tour {[1, 3, 4]}
 ```
 
-| 키오스크 규칙 | robot1 | robot4 |
+| 항목 | robot1 | robot4 |
 |---|---|---|
-| [호출] 켜는 조건 | `/robot1/dock_status` is_docked = true | `/robot4/dock_status` is_docked = true |
-| `start_tour` 보내는 때 | 관람객이 [관람 시작]을 누를 때 (prepare success 뒤 한 번) | prepare success 직후 자동 |
-| 대기 제한 | prepare success 뒤 120 s 안에 안 누르면 처음 화면 (로봇은 130 s 뒤 스스로 끝냄) | 없음 |
+| 관람 방식 | 자유 관람 | 코스 관람 |
 | `artwork_ids` | `[]` | 선택한 작품 번호 |
 
-robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 busy·not_prepared 검사를 하지 않는다.
-도크 밖에서 호출되면 `not_docked`로 거절 (관람은 항상 도크에서 시작).
+두 로봇의 기본 `ready_timeout`은 130초다. 등록을 완료한 뒤 이 시간 동안 `start_tour`를 받지 못하면 로봇이 도킹 복귀한다.
 
 ## 3. 메시지 타입
 
@@ -64,7 +62,7 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 | REGISTERING | 관람객 인식·등록 중 |
 | REGISTERED | 관람객 등록 완료 |
 
-완료 조건: 등록 완료 후 `success=true`. PC3는 성공 확인 후 관람 시작 버튼 활성화.
+등록을 완료하면 `success=true`를 반환한다. PC3는 성공 결과를 받은 뒤 `start_tour`를 보낸다.
 
 ### 3.2 StartTour.action
 
@@ -98,11 +96,12 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 |---|---|---|
 | gallery.yaml / gallery.pgm | PC1·PC2 | 지도 및 Localization |
 | init_pose.yaml | PC1·PC2 | 로봇별 초기 위치 |
-| artworks.yaml | PC1·PC2 | 작품 좌표, 구역 범위, 안내 구역 |
+| artworks.yaml | PC1·PC2 | PC1의 작품·안내 구역, PC2와 공유하는 출구 구역 |
+| a_course.yaml | PC2 | 코스 주행 목표 및 키오스크·작품 구역 |
 | SQLite Art | PC3 | 작품 설명·콘텐츠 |
 
 - Nav2 주행 목표 좌표는 작품 구역 중심과 구분해 관리한다.
-- 전시 배치 변경 시 PC1·PC2의 YAML을 동일하게 갱신한다.
+- 전시 배치가 바뀌면 각 로봇의 YAML과 키오스크 안내용 평면도를 확인한다.
 
 ## 5. 기존 로봇 상태 Topic (상시 수신용)
 
@@ -114,12 +113,12 @@ robot1(visitor_follower)은 위 규칙을 키오스크가 지킨다고 보고 bu
 
 ## 6. 통합 구현 체크리스트
 - [x] PC1: PrepareTour Action Server 구현 (언독·이동·관람객 등록까지, visitor_follower, 2026-11-18)
-- [ ] PC2: PrepareTour Action Server 구현
+- [x] PC2: PrepareTour·StartTour Action Server 구현
 - [x] PC1: StartTour에서 준비 단계 중복 실행 제거 (prepare_tour 성공 뒤에만 받음)
-- [ ] PC3: 각 로봇 Action Client 연결
-- [ ] PC3: `/arti/description` Service Server 구현
+- [x] PC3: 각 로봇 Action Client 구현
+- [x] PC3: `/arti/description` Service Server 구현
 - [x] PC1: Description Service Client 구현 (arti_audio `guide_audio_node`, 2026-11-18)
-- [ ] PC2: Description Service Client 구현
-- [ ] 작품 ID 변환 규칙 통일
+- [x] PC2: Description Service Client 구현 (arti_audio `guide_audio_node`)
+- [x] ROS 작품 ID는 `int32`를 사용하고 PC3에서 DB 형식으로 변환
 - [ ] 두 로봇의 지도·구역 YAML 버전 일치 확인
 - [ ] 준비 실패·관람 실패·취소·중복 명령 처리 검증
