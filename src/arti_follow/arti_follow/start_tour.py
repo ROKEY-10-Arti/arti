@@ -371,19 +371,59 @@ class TourMixin:
         end_guide_wait 뒤에 관람 끝 (step [3-2]). 종료 안내 음성은 artwork_zone이 guide_message로 이미 보냄.
         받음: msg.data  'exit' / 'kiosk' ...
         바뀜: end_at (관람 끝 예정 시각)"""
-        p = self.p
-        if not p['end_zone'] or msg.data != p['end_zone'] or self.end_at is not None:
+        if not self.p['end_zone'] or msg.data != self.p['end_zone']:
             return
         with self.lock:
-            if not self.active or self.state not in TRACKING or self.tour_at is None:
-                return
-            now = self.now()
-            if now - self.tour_at < p['end_min_time']:
-                self.get_logger().info(f'출구({msg.data}) 진입했지만 관람 시작 {now - self.tour_at:.0f} s 뒤라 무시 '
-                                       f'(end_min_time {p["end_min_time"]:.0f} s)')
-                return
-            self.end_at = now + p['end_guide_wait']
-            self.get_logger().info(f'관람객 출구({msg.data}) 진입 → {p["end_guide_wait"]:.0f} s 종료 안내 뒤 관람 끝 → 도크 복귀')
+            self.exit_reached('진입')
+
+    def exit_reached(self, how):
+        """관람객이 출구(end_zone)에 들어감/지나감 → end_guide_wait 뒤 관람 끝 예약. lock을 잡은 채 부른다.
+        받음: how  '진입' (artwork_zone/entered) 또는 '통과 …' (end_cross_check)
+        바뀜: end_at
+        돌려줌: 예약했으면 True"""
+        p = self.p
+        if self.end_at is not None or not self.active or self.state not in TRACKING or self.tour_at is None:
+            return False
+        now = self.now()
+        if now - self.tour_at < p['end_min_time']:
+            self.log_every('end_early', 5.0, f'출구({p["end_zone"]}) {how}했지만 관람 시작 {now - self.tour_at:.0f} s 뒤라 무시 '
+                                              f'(end_min_time {p["end_min_time"]:.0f} s)', 'info')
+            return False
+        self.end_at = now + p['end_guide_wait']
+        self.get_logger().info(f'관람객 출구({p["end_zone"]}) {how} → {p["end_guide_wait"]:.0f} s 종료 안내 뒤 관람 끝 → 도크 복귀')
+        return True
+
+    def end_cross_check(self, now):
+        """[step 3-2 앞] 추적 중인 관람객 위치(칼만, 튄 좌표 확인·라이다 짝을 거친 값)가 지난 주기 뒤 출구 구역을
+        지나갔는지 선분으로 판정한다. artwork_zone은 인식 좌표 한 점만 보므로, 좌표가 끊기거나 튀어 폭 0.55 m인
+        출구 띠를 건너뛰면 관람이 끝나지 않고 복귀도 안 함 (2026-11-21 14:10·14:17: 출구 안 좌표 0개,
+        y 2.48 → 1.15를 0.5 s에 건너뜀). 선분 길이가 end_cross_max를 넘으면(다른 사람으로 바뀐 순간 등) 판정 안 함.
+        출구에서 종료 안내 음성(tour_end)은 artwork_zone이 못 냈을 수 있으므로 여기서 guide_message로 보냄.
+        받음: now, (kf, seen, end_zone, end_prev, TF map→odom)
+        바뀜: end_prev, (exit_reached → end_at)"""
+        p = self.p
+        if self.end_zone is None or self.end_at is not None or self.state not in TRACKING or self.kf.x is None \
+                or now - self.seen >= p['lost_timeout']:
+            self.end_prev = None
+            return
+        f = self.lookup(p['map_frame'], p['odom_frame'])
+        if f is None:
+            return
+        last, _ = self.person()
+        q = apply(f, last[None])[0]               # apply는 점 배열 (N, 2)
+        prev, self.end_prev = self.end_prev, (q, now)
+        if prev is None or now - prev[1] > p['end_cross_gap']:
+            return
+        seg = float(np.hypot(*(q - prev[0])))
+        if seg > p['end_cross_max']:
+            return
+        n = max(2, int(math.ceil(seg / 0.05)) + 1)
+        if not any(self.end_zone.contains(prev[0] + (q - prev[0]) * k / (n - 1)) for k in range(n)):
+            return
+        if self.exit_reached(f'통과 (추적 위치 ({prev[0][0]:.2f}, {prev[0][1]:.2f}) → ({q[0]:.2f}, {q[1]:.2f}))'):
+            guide = self.end_zone.guide
+            if guide:
+                self.guide_pub.publish(String(data=guide))   # artwork_zone이 먼저 잡았으면 end_at이 있어 여기 안 옴
 
     def on_explaining(self, msg):
         """[구독] artwork_zone/explaining (Int32) — 설명 중인 작품 번호. 관람 중일 때만 저장.

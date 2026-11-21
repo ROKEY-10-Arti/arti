@@ -207,6 +207,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         self.start = self.load_start_point(self.p['start_point'])          # AMCL 초기 위치 = 도크 (x, y, yaw) map
         self.face_from = self.load_start_point(self.p['face_from_point'])  # 언독 끝 자리 = 시작 회전 기준
         self.face_point = self.load_face_point()    # 시작 때 바라볼 점 (x, y) map
+        self.end_zone = self.load_end_zone()        # 출구 구역 (arti_common Zone, map) — 추적 위치가 지나갔는지 직접 판정
+        self.end_prev = None                        # 지난 주기 관람객 추정 위치 (map xy, 시각) — end_cross
         self.map_bad = self.load_map()              # 사람이 있을 수 없는 칸 (A1, 없으면 None)
         self.map_obs = self.load_map_obstacles()    # 지도 벽 점 (map 좌표, 회피용. 없으면 None)
         self.anchor = None                          # 마지막으로 확인한 관람객 위치 (odom xy, 시각) — 다시 잡을 때 기준 (A2)
@@ -304,6 +306,21 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
             return None
         self.get_logger().info(f'시작 때 바라볼 곳: {zid} {point}')
         return point
+
+    def load_end_zone(self):
+        """artworks.yaml에서 end_zone(기본 exit) 구역을 읽는다 (end_cross: 추적 위치가 출구를 지나갔는지 판정).
+        돌려줌: arti_common.zones.Zone, 없으면 None (artwork_zone/entered만 씀)"""
+        zid = self.p['end_zone']
+        if not zid or not self.p['end_cross']:
+            return None
+        try:
+            from arti_common.zones import load_zones   # 두 로봇 공통 구역 판정
+            path = self.config_file('zones_file', 'artworks.yaml')
+            zone = next(z for z in load_zones(path)[1] if z.id == zid)
+        except (OSError, StopIteration, KeyError, PackageNotFoundError, yaml.YAMLError, ValueError) as e:
+            self.get_logger().warn(f'출구 구역 {zid}을 못 읽음 ({e!r}) → artwork_zone/entered만 씀')
+            return None
+        return zone
 
     # ---------- 입력 ----------
 
@@ -755,6 +772,8 @@ class VisitorFollower(PrepareMixin, TourMixin, MotionMixin, Node):
         # 언독 지점(지도 좌표 → AMCL로 odom, 없으면 언독 때 odom)까지 이동 → 도크 쪽으로 돌기 → Create 3 dock 액션 → READY
         if self.state in RETURNING:
             return self.go_home(now, pose)
+        # [3-2] 관람객이 출구에 들어갔나? (end_at: artwork_zone/entered 또는 추적 위치가 출구를 지나감 end_cross_check)
+        self.end_cross_check(now)
         # [3-2] 관람객이 출구에 들어갔나? (end_at) → 예: end_guide_wait 동안 서서 관람객 쪽을 봄 → 관람 끝(completed) → RETURN
         if self.end_at is not None and self.state in TRACKING:
             if now >= self.end_at:
