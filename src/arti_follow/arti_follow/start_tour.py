@@ -100,9 +100,10 @@ class TourMixin:
         # [9] 서 있는 중이 아닌가? (holding == False) → 예: dwa로 따라가기 / 아니오: 아래 face()
         # 멀면: 사람에서 로봇 쪽으로 0.8 m 돌아온 점을 목표로 장애물 피해서 이동 (사람 자체를 목표로 하면 부딪힘)
         if not self.holding:
-            goal = self.reachable_goal(ahead - to / d * p['target_distance'])   # 벽에 붙은 목표면 밀어냄 (우회 가능하게)
+            goal = self.reachable_goal(ahead - to / d * p['target_distance'])
             self.dbg['reason'] = 'follow'
-            return self.drive(*self.dwa(pose, goal, ahead, keep_view=True))
+            keep_view = (now - self.cam_seen) <= 0.4
+            return self.drive(*self.dwa(pose, goal, ahead, keep_view=keep_view))
         # 가까우면: 앞으로는 안 가고 사람 쪽으로 몸만 돌림 (작품 감상 중 등)
         self.dbg['reason'] = 'hold'
         return self.face(pose, here, person)
@@ -119,20 +120,30 @@ class TourMixin:
         # [11] 방금 놓쳤나? (직전 상태가 FOLLOW) → 예: 놓친 시각·회전 방향 기억 (한 번만) / 아니오: 건너뜀
         # 방금 놓친 순간(직전까지 FOLLOW)에만 한 번: 놓친 시각과 사람이 가던 쪽(왼/오른)을 기억 → 나중에 그쪽으로 돈다
         if self.state == 'FOLLOW':
+            prev_path = self.path_dist
             self.lost_at, self.spin_at, self.wait_at = now, None, None
-            self.best_dist, self.progress_at = None, now   # 이동 진척 (가장 짧았던 경로 거리, 그때 시각)
-            self.path_dist = None                   # 이전 dwa(추종) 값은 목표가 달라서 버림
-            # 탐색 목표 = 놓친 순간의 위치 (탐색 중 확인 전 새 좌표로 바뀌지 않게, A4).
-            # 벽 모서리에 붙어 있으면 로봇이 갈 수 있는 곳으로 밀어냄 → 길 찾기가 모서리를 돌아가는 길을 찾음
-            self.search_goal = np.asarray(self.reachable_goal(last.copy()), float)
+            self.best_dist, self.progress_at = None, now
+            self.path_dist = None
+
+            # 걷던 중 가려졌으면 마지막 위치(last)에서 코너 너머로 최대 0.9 m 연장
+            spd = float(np.linalg.norm(vel))
+            ext = vel * min(p['predict_max'], 1.0) if spd > 0.2 else np.zeros(2)
+            ext_norm = float(np.linalg.norm(ext))
+            if ext_norm > 0.9:
+                ext *= 0.9 / ext_norm
+            self.search_goal = np.asarray(self.reachable_goal(last + ext), float)
+
             d = last + vel - here
             self.turn = 1.0 if wrap(math.atan2(d[1], d[0]) - pose[2]) >= 0 else -1.0
-            # 먼저 돌아볼 곳 = 사람이 가던 쪽 (마지막 위치 + 속도 × search_look_ahead).
-            # 놓친 이유는 대부분 사람이 탑캠 화면 옆으로 빠진 것 → 마지막 자리로 직진하면 카메라는 '있던 곳'을 봄
-            # (2026-11-20: 다시 찾는 데 9~23 s). 서 있다 놓쳤으면(속도≈0) 마지막 자리 쪽을 본다
-            self.look_at = last + vel * p['search_look_ahead']
-            self.get_logger().info(f'관람객 놓침 → 가던 쪽으로 먼저 돌아봄, 그다음 마지막 위치까지 이동 '
-                                   f'({float(np.linalg.norm(last - here)):.2f} m)')
+
+            # 장애물 우회가 필요한 상태였다면 벽 앞 제자리 회전(search_look) 생략하고 즉시 이동
+            straight = float(np.linalg.norm(last - here))
+            detouring = (prev_path is not None and prev_path < 49.0 and prev_path > straight + 0.35)
+            self.look_at = None if detouring else (last + vel * p['search_look_ahead'])
+            self.get_logger().info(
+                f'관람객 놓침 → {"우회 이동 즉시 시작" if detouring else "가던 쪽 돌아본 뒤 이동"} '
+                f'({straight:.2f} m)'
+            )
         # [11-1] 가던 쪽을 아직 안 돌아봤나? (look_at != None) → 제자리 회전, 그쪽을 보거나 search_look_time 지나면 끝
         if self.look_at is not None and self.spin_at is None:
             off = wrap(math.atan2(self.look_at[1] - here[1], self.look_at[0] - here[0]) - pose[2])
@@ -143,21 +154,15 @@ class TourMixin:
             self.look_at = None
             self.progress_at = now                  # 돌아보는 동안은 이동 막힘 판정에 넣지 않음
             self.get_logger().info(f'가던 쪽 돌아보기 끝 ({now - self.lost_at:.1f} s) → 마지막 위치까지 이동')
-        # [12] 아직 회전 탐색 전인가? (spin_at == None) → 예: 마지막 위치로 이동 또는 회전 준비 / 아니오: 아래로
-        # 1) 마지막으로 본 곳(last, 관람객 위치)까지 간다 (기둥·모퉁이 뒤로 사라졌으면 가야 보인다).
-        #    끝나는 조건 셋 중 하나: 도착(직선거리 search_arrive 안) / 막힘(search_stall_time 동안 경로 거리가
-        #    search_stall_dist만큼도 안 줄어듦 — 길이 없음, 또는 인식 안 되는 사람이 그 자리에 서 있음) / 안전 상한(search_move_time)
-        #    진척은 직선거리가 아니라 경로 거리(dwa가 구한 '장애물을 돌아가는 거리')로 잰다:
-        #    벽을 돌아가느라 직선거리가 잠깐 늘어도 경로 거리는 줄어드므로 막힘으로 잘못 보지 않는다
         if self.spin_at is None:
             last = self.search_goal if self.search_goal is not None else last
             dist = float(np.linalg.norm(last - here))
             path = self.path_dist                   # 지난 주기 dwa 값. None = 못 구함(전부 막힘·먼저 회전 중)
             reachable = path is not None and path < 49.0   # 약 50 = 길이 안 보임 → 진척 아님 (3 s 뒤 막힘)
             if reachable and (self.best_dist is None or path < self.best_dist - p['search_stall_dist']):
-                self.best_dist, self.progress_at = path, now      # 경로 거리가 줄어듦 = 진척
-            elif abs(wrap(math.atan2(last[1] - here[1], last[0] - here[0]) - pose[2])) > p['turn_first_angle']:
-                self.progress_at = now              # 목표가 뒤쪽이라 먼저 도는 중 (거리는 안 줄어도 진척)
+                self.best_dist, self.progress_at = path, now
+            elif getattr(self, '_turn_first', False):
+                self.progress_at = now              # 우회 방향으로 먼저 도는 중 (막힘으로 오판 방지)
             cap = p['search_move_time']             # 0이면 시간 상한 없음 (막힘 판정은 그대로)
             if dist <= p['search_arrive']:
                 why = '도착'

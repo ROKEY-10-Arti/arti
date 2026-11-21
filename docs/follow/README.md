@@ -165,3 +165,4 @@ ros2 action send_goal /robot1/arti/start_tour arti_interfaces/action/StartTour "
 
 - 기존 실습 코드: `~/rokey_ws/src/yolo_follow` (YOLO → Depth → TF(map) → Nav2 목표), `~/rokey_ws/src/day3/depth_to_3d*`
 - 트러블슈팅: [../troubleshooting/](../troubleshooting/README.md) 의 `follow/` 폴더
+- **빌드 및 단계별 실행·테스트 가이드**: [run_and_test_guide.md](run_and_test_guide.md) (실제 통합 시나리오 / 부분 시나리오(`follow_test`·bag 리플레이) / 단품 노드·가짜 입력 테스트 / 모듈 단위 코드 검증)

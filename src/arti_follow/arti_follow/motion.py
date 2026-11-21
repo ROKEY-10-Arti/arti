@@ -240,7 +240,8 @@ class MotionMixin:
         p, pts = self.p, self.scan_pts
         # 추종 중: 관람객 본인의 다리 점은 장애물에서 뺀다 (person_obstacle_clear 안, 반지름 0.28로 커져 사람 주변이
         # 막힌 길이 됨). 단, 로봇 몸 가까이(robot_radius + 0.15 안)의 점은 사람 추정이 틀렸을 수 있어 그대로 둔다
-        if p['person_obstacle_clear'] > 0 and here is not None and self.kf.x is not None and self.state == 'FOLLOW':
+        if p['person_obstacle_clear'] > 0 and here is not None and self.kf.x is not None \
+                and self.state == 'FOLLOW' and (self.now() - self.seen < 0.5):
             last, vel = self.person()
             ps = last + vel * min(self.now() - self.kf.t, p['predict_max'])
             drop = (np.hypot(pts[:, 0] - ps[0], pts[:, 1] - ps[1]) < p['person_obstacle_clear']) \
@@ -256,6 +257,27 @@ class MotionMixin:
             wall = wall[np.hypot(wall[:, 0] - here[0], wall[:, 1] - here[1]) > p['robot_radius']]
         return np.vstack([pts, wall])
 
+    def detour_heading(self, field, origin, x0, y0, steps=8):
+        """field에서 내리막 이웃을 따라가 실제 우회 진행 방향 [rad]을 구한다."""
+        res, n = self.p['grid_resolution'], field.shape[0]
+        cx = int(np.clip((x0 - origin[0]) / res, 0, n - 1))
+        cy = int(np.clip((y0 - origin[1]) / res, 0, n - 1))
+        if field[cy, cx] >= 49.0:
+            return None
+        x, y = cx, cy
+        for _ in range(steps):
+            patch = field[max(0, y - 1):min(n, y + 2), max(0, x - 1):min(n, x + 2)]
+            dy, dx = np.unravel_index(np.argmin(patch), patch.shape)
+            ny, nx = max(0, y - 1) + dy, max(0, x - 1) + dx
+            if field[ny, nx] >= field[y, x] - 1e-4:
+                break
+            x, y = nx, ny
+        return None if (x == cx and y == cy) else math.atan2((y - cy) * res, (x - cx) * res)
+
+    def go_to(self, pose, goal):
+        """정해진 지점(odom)으로 이동 (SEARCH·RETURN). 우회 방향 기준 회전은 dwa() 내부에서 처리."""
+        return self.drive(*self.dwa(pose, goal, goal))
+
     def dwa(self, pose, goal, face, keep_view=False):
         """(v, w) 후보를 굴려 보고, 안 부딪히면서 목표까지 '돌아가는 거리'가 가장 줄어드는 것을 고른다 (DWA).
         ① 후보 105개 ② 1.5 s 굴려 봄 ③ 위험한 후보 버림 ④ 벌점 최소 — 단계별 입출력은 본문 주석.
@@ -266,7 +288,9 @@ class MotionMixin:
         # self.cmd  → v0 [m/s], w0 [rad/s]    지난번 보낸 명령 = 지금 속도로 가정  예) 0.20, 0.0
         p, (x0, y0, th0), (v0, w0) = self.p, pose, self.cmd
         dt = p['control_period']
+        prev_path = self.path_dist
         self.path_dist = None                       # 이번에 못 구하면(전부 막힘) None
+        self._turn_first = False
 
         # ── ① 후보 만들기 ──────────────────────────────────────────────────────────
         # 입력: v0, w0, 가속 한계(linear_accel 0.5, angular_accel 3.0), 최대 속도(0.3, 1.5)
@@ -327,6 +351,7 @@ class MotionMixin:
         t0 = time.monotonic()
         goal_a, here_a, fc = np.asarray(goal, float), np.array([x0, y0]), self.field_cache
         if fc is not None and t0 - fc[0] < p['field_max_age'] \
+                and prev_path is not None and prev_path < 49.0 \
                 and np.linalg.norm(goal_a - fc[1]) < p['field_reuse_dist'] \
                 and np.linalg.norm(here_a - fc[2]) < p['field_reuse_dist']:
             field, origin = fc[3], fc[4]
@@ -335,27 +360,36 @@ class MotionMixin:
             field, origin = self.field(goal_a, here_a, obs)
             self.field_cache = (t0, goal_a, here_a, field, origin)
             self.dbg['field_ms'] = (time.monotonic() - t0) * 1000
-        # 지금 로봇 자리에서 goal까지 장애물을 돌아가는 거리 [m] → SEARCH 이동의 진척 판정 (못 가면 약 50)
+
         self.path_dist = float(self.sample(field, origin, np.array([x0]), np.array([y0]))[0])
-        # 출력: ex, ey, eth (105,)  후보별 1.5 s 뒤 도착 위치·방향 (② 결과의 마지막 열)
+        straight = math.hypot(goal[0] - x0, goal[1] - y0)
+        detour_yaw = self.detour_heading(field, origin, x0, y0)
+
+        # 우회 경로 방향이 뒤쪽(> turn_first_angle)이면 직선 목표가 아니라 '우회 방향'으로 먼저 회전
+        if detour_yaw is not None:
+            err_path = float(wrap(detour_yaw - th0))
+            if abs(err_path) > p['turn_first_angle']:
+                self._turn_first = True
+                self.dbg['turn_first'] = True
+                w = float(np.clip(1.5 * err_path, -p['max_angular'], p['max_angular']))
+                return self.ramp(0.0, w)
+
         ex, ey, eth = xs[:, -1], ys[:, -1], th[:, -1]
-        # 출력: cost (105,)  후보별 벌점 =
-        #   sample(field, 도착점)               도착점에서 goal까지 돌아가는 거리 [m]   (가장 중요)
-        #   + 1.0  × max(0.4 - clear, 0)        장애물에 0.4 m 안으로 붙은 만큼
-        #   + 0.02 × |W|                        회전 (비슷하면 직진)
-        #   + (goal 0.3 m 안이면) 0.3 × |사람 쪽과 어긋난 각도|  사람을 바라보며 서게
         cost = self.sample(field, origin, ex, ey) \
             + p['w_clearance'] * np.clip(p['clearance_zone'] - clear, 0, None) \
-            + p['w_turn'] * np.abs(W)                       # 비용이 같으면 덜 도는 쪽
-        off = np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))   # 후보별 도착 때 사람 쪽과 어긋난 각도 [rad]
-        if math.hypot(goal[0] - x0, goal[1] - y0) < 0.3:   # 거의 도착 → 관람객 쪽을 바라봄
+            + p['w_turn'] * np.abs(W)
+        # 저속 코너에서 제자리 멈춤(Deadlock) 방지: 우회 진행 방향 정렬 비용 추가
+        if detour_yaw is not None:
+            cost += p.get('w_path_align', 0.25) * np.abs(wrap(detour_yaw - eth))
+
+        off = np.abs(wrap(np.arctan2(face[1] - ey, face[0] - ex) - eth))
+        if straight < 0.3:
             cost += p['w_heading'] * off
-        if keep_view:                                       # 추종 중: 사람이 탑캠 화면 밖으로 나가는 궤적에 벌점
-            # + w_view × max(어긋난 각도 - view_half_angle, 0)  (2026-11-20: 이동 중 화면 밖으로 빠져 인식을 놓침)
+        # 우회 중(경로 거리가 직선보다 0.35 m 이상 김)에는 시야 유지 벌점을 꺼서 장애물 쪽으로 고개가 묶이지 않게 함
+        detouring = (self.path_dist < 49.0 and self.path_dist > straight + 0.35)
+        if keep_view and not detouring:
             cost += p['w_view'] * np.clip(off - p['view_half_angle'], 0, None)
         cost[~safe] = np.inf
-        # 출력: i  벌점이 가장 작은 후보 번호 (0 ~ 104). 위험한 후보는 cost = inf라 절대 안 뽑힘
-        # 결과: (v [m/s], w [rad/s])  예) (0.25, 0.3) → drive()가 cmd_vel로 보냄. 다음 0.1 s만 쓰고 다시 계산
         i = int(np.argmin(cost))
         return float(V[i]), float(W[i])
 
@@ -378,11 +412,21 @@ class MotionMixin:
         raw, grid = grid, cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
         gx, gy = np.clip(np.floor((goal - origin) / res).astype(int), 0, n - 1)   # 반올림으로 격자 밖에 나가지 않게
         rx, ry = np.clip(np.floor((here - origin) / res).astype(int), 0, n - 1)
-        g = max(1, int(round(0.1 / res)))           # 목표 자리는 ±10 cm 열어 둔다 (격자 크기와 상관없이)
-        grid[max(gy - g, 0):gy + g + 1, max(gx - g, 0):gx + g + 1] = 0
         win = np.s_[max(ry - k, 0):ry + k + 1, max(rx - k, 0):rx + k + 1]
         grid[win] = raw[win]                        # 로봇 주변은 실제 장애물 칸만 막음 (붙어 있어도 출발 가능)
-        dist = grid_distances(grid == 0, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]
+
+        # 목표 칸이 동적 장애물에 덮였거나 로봇과 단절됐으면, 로봇이 도달 가능한 가장 가까운 빈칸으로 스냅
+        free = (grid == 0)
+        _, labels = cv2.connectedComponents(free.astype(np.uint8), connectivity=8)
+        robot_lbl = int(labels[ry, rx])
+        if not free[gy, gx] or (robot_lbl > 0 and labels[gy, gx] != robot_lbl):
+            cand = (labels == robot_lbl) if robot_lbl > 0 else free
+            fy, fx = np.nonzero(cand)
+            if fy.size:
+                j = int(np.argmin((fy - gy) ** 2 + (fx - gx) ** 2))
+                gy, gx = int(fy[j]), int(fx[j])
+
+        dist = grid_distances(free, int(gy), int(gx))   # 목표에서 모든 칸까지 돌아가는 거리 [칸]
         dist *= res
         dist[~np.isfinite(dist)] = 50.0
         return dist, origin
@@ -428,19 +472,6 @@ class MotionMixin:
         v = v0 + float(np.clip(v - v0, -dv * dt, dv * dt))
         w = w0 + float(np.clip(w - w0, -p['angular_accel'] * dt, p['angular_accel'] * dt))
         return v, w
-
-    def go_to(self, pose, goal):
-        """정해진 지점(odom)으로 이동 (SEARCH에서 마지막 위치로 갈 때).
-        목표 방향이 turn_first_angle(약 57°)보다 틀어져 있으면 먼저 제자리 회전, 아니면 DWA.
-        DWA는 후진이 없어 목표가 뒤쪽이면 모든 후보가 동점 → (0, 0)으로 멈추기 때문.
-        받음: pose (x, y, yaw) odom, goal (x, y) odom
-        내보냄: drive(...)"""
-        err = float(wrap(math.atan2(goal[1] - pose[1], goal[0] - pose[0]) - pose[2]))
-        if abs(err) > self.p['turn_first_angle']:
-            self.dbg['turn_first'] = True
-            w = float(np.clip(1.5 * err, -self.p['max_angular'], self.p['max_angular']))
-            return self.drive(*self.ramp(0.0, w))
-        return self.drive(*self.dwa(pose, goal, goal))
 
     def predict_yaw(self, yaw, age, now):
         """늦게 온 odom yaw에 아직 반영되지 않은 회전 명령을 더해 지금 yaw를 추정한다 (Wi-Fi 지연 보정).
