@@ -29,6 +29,8 @@
       "return_to_dock": "관람이 끝나면(취소·분실·실패) 언독 지점으로 돌아와 도킹 (언독했을 때만)",
       "return_timeout": "도크 복귀 경고 주기 [s]: 언독 지점에 이만큼 못 가면 이 주기마다 경고하고 계속 간다. 도킹은 언독 지점(return_arrive 안)에 도착한 뒤에만 (2026-11-21: 예전에는 넘으면 그 자리에서 도킹 시도 → 3.7 m 밖에서 dock)",
       "return_arrive": "언독 지점에서 이 거리 안이면 도착 [m]",
+      "return_near": "언독 지점에서 이 거리 안인데 더 못 다가가면(return_snap_done 또는 return_stall_time) 도착으로 보고 도킹 [m]. 2026-11-21: 언독 지점이 도크·벽에서 robot_radius 여유 안이라 0.18 m 앞에서 멈춘 채 도킹 안 함",
+      "return_snap_done": "언독 지점이 장애물 여유 안이라 길 찾기가 목표를 옮겼을 때(goal_snapped), 옮긴 목표까지 경로가 이보다 짧으면 더 못 다가감으로 봄 [m]",
       "return_use_map": "도크 복귀 목표를 지도의 언독 지점(init_pose.yaml)으로 (AMCL map→odom 사용). false면 언독 때 기록한 odom 위치 (바퀴 오차가 쌓임)",
       "return_stall_time": "도크 복귀 중 이 시간 동안 경로 거리가 search_stall_dist만큼도 안 줄면 막힘 경고 [s]. 처음 막히면 지도 벽을 빼고 라이다만 보며 계속 감 (AMCL 어긋남으로 지도 벽이 통로를 막는 경우)"
     },
@@ -48,6 +50,8 @@
     "return_use_map": true,
     "return_timeout": 60.0,
     "return_arrive": 0.15,
+    "return_near": 0.4,
+    "return_snap_done": 0.1,
     "return_stall_time": 5.0
   },
   "start_face": {

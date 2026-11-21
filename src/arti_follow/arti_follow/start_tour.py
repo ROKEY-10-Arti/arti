@@ -249,12 +249,23 @@ class TourMixin:
                                    f'지금 {math.hypot(hx - pose[0], hy - pose[1]):.2f} m')
         if self.state == 'RETURN':
             dist = math.hypot(hx - pose[0], hy - pose[1])
+            close = ''
             if dist > p['return_arrive']:
                 self.dbg['reason'] = 'return'
                 self.go_to(pose, (hx, hy))
-                return self.return_watch(now, dist)
+                # return_near 안인데 더 못 다가가면 도착으로 본다 (2026-11-21 13:43: 언독 지점이 도크·벽에서 robot_radius
+                # 여유 안이라 길 찾기가 목표를 로봇 앞으로 옮김(goal_snapped, 경로 0.05 m) → DWA는 '다 왔다'며 (0, 0),
+                # 도착 판정은 0.15 m라 0.18 m 앞에서 90 s 넘게 서 있음). 도크 IR은 이 거리에서 충분히 닿는다
+                if dist <= p['return_near']:
+                    if self.dbg.get('goal_snapped') and self.path_dist is not None \
+                            and self.path_dist < p['return_snap_done']:
+                        close = ', 언독 지점이 장애물 여유 안이라 더 못 다가감'
+                    elif self.ret_progress_at is not None and now - self.ret_progress_at >= p['return_stall_time']:
+                        close = f', {p["return_stall_time"]:.0f} s 동안 더 못 다가감'
+                if not close:
+                    return self.return_watch(now, dist)
             self.get_logger().info(f'언독 지점 도착 (남은 {dist:.2f} m, {now - self.ret_at:.0f} s 걸림'
-                                   f'{", 지도 벽 빼고 옴" if self.return_lidar_only else ""}) → 도크 쪽으로 돌기')
+                                   f'{", 지도 벽 빼고 옴" if self.return_lidar_only else ""}{close}) → 도크 쪽으로 돌기')
             self.return_lidar_only = False
             self.ret_at = now
             self.set_state('DOCK_FACE')
