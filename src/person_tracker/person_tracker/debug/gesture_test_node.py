@@ -17,6 +17,7 @@ bootstrap_venv()
 
 import cv2
 import numpy as np
+import torch
 from std_msgs.msg import String
 
 from person_tracker.nodes.base_tracker_node import BaseTrackerNode, run_tracker_node
@@ -34,8 +35,16 @@ from person_tracker.core.gesture_core import (
     find_best_hand_owner_slot,
     infer_fallback_hand_slot,
 )
-from person_tracker.core.multi_tracker_core import UnifiedTrackedPerson
-from person_tracker.debug.reid_visualizer import ReIDDebugVisualizer
+from person_tracker.core.multi_tracker_core import MultiModelTrackerCore, UnifiedTrackedPerson
+from person_tracker.debug.reid_visualizer import (
+    ReIDDebugVisualizer,
+    compose_dashboard_frame,
+    create_reid_trackbars,
+    draw_model_mode_bars,
+    handle_model_mode_click,
+    handle_model_mode_key,
+    render_benchmark_panel,
+)
 
 
 class GestureTestNode(BaseTrackerNode):
@@ -46,7 +55,9 @@ class GestureTestNode(BaseTrackerNode):
     - enable_state_store=True (기본): 동일 프로세스 `import` 모듈용 상태 스냅샷·콜백 활성화
     """
 
-    BAR_HEIGHT = 38
+    BAR_HEIGHT = 34
+    MODEL_BAR_ROW_H = 30
+    STATUS_BAR_H = 22
 
     def __init__(self):
         super().__init__(
@@ -66,6 +77,9 @@ class GestureTestNode(BaseTrackerNode):
         self.declare_parameter('min_person_width_px', 44)
         self.declare_parameter('require_pose_wrist', False)
         self.declare_parameter('show_reid_viz', True)
+        self.declare_parameter('show_model_bar', True)
+        self.declare_parameter('show_bench_viz', True)
+        self.declare_parameter('single_window', True)
 
         self.use_yolo_roi = bool(self.get_parameter('use_yolo_roi').value)
         fist_hold = int(self.get_parameter('fist_hold_frames').value)
@@ -77,6 +91,11 @@ class GestureTestNode(BaseTrackerNode):
         self.min_person_width_px = int(self.get_parameter('min_person_width_px').value)
         self.require_pose_wrist = bool(self.get_parameter('require_pose_wrist').value)
         self.show_reid_viz = bool(self.get_parameter('show_reid_viz').value)
+        self.show_model_bar = bool(self.get_parameter('show_model_bar').value)
+        self.show_bench_viz = bool(self.get_parameter('show_bench_viz').value)
+        self.single_window = bool(self.get_parameter('single_window').value)
+        self._display_scale = 1.0
+        self._main_frame_size = (640, 480)
 
         self.gesture_detector = HandGestureDetector(
             num_hands=2,
@@ -98,8 +117,16 @@ class GestureTestNode(BaseTrackerNode):
 
         self.reid_win_name = 'ReID Similarity & 304D HSV Vector'
         self.reid_viz = ReIDDebugVisualizer()
-        if self.show_gui and self.show_reid_viz:
-            self._ensure_reid_window()
+        self.bench_win_name = 'Model Benchmark & Metrics'
+        self._bench_stats = {}
+        if self.show_gui:
+            if self.single_window:
+                self._ensure_reid_window()
+            else:
+                if self.show_reid_viz:
+                    self._ensure_reid_window()
+                if self.show_bench_viz:
+                    cv2.namedWindow(self.bench_win_name)
 
         self.get_logger().info(
             f'GestureTestNode 시작 | 소스: {self.image_source_label} | '
@@ -108,36 +135,9 @@ class GestureTestNode(BaseTrackerNode):
         )
 
     def _ensure_reid_window(self):
-        """ReID 모니터 창과 4개 실시간 튜닝 트랙바(Match%, Coex%, Margin%, ConfirmF)를 생성·연동합니다."""
-        cv2.namedWindow(self.reid_win_name)
-        cfg = self._tracker_cfg
-        m_val = int(round((self.tracker.reid_match_thresh if self.tracker else float(cfg['reid_match_thresh'])) * 100))
-        c_val = int(round((self.tracker.coexist_min_sim if self.tracker else float(cfg['coexist_min_sim'])) * 100))
-        g_val = int(round((self.tracker.recover_margin if self.tracker else float(cfg['recover_margin'])) * 100))
-        f_val = int(self.tracker.recover_confirm_frames if self.tracker else int(cfg['recover_confirm_frames']))
-
-        def _on_match(v):
-            if self.tracker is not None:
-                val = max(0.30, v / 100.0)
-                self.tracker.reid_match_thresh = val
-                self.tracker.search_min_sim = max(0.28, val - 0.02)
-
-        def _on_coex(v):
-            if self.tracker is not None:
-                self.tracker.coexist_min_sim = max(0.50, v / 100.0)
-
-        def _on_margin(v):
-            if self.tracker is not None:
-                self.tracker.recover_margin = max(0.0, v / 100.0)
-
-        def _on_confirm(v):
-            if self.tracker is not None:
-                self.tracker.recover_confirm_frames = max(1, int(v))
-
-        cv2.createTrackbar('Match%', self.reid_win_name, m_val, 80, _on_match)
-        cv2.createTrackbar('Coex%', self.reid_win_name, c_val, 95, _on_coex)
-        cv2.createTrackbar('Margin%', self.reid_win_name, g_val, 20, _on_margin)
-        cv2.createTrackbar('ConfirmF', self.reid_win_name, f_val, 5, _on_confirm)
+        """ReID 모니터 창(단일 대시보드 시 메인 창)에 4개 실시간 튜닝 트랙바를 생성·연동합니다."""
+        target_win = self.win_name if self.single_window else self.reid_win_name
+        create_reid_trackbars(target_win, lambda: self.tracker, defaults=self._tracker_cfg)
 
     def _on_tracker_reset(self, _reason: str):
         self.gesture_mgr.reset_all()
@@ -159,7 +159,19 @@ class GestureTestNode(BaseTrackerNode):
             f'[제스처 기준] fist={self.gesture_mgr.fist_hold_frames}f, open={self.gesture_mgr.open_hold_frames}f'
         )
 
+    def _map_mouse_point(self, x: int, y: int) -> Tuple[int, int]:
+        if self._display_scale > 0.0 and abs(self._display_scale - 1.0) > 1e-4:
+            return int(round(x / self._display_scale)), int(round(y / self._display_scale))
+        return x, y
+
+    def _header_height(self) -> int:
+        bars_h = self.BAR_HEIGHT + (2 * self.MODEL_BAR_ROW_H if (self.show_model_bar and self.use_yolo_roi and self.tracker is not None) else 0)
+        return bars_h + self.STATUS_BAR_H
+
     def _handle_custom_mouse(self, x: int, y: int) -> bool:
+        mw, mh = self._main_frame_size
+        if x < 0 or y < 0 or x >= mw or y >= mh:
+            return True
         if y <= self.BAR_HEIGHT:
             slot_w = max(1, self.frame_width // 4)
             slot_idx = min(3, max(0, x // slot_w))
@@ -172,6 +184,15 @@ class GestureTestNode(BaseTrackerNode):
             else:
                 self._adjust_thresholds(d_open=1 if x >= (3 * slot_w + slot_w // 2) else -1)
             return True
+        if self.show_model_bar and self.use_yolo_roi and self.tracker is not None:
+            msg = handle_model_mode_click(
+                x, y, self.frame_width, self.BAR_HEIGHT, self.tracker, row_h=self.MODEL_BAR_ROW_H
+            )
+            if msg is not None:
+                self.get_logger().info(msg)
+                return True
+        if y <= self._header_height():
+            return True
         if not self.use_yolo_roi:
             return True
         return False
@@ -180,26 +201,44 @@ class GestureTestNode(BaseTrackerNode):
         if key in (ord('y'), ord('Y')):
             self._toggle_yolo_roi()
             return True
-        if key == ord('1'):
+        if self.use_yolo_roi and self.tracker is not None:
+            msg = handle_model_mode_key(key, self.tracker)
+            if msg is not None:
+                self.get_logger().info(msg)
+                return True
+        if key == ord('['):
             self._adjust_thresholds(d_fist=-1)
             return True
-        if key == ord('2'):
+        if key == ord(']'):
             self._adjust_thresholds(d_fist=1)
             return True
-        if key == ord('3'):
+        if key in (ord('-'), ord('_')):
             self._adjust_thresholds(d_open=-1)
             return True
-        if key == ord('4'):
+        if key in (ord('='), ord('+')):
             self._adjust_thresholds(d_open=1)
             return True
         if key in (ord('v'), ord('V')):
             self.show_reid_viz = not self.show_reid_viz
-            if self.show_gui:
+            if self.show_gui and not self.single_window:
                 if self.show_reid_viz:
                     self._ensure_reid_window()
                 else:
                     cv2.destroyWindow(self.reid_win_name)
             self.get_logger().info(f'[ReID 그래프/벡터 창] {self.show_reid_viz}')
+            return True
+        if key in (ord('b'), ord('B')):
+            self.show_bench_viz = not self.show_bench_viz
+            if self.show_gui and not self.single_window:
+                if self.show_bench_viz:
+                    cv2.namedWindow(self.bench_win_name)
+                else:
+                    cv2.destroyWindow(self.bench_win_name)
+            self.get_logger().info(f'[모델 벤치마크 창] {self.show_bench_viz}')
+            return True
+        if key in (ord('c'), ord('C')):
+            self._bench_stats.clear()
+            self.get_logger().info('[벤치마크 비교표 초기화]')
             return True
         return False
 
@@ -256,8 +295,8 @@ class GestureTestNode(BaseTrackerNode):
                 (35, 130, 35) if self.use_yolo_roi else (60, 60, 60),
             ),
             ('[R] Reset Target', (140, 80, 30)),
-            (f'[1/2] Fist:{self.gesture_mgr.fist_hold_frames}f', (55, 55, 55)),
-            (f'[3/4] Open:{self.gesture_mgr.open_hold_frames}f', (55, 55, 55)),
+            (f'[[/]] Fist:{self.gesture_mgr.fist_hold_frames}f', (55, 55, 55)),
+            (f'[-/=] Open:{self.gesture_mgr.open_hold_frames}f', (55, 55, 55)),
         ]
         for idx, (label, bg) in enumerate(items):
             x1 = idx * slot_w
@@ -267,33 +306,41 @@ class GestureTestNode(BaseTrackerNode):
             cv2.putText(
                 frame,
                 label,
-                (x1 + 8, 24),
+                (x1 + 8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.44,
+                0.42,
                 (255, 255, 255),
                 1,
                 cv2.LINE_AA,
             )
 
+        y_cur = self.BAR_HEIGHT
+        if self.show_model_bar and self.use_yolo_roi and self.tracker is not None:
+            y_cur = draw_model_mode_bars(frame, self.tracker, y_cur, row_h=self.MODEL_BAR_ROW_H)
+
+        model_tag = ''
         adapt_str = ''
-        if self.use_yolo_roi and self.tracker is not None and self.tracker.target_id is not None:
-            adapt_str = f' | {self.tracker.metrics.adaptive_state}'
+        if self.use_yolo_roi and self.tracker is not None:
+            m = self.tracker.metrics
+            model_tag = f'{m.model_label} | '
+            if self.tracker.target_id is not None:
+                adapt_str = f' | {m.adaptive_state}'
         pub_tag = ''
         if self.localizer is not None and not self.publish_target_topics:
             pub_tag = ' | PUB:OFF'
         mask_tag = '' if self.show_pose_mask else ' | MASK:OFF'
         state_txt = (
-            f'FPS:{self.fps:4.1f} | Total:{self.total_ms:4.1f}ms | '
+            f'{model_tag}FPS:{self.fps:4.1f} | Total:{self.total_ms:4.1f}ms | '
             f'Gesture:{self.gesture_ms:4.1f}ms | CPU:{self.cpu_percent:4.1f}% | '
             f'{"SCANNING" if gesture_active else "LOCKED"}{adapt_str}{pub_tag}{mask_tag}'
         )
-        cv2.rectangle(frame, (0, self.BAR_HEIGHT), (w, self.BAR_HEIGHT + 24), (24, 24, 24), -1)
+        cv2.rectangle(frame, (0, y_cur), (w, y_cur + self.STATUS_BAR_H), (24, 24, 24), -1)
         cv2.putText(
             frame,
             state_txt,
-            (8, self.BAR_HEIGHT + 17),
+            (8, y_cur + 15),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.43,
+            0.40,
             (0, 255, 255) if gesture_active else (80, 255, 120),
             1,
             cv2.LINE_AA,
@@ -510,7 +557,23 @@ class GestureTestNode(BaseTrackerNode):
         gesture_active: bool,
     ):
         vis = frame.copy()
+        if (
+            self.show_pose_mask
+            and self.use_yolo_roi
+            and self.tracker is not None
+            and self.tracker.current_task_name == 'segment'
+        ):
+            for p in detections:
+                if p.mask_poly is not None and len(p.mask_poly) >= 3:
+                    cv2.polylines(
+                        vis,
+                        [p.mask_poly.astype(np.int32)],
+                        isClosed=True,
+                        color=(0, 230, 80) if p.is_target else (140, 120, 90),
+                        thickness=2 if p.is_target else 1,
+                    )
         self._draw_pose_and_mask_overlays(vis, frame, detections)
+        y_floor = self._header_height() + 18
         for p in detections:
             x1, y1, x2, y2 = p.bbox
             if p.is_target:
@@ -518,7 +581,7 @@ class GestureTestNode(BaseTrackerNode):
                 cv2.putText(
                     vis,
                     f'TARGET ID:{p.track_id} (Gesture PAUSED)',
-                    (x1, max(78, y1 - 8)),
+                    (x1, max(y_floor, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.50,
                     (0, 255, 0),
@@ -532,7 +595,7 @@ class GestureTestNode(BaseTrackerNode):
                     cv2.putText(
                         vis,
                         f'ID:{p.track_id} sim:{p.similarity:.2f}',
-                        (x1, max(78, y1 - 8)),
+                        (x1, max(y_floor, y1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.44,
                         (180, 180, 180),
@@ -547,23 +610,72 @@ class GestureTestNode(BaseTrackerNode):
                     if prog is not None:
                         self._draw_progress_badge(
                             vis,
-                            (x1, max(84, y1 - 12)),
+                            (x1, max(y_floor + 4, y1 - 12)),
                             prog,
                             label_prefix=f'ID:{p.track_id} ',
                         )
 
         if not self.use_yolo_roi and 0 in progresses:
-            self._draw_progress_badge(vis, (12, 92), progresses[0], label_prefix='Hand ')
+            self._draw_progress_badge(vis, (12, y_floor + 10), progresses[0], label_prefix='Hand ')
 
         for obs in observations:
             self._draw_hand_skeleton(vis, obs)
 
         self._draw_top_bar(vis, gesture_active=gesture_active)
-        self.last_display_frame = vis
-        cv2.imshow(self.win_name, vis)
+        self._main_frame_size = (vis.shape[1], vis.shape[0])
+
+        reid_panel = None
         if self.show_reid_viz and self.use_yolo_roi and self.tracker is not None:
             reid_panel = self.reid_viz.render(self.tracker, detections)
-            cv2.imshow(self.reid_win_name, reid_panel)
+
+        bench_panel = None
+        if self.show_bench_viz:
+            if self.use_yolo_roi and self.tracker is not None and self.tracker.metrics.inference_ms > 0.0:
+                m = self.tracker.metrics
+                mode_name = MultiModelTrackerCore.MODE_NAMES.get(self.tracker.mode, str(self.tracker.mode))
+                self._bench_stats[f'{m.model_label} | {mode_name}'] = (
+                    m.inference_ms,
+                    m.post_track_ms + m.reid_ms,
+                    m.total_ms,
+                    m.max_infer_fps,
+                )
+            vram_mb = (
+                torch.cuda.memory_allocated() / (1024 * 1024)
+                if (self.tracker is not None and 'CUDA' in self.tracker.metrics.device and torch.cuda.is_available())
+                else None
+            )
+            ram_mb = self.process.memory_info().rss / (1024 * 1024)
+            cam_status = self.localizer.get_camera_pose_status() if self.localizer is not None else None
+            bench_panel = render_benchmark_panel(
+                tracker=self.tracker if self.use_yolo_roi else None,
+                cam_fps=self.fps,
+                total_ms=self.total_ms,
+                gesture_ms=self.gesture_ms,
+                cpu_percent=self.cpu_percent,
+                ram_mb=ram_mb,
+                vram_mb=vram_mb,
+                num_persons=len(detections),
+                cam_status=cam_status,
+                loc_res=self.last_loc_result,
+                bench_stats=self._bench_stats,
+            )
+
+        if self.single_window:
+            dashboard, self._display_scale = compose_dashboard_frame(
+                vis,
+                reid_panel=reid_panel,
+                bench_panel=bench_panel,
+            )
+            self.last_display_frame = dashboard
+            cv2.imshow(self.win_name, dashboard)
+        else:
+            self._display_scale = 1.0
+            self.last_display_frame = vis
+            cv2.imshow(self.win_name, vis)
+            if reid_panel is not None:
+                cv2.imshow(self.reid_win_name, reid_panel)
+            if bench_panel is not None:
+                cv2.imshow(self.bench_win_name, bench_panel)
         key = cv2.waitKey(1) & 0xFF
         if key != 255:
             self._process_key(key)

@@ -15,6 +15,10 @@ docs/
 ├── course/              코스 관람 (src/arti_pc2_nav/, robot4)
 │   ├── README.md            다른 팀과 주고받는 것, 패키지 README 링크
 │   └── arti_course_flow.drawio  흐름 그림 (예전 구조 기준)
+├── perception/          사람 인식/재식별 오프라인 벤치마크 & GT (src/person_tracker/)
+│   ├── README.md            노트북 이어하기 가이드, pose_estimate2 GT 평가 요약, 도구 사용법
+│   ├── gt/                  Human-in-the-Loop BBox GT CSV
+│   └── results/             7개 Bag + GT 평가 요약(`summary*.md/csv`) 및 차트(`charts/*.png`)
 └── troubleshooting/     에러 기록 (하위 폴더도 env/robot/common/follow)
 ```
 

@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from typing import Optional, Tuple
+import cv2
 
 from builtin_interfaces.msg import Time as BuiltinTime
 import numpy as np
@@ -157,7 +158,7 @@ class LidarPersonLocalizer:
         yaw = float(_param_or_cfg('cam_yaw', float(ext_cfg.get('yaw', 0.0))))
         use_deg = bool(_param_or_cfg('cam_use_degrees', bool(ext_cfg.get('use_degrees', True))))
         publish_cam_tf = bool(_param_or_cfg('publish_cam_tf', True))
-        self.scan_sync_slop_sec = float(_param_or_cfg('scan_sync_slop_sec', 0.25))
+        self.scan_sync_slop_sec = float(_param_or_cfg('scan_sync_slop_sec', 0.55))
         self.require_scan_sync = bool(_param_or_cfg('require_scan_sync', True))
         self.compensate_clock_offset = bool(_param_or_cfg('compensate_clock_offset', True))
         self.clock_offset_threshold_sec = float(_param_or_cfg('clock_offset_threshold_sec', 0.12))
@@ -165,6 +166,14 @@ class LidarPersonLocalizer:
         self.lidar_cluster_tol_m = max(0.10, float(_param_or_cfg('lidar_cluster_tol_m', 0.35)))
         self.lidar_min_cluster_rays = max(1, int(_param_or_cfg('lidar_min_cluster_rays', 2)))
         self.use_pose_sector = bool(_param_or_cfg('use_pose_sector', True))
+        # ① 정적 지도 벽 제거 / ② 전체 스캔 긴 벽 세그먼트 제거 (개별 테스트용 토글)
+        self.filter_map_walls = bool(_param_or_cfg('filter_map_walls', True))
+        self.map_file = str(_param_or_cfg('map_file', '')).strip()
+        self.map_wall_margin_m = max(0.0, float(_param_or_cfg('map_wall_margin_m', 0.25)))
+        self.filter_long_segments = bool(_param_or_cfg('filter_long_segments', True))
+        self.wall_seg_gap_m = max(0.05, float(_param_or_cfg('wall_seg_gap_m', 0.15)))
+        self.wall_seg_max_width_m = max(0.35, float(_param_or_cfg('wall_seg_max_width_m', 0.75)))
+        self.map_dt = self._load_map_dt() if self.filter_map_walls else None
         self.use_kinematic_gating = bool(_param_or_cfg('use_kinematic_gating', True))
         # 관측 전용(publish_target_topics=false)일 때는 기본적으로 도킹 중인 로봇의 라이다 모터를 임의로 켜지 않음
         publish_topics = bool(_param_or_cfg('publish_target_topics', True))
@@ -248,6 +257,99 @@ class LidarPersonLocalizer:
         self._last_odom_vel: np.ndarray = np.zeros(2, dtype=np.float64)
         self._last_valid_time: float = 0.0
         self._last_cam_dist: Optional[float] = None
+        self._odom_history: deque = deque(maxlen=40)  # (t_valid, odom_xy, reliability)
+        self._kin_window_sec: float = 1.2
+        self._kin_vel_tau_sec: float = 0.28
+        self._kin_coast_tau_sec: float = 0.90
+
+    def _resolve_default_map_path(self) -> str:
+        """map_file / $ARTI_MAP 미지정 시 워크스페이스 maps/gallery.yaml을 자동 탐색합니다."""
+        cur = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(7):
+            cand = os.path.join(cur, 'maps', 'gallery.yaml')
+            if os.path.isfile(cand):
+                return cand
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return ''
+
+    def _is_map_point_wall_or_outside(self, mx: float, my: float, min_clearance: float = 0.0) -> bool:
+        """map 좌표 (mx, my)가 지도 범위 밖이거나 벽/미탐색 내부인지 판정합니다."""
+        if self.map_dt is None:
+            return False
+        dt, res, (ox, oy) = self.map_dt
+        c = int(math.floor((mx - ox) / res))
+        r = dt.shape[0] - 1 - int(math.floor((my - oy) / res))
+        if not (0 <= c < dt.shape[1] and 0 <= r < dt.shape[0]):
+            return True
+        return float(dt[r, c]) <= min_clearance
+
+    def _load_map_dt(self):
+        """지도(map_file 또는 $ARTI_MAP, 없으면 gallery.yaml 탐색)에서 벽·미탐색까지 거리 표 [m]를 생성합니다."""
+        path = self.map_file or os.environ.get('ARTI_MAP', '') or self._resolve_default_map_path()
+        if not path:
+            self.node.get_logger().warn('[MapFilter] map_file / $ARTI_MAP 비어 있음 -> 지도 벽 필터 비활성화')
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                m = yaml.safe_load(f)
+            img = cv2.imread(os.path.join(os.path.dirname(path), m['image']), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise OSError(f'지도 이미지 로드 실패: {m["image"]}')
+            occ = img / 255.0 if m.get('negate', 0) else (255 - img.astype(np.float32)) / 255.0
+            # 검은 벽 + 벽 안쪽 회색(미탐색) 모두 0(비통과)으로 두고 빈칸에서 벽까지 거리 계산
+            free = (occ <= float(m.get('free_thresh', 0.196))).astype(np.uint8)
+            res = float(m['resolution'])
+            dt = cv2.distanceTransform(free, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) * res
+            origin = (float(m['origin'][0]), float(m['origin'][1]))
+            self.node.get_logger().info(
+                f'[MapFilter] 지도 로드 완료: {path} (margin={self.map_wall_margin_m:.2f}m)'
+            )
+            return dt, res, origin
+        except Exception as exc:
+            self.node.get_logger().warn(f'[MapFilter] 지도 로드 실패 ({path}: {exc!r}) -> 비활성화')
+            return None
+
+    def _non_wall_segment_mask(
+        self, ranges: np.ndarray, angles: np.ndarray, valid: np.ndarray
+    ) -> np.ndarray:
+        """부채꼴 절단 전 전체 360° 스캔에서 폭이 wall_seg_max_width_m를 넘는 긴 벽 세그먼트를 False로 표시."""
+        idx = np.nonzero(valid)[0]
+        keep = np.ones(idx.size, dtype=bool)
+        if not self.filter_long_segments or idx.size < 2:
+            return keep
+        pts = np.stack([ranges[idx] * np.cos(angles[idx]), ranges[idx] * np.sin(angles[idx])], axis=1)
+        cut = (np.diff(idx) > 2) | (np.hypot(*np.diff(pts, axis=0).T) > self.wall_seg_gap_m)
+        for seg in np.split(np.arange(idx.size), np.nonzero(cut)[0] + 1):
+            if seg.size < 2:
+                continue
+            width = math.hypot(float(np.ptp(pts[seg, 0])), float(np.ptp(pts[seg, 1])))
+            if width > self.wall_seg_max_width_m:
+                keep[seg] = False
+        return keep
+
+    def _filter_map_wall_points(
+        self, sx: np.ndarray, sy: np.ndarray, lookup_time: Optional[Time]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """섹터 내 카메라 좌표 점들 중 지도 벽(map_wall_margin_m 이내)에 해당하는 점을 제거."""
+        if not self.filter_map_walls or self.map_dt is None or sx.size == 0:
+            return sx, sy
+        tf_map_from_cam = self._lookup(self.map_frame, self.camera_link_frame, lookup_time)
+        if tf_map_from_cam is None:
+            return sx, sy
+        mat = transform_to_matrix(tf_map_from_cam)
+        mx = mat[0, 0] * sx + mat[0, 1] * sy + mat[0, 3]
+        my = mat[1, 0] * sx + mat[1, 1] * sy + mat[1, 3]
+        dt, res, (ox, oy) = self.map_dt
+        c = np.floor((mx - ox) / res).astype(int)
+        r = dt.shape[0] - 1 - np.floor((my - oy) / res).astype(int)
+        in_b = (c >= 0) & (c < dt.shape[1]) & (r >= 0) & (r < dt.shape[0])
+        keep = np.zeros(sx.size, dtype=bool)
+        if np.any(in_b):
+            keep[in_b] = dt[r[in_b], c[in_b]] > self.map_wall_margin_m
+        return sx[keep], sy[keep]
 
     def _load_yaml_defaults(self) -> dict:
         return load_phone_camera_config()
@@ -338,9 +440,9 @@ class LidarPersonLocalizer:
         now_wall = time.time()
         rx_wall = frame_rx_wall if (frame_rx_wall is not None and frame_rx_wall > 0.0) else now_wall
         with self._scan_lock:
-            live = [(s_sec, w_t, m) for (s_sec, w_t, m) in self._scan_buffer if (now_wall - w_t) < 2.5]
+            live = [(s_sec, w_t, m) for (s_sec, w_t, m) in self._scan_buffer if (now_wall - w_t) < 3.0]
         if not live:
-            if self.latest_scan is not None and (now_wall - self.last_scan_WallTime) < 2.5:
+            if self.latest_scan is not None and (now_wall - self.last_scan_WallTime) < 3.0:
                 return self.latest_scan, None, False, 0.0
             return None, None, False, 0.0
 
@@ -526,6 +628,7 @@ class LidarPersonLocalizer:
         self._last_odom_vel = np.zeros(2, dtype=np.float64)
         self._last_valid_time = 0.0
         self._last_cam_dist = None
+        self._odom_history.clear()
 
     def _reset_kinematics(self, track_id: Optional[int] = None):
         self.reset_kinematics(track_id)
@@ -558,7 +661,8 @@ class LidarPersonLocalizer:
 
         prev_xy = self._last_odom_xy
         prev_vel = self._last_odom_vel
-        pred_xy = prev_xy + prev_vel * min(dt, 0.8)
+        v_coast = prev_vel * math.exp(-dt / self._kin_coast_tau_sec)
+        pred_xy = prev_xy + v_coast * min(dt, 1.0)
         err = cand_xy - pred_xy
         disp = cand_xy - prev_xy
         disp_norm = float(np.linalg.norm(disp))
@@ -595,18 +699,64 @@ class LidarPersonLocalizer:
 
         return True, norm_d
 
-    def _update_kinematics(self, odom_xy: np.ndarray, now: float, cam_dist: float):
+    def _update_kinematics(
+        self,
+        odom_xy: np.ndarray,
+        now: float,
+        cam_dist: float,
+        cluster_width: float = 0.0,
+    ):
+        """일정 시간창 내 유효 LiDAR 관측 이력을 시간 감쇠 EMA + 가중 선형추정으로 누적합니다."""
+        if self._last_valid_time > 0.0 and (now - self._last_valid_time) > 2.2:
+            self._odom_history.clear()
+
+        rel = 0.45 if cluster_width > 0.8 else 1.0
+        self._odom_history.append((now, odom_xy.copy(), rel))
+        while len(self._odom_history) > 2 and (now - self._odom_history[0][0]) > self._kin_window_sec:
+            self._odom_history.popleft()
+
+        vel_ema: Optional[np.ndarray] = None
         if self._last_odom_xy is not None and 0.02 < (now - self._last_valid_time) < 2.0:
             dt = now - self._last_valid_time
             inst_vel = (odom_xy - self._last_odom_xy) / dt
-            vel = 0.6 * self._last_odom_vel + 0.4 * inst_vel
-            spd = float(np.linalg.norm(vel))
-            if spd > 1.6:
-                vel *= 1.6 / spd
-            self._last_odom_vel = vel
+            alpha = (1.0 - math.exp(-dt / self._kin_vel_tau_sec)) * rel
+            alpha = max(0.08, min(0.75, alpha))
+            vel_ema = (1.0 - alpha) * self._last_odom_vel + alpha * inst_vel
+
+        vel_reg: Optional[np.ndarray] = None
+        anchor_xy = odom_xy
+        if len(self._odom_history) >= 3:
+            ts = np.array([item[0] for item in self._odom_history], dtype=np.float64)
+            span = float(ts[-1] - ts[0])
+            if span >= 0.15:
+                pts = np.array([item[1] for item in self._odom_history], dtype=np.float64)
+                rels = np.array([item[2] for item in self._odom_history], dtype=np.float64)
+                w = rels * np.exp(-(now - ts) / 0.35)
+                w_sum = float(np.sum(w))
+                if w_sum > 1e-6:
+                    t_bar = float(np.sum(w * ts) / w_sum)
+                    dt_c = ts - t_bar
+                    denom = float(np.sum(w * dt_c * dt_c))
+                    if denom > 1e-4:
+                        p_bar = np.sum(w[:, None] * pts, axis=0) / w_sum
+                        vel_reg = np.sum(w[:, None] * dt_c[:, None] * (pts - p_bar), axis=0) / denom
+                        p_now = p_bar + vel_reg * (now - t_bar)
+                        anchor_xy = 0.70 * odom_xy + 0.30 * p_now
+
+        if vel_ema is not None and vel_reg is not None:
+            vel = 0.5 * vel_ema + 0.5 * vel_reg
+        elif vel_reg is not None:
+            vel = vel_reg
+        elif vel_ema is not None:
+            vel = vel_ema
         else:
-            self._last_odom_vel = np.zeros(2, dtype=np.float64)
-        self._last_odom_xy = odom_xy
+            vel = np.zeros(2, dtype=np.float64)
+
+        spd = float(np.linalg.norm(vel))
+        if spd > 1.6:
+            vel *= 1.6 / spd
+        self._last_odom_vel = vel
+        self._last_odom_xy = anchor_xy
         self._last_valid_time = now
         self._last_cam_dist = cam_dist
 
@@ -682,6 +832,7 @@ class LidarPersonLocalizer:
                 valid = np.isfinite(ranges) & (ranges >= r_min) & (ranges <= r_max)
 
                 if np.any(valid):
+                    non_wall_seg = self._non_wall_segment_mask(ranges, angles, valid)
                     rv = ranges[valid]
                     av = angles[valid]
                     pts_lidar = np.vstack(
@@ -695,40 +846,58 @@ class LidarPersonLocalizer:
                     if np.any(front_mask):
                         xc = xc[front_mask]
                         yc = yc[front_mask]
+                        non_wall_seg = non_wall_seg[front_mask]
                         betas = np.arctan2(yc, xc)
                         diffs = np.abs(np.arctan2(np.sin(betas - alpha_c), np.cos(betas - alpha_c)))
                         in_sector = diffs <= half_sector
 
                         if np.any(in_sector):
-                            if not kin_active:
-                                dists = np.hypot(xc[in_sector], yc[in_sector])
+                            use_scan_clk = (abs(clock_offset) > 0.0 and scan_time is not None)
+                            lookup_t = scan_time if use_scan_clk else frame_time
+
+                            sx, sy = xc[in_sector], yc[in_sector]
+                            if self.filter_long_segments:
+                                seg_ok = non_wall_seg[in_sector]
+                                sx, sy = sx[seg_ok], sy[seg_ok]
+                            if self.filter_map_walls and sx.size > 0:
+                                sx, sy = self._filter_map_wall_points(sx, sy, lookup_t)
+
+                            if sx.size == 0:
+                                # 부채꼴에 라이다 점은 있었으나 모두 벽으로 걸러짐 -> 벽 가림
+                                if kin_active:
+                                    occluded = True
+                            elif not kin_active:
+                                dists = np.hypot(sx, sy)
                                 matched_rays = int(dists.size)
                                 cam_dist_m = self._select_cluster_distance(dists)
                                 source = 'LiDAR'
                             else:
                                 tf_odom_from_cam = self._lookup(
-                                    self.odom_frame,
-                                    self.camera_link_frame,
-                                    scan_time if (abs(clock_offset) > 0.0 and scan_time is not None) else (scan_time or frame_time),
+                                    self.odom_frame, self.camera_link_frame, lookup_t
                                 )
                                 mat_odom_from_cam = (
                                     transform_to_matrix(tf_odom_from_cam)
                                     if tf_odom_from_cam is not None
                                     else None
                                 )
+
                                 clusters = self._cluster_sector_points(
-                                    xc[in_sector], yc[in_sector], gap=0.25
+                                    sx, sy, gap=min(self.lidar_cluster_tol_m, 0.25)
                                 )
-                                # 1-ray 단발 노이즈에 첫 프레임이 잠기지 않도록 다중 ray 클러스터 우선
                                 valid_clusters = [
                                     c for c in clusters if c[4] >= self.lidar_min_cluster_rays
                                 ]
-                                cand_clusters = valid_clusters if valid_clusters else clusters
-                                dt = now_wall - self._last_valid_time if self._last_valid_time > 0.0 else 0.0
-                                best_cand = None  # (score, dist, count, odom_xy)
+                                if valid_clusters:
+                                    clusters = valid_clusters
 
-                                for c_dist, cx_c, cy_c, c_width, c_cnt in cand_clusters:
-                                    # 사람 체폭을 크게 넘는 넓은 벽/전시대 클러스터 페널티
+                                dt = (
+                                    now_wall - self._last_valid_time
+                                    if self._last_valid_time > 0.0
+                                    else 0.0
+                                )
+                                best_cand = None
+
+                                for c_dist, cx_c, cy_c, c_width, c_cnt in clusters:
                                     width_pen = 0.6 if c_width > 1.0 else 0.0
 
                                     if mat_odom_from_cam is not None:
@@ -755,29 +924,46 @@ class LidarPersonLocalizer:
 
                                     total_score = score + width_pen
                                     if best_cand is None or total_score < best_cand[0]:
-                                        best_cand = (total_score, c_dist, c_cnt, cand_xy)
+                                        best_cand = (total_score, c_dist, c_cnt, cand_xy, c_width)
 
                                 if best_cand is not None:
-                                    _, cam_dist_m, matched_rays, best_odom_xy = best_cand
+                                    _, cam_dist_m, matched_rays, best_odom_xy, best_width = best_cand
                                     source = 'LiDAR'
                                     if best_odom_xy is not None:
-                                        self._update_kinematics(best_odom_xy, now_wall, cam_dist_m)
+                                        self._update_kinematics(
+                                            best_odom_xy, now_wall, cam_dist_m, cluster_width=best_width
+                                        )
                                     else:
                                         self._last_cam_dist = cam_dist_m
                                         self._last_valid_time = now_wall
                                 else:
-                                    # 부채꼴에 라이다 점은 있으나 모두 앞 장애물(물리적 불가)로 탈락 → 가림
                                     occluded = True
 
-        # 2. 라이다 포인트가 없을 때 폴백 (단, 앞 장애물 가림 판정 시에는 bbox 추정·발행 모두 보류)
+        # 2. 라이다 포인트가 없을 때 폴백 (가림/급격한 CamEst 점프 시 발행 보류)
         if cam_dist_m is None:
-            if occluded and self._last_cam_dist is not None:
-                cam_dist_m = self._last_cam_dist
+            if occluded:
+                if self._last_cam_dist is not None:
+                    cam_dist_m = self._last_cam_dist
+                else:
+                    bbox_h = max(24.0, float(y2 - y1))
+                    cam_dist_m = float(np.clip((1.65 * fy) / bbox_h, 0.35, 8.0))
                 source = 'Occluded'
             else:
                 bbox_h = max(24.0, float(y2 - y1))
-                cam_dist_m = float(np.clip((1.65 * fy) / bbox_h, 0.35, 8.0))
-                source = 'CamEst'
+                est_dist = float(np.clip((1.65 * fy) / bbox_h, 0.35, 8.0))
+                if (
+                    kin_active
+                    and self._last_cam_dist is not None
+                    and self._last_valid_time > 0.0
+                    and (now_wall - self._last_valid_time) <= 2.2
+                    and abs(est_dist - self._last_cam_dist) > (0.65 + 1.2 * max(now_wall - self._last_valid_time, 0.05))
+                ):
+                    occluded = True
+                    cam_dist_m = self._last_cam_dist
+                    source = 'Occluded'
+                else:
+                    cam_dist_m = est_dist
+                    source = 'CamEst'
 
 
         # 상단 카메라(top_cam_link) 기준 타겟 3D 좌표
@@ -806,6 +992,14 @@ class LidarPersonLocalizer:
         mat_map_from_base, map_source = self._get_map_from_base_matrix(robot_lookup_time)
         if mat_map_from_base is not None:
             map_xyz = apply_transform_point(mat_map_from_base, base_xyz)
+            if (
+                source == 'CamEst'
+                and map_source == 'AMCL'
+                and self.filter_map_walls
+                and self._is_map_point_wall_or_outside(map_xyz[0], map_xyz[1], min_clearance=0.0)
+            ):
+                occluded = True
+                source = 'Occluded'
 
         res = TargetLocalizationResult(
             track_id=target.track_id,
