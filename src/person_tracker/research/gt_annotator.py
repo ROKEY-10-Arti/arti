@@ -8,13 +8,15 @@ ROS 2 Bag을 재생하면서 보조 트래커(기본 YOLO26n-seg + Adaptive)가 
 
 조작법:
   - Left-Click (클릭)        : 클릭한 위치의 검출 인물을 실제 타겟(GT)으로 지정 + 보조 트래커 즉시 재잠금
+                               (같은 겹침 위치 재클릭 시 겹친 후보 BBox 순환 선택)
+  - 0~9 숫자 + Enter         : 화면에 표시된 검출 ID 번호로 직접 GT 지정 + 보조 트래커 재잠금
   - Left-Drag  (드래그>=12px): 미검출 프레임 등에서 수동 GT BBox 직접 그리기
   - Right-Click 또는 N       : 현재 프레임 타겟 부재/완전 가림(gt_present=0) 표시
   - Space                    : 재생 / 일시정지 토글 (프레임 1에서 일시정지 상태로 시작)
   - A / D (또는 Left/Right)  : 이전 / 다음 프레임 이동
   - C                        : 보조 트래커 타겟 잠금 해제 (Anchor 초기화)
   - S                        : 현재까지 GT CSV 즉시 저장
-  - Q / ESC                  : GT CSV 저장 후 종료
+  - Q / ESC                  : GT CSV 저장 후 종료 (ID 입력 중 ESC는 입력 취소)
 
 사용 예시:
   python3 src/person_tracker/research/gt_annotator.py \
@@ -63,14 +65,19 @@ def _find_det_near_point(
     x: int,
     y: int,
     max_dist_px: float = 80.0,
+    cycle_after_id: Optional[int] = None,
 ) -> Optional[UnifiedTrackedPerson]:
-    """클릭 좌표를 포함하는 BBox(가장 작은 면적 우선) 또는 반경 내 가장 가까운 검출을 반환합니다."""
-    containing = [p for p in dets if _point_in_bbox(x, y, p.bbox)]
+    """클릭 좌표를 포함하는 BBox(면적 오름차순, 동일 위치 재클릭 시 순환) 또는 반경 내 가장 가까운 검출을 반환합니다."""
+    containing = sorted(
+        (p for p in dets if _point_in_bbox(x, y, p.bbox)),
+        key=lambda p: (p.bbox[2] - p.bbox[0]) * (p.bbox[3] - p.bbox[1]),
+    )
     if containing:
-        return min(
-            containing,
-            key=lambda p: (p.bbox[2] - p.bbox[0]) * (p.bbox[3] - p.bbox[1]),
-        )
+        if cycle_after_id is not None and len(containing) >= 2:
+            ids = [p.track_id for p in containing]
+            if cycle_after_id in ids:
+                return containing[(ids.index(cycle_after_id) + 1) % len(containing)]
+        return containing[0]
     if not dets:
         return None
     best = min(
@@ -201,6 +208,7 @@ def _render_ui_frame(
     drag_rect: Optional[Tuple[int, int, int, int]],
     tracker_state: str,
     corrections_cnt: int,
+    id_input_buf: str = '',
 ) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
@@ -272,10 +280,11 @@ def _render_ui_frame(
     # 상단 HUD 배너
     cv2.rectangle(vis, (0, 0), (w, 48), (20, 20, 20), -1)
     state_lbl = 'PAUSED' if paused else 'PLAY'
-    top_txt = f'[{state_lbl}] f {fidx}/{total_frames} ({rel_sec:.1f}s) | TRK:{tracker_state} | {gt_status_str} | Clicks:{corrections_cnt}'
+    id_part = f' | ID?:{id_input_buf}_ [Enter]' if id_input_buf else ''
+    top_txt = f'[{state_lbl}] f {fidx}/{total_frames} ({rel_sec:.1f}s) | TRK:{tracker_state} | {gt_status_str} | Clicks:{corrections_cnt}{id_part}'
     cv2.putText(vis, top_txt, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1, cv2.LINE_AA)
-    help_txt = 'L-Click:Select GT  L-Drag:Box  R-Click/N:Absent  Space:Play/Pause  A/D:Step  C:ClearTrk  S:Save  Q:Save&Quit'
-    cv2.putText(vis, help_txt, (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (200, 220, 200), 1, cv2.LINE_AA)
+    help_txt = 'L-Click:Select/Cycle  0-9+Enter:ID  L-Drag:Box  R-Click/N:Absent  Space:Play  A/D:Step  C:Clear  S:Save  Q:Quit'
+    cv2.putText(vis, help_txt, (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 220, 200), 1, cv2.LINE_AA)
     return vis
 
 
@@ -379,12 +388,43 @@ def run_annotator(args):
     paused = True
     drag_start: Optional[Tuple[int, int]] = None
     drag_cur: Optional[Tuple[int, int]] = None
+    id_input_buf = ''
+    last_click_info: Optional[Tuple[int, int, int, int]] = None  # (fidx, x, y, track_id)
+
+    def _invalidate_future_cache(after_fidx: int):
+        for k in [k for k in frame_cache if k > after_fidx]:
+            frame_cache.pop(k, None)
+
+    def _select_det_as_gt(
+        fidx: int,
+        rel_sec: float,
+        img: np.ndarray,
+        dets: List[UnifiedTrackedPerson],
+        det: UnifiedTrackedPerson,
+        source: str,
+    ):
+        tracker.last_frame = img
+        tracker.last_detections = dets
+        tracker.select_target_by_id(det.track_id)
+        for p in dets:
+            p.is_target = (p.track_id == det.track_id)
+        annotations[fidx] = {
+            'frame_idx': fidx,
+            't_sec': rel_sec,
+            'gt_present': 1,
+            'bbox': tuple(int(v) for v in det.bbox),
+            'corrected': 1,
+            'source': source,
+            'helper_track_id': int(det.track_id),
+        }
+        frame_cache[fidx] = (img, dets, det)
+        _invalidate_future_cache(fidx)
 
     win_name = f'Arti GT Annotator - {bag_name} ({args.model})'
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
 
     def _on_mouse(event, x, y, flags, param):
-        nonlocal drag_start, drag_cur
+        nonlocal drag_start, drag_cur, last_click_info
         img, dets, tgt = _ensure_frame(cur_fidx)
         rel_sec, _ = image_events[cur_fidx - 1]
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -397,6 +437,7 @@ def run_annotator(args):
             drag_start = None
             drag_cur = None
             if abs(x - sx) >= 12 and abs(y - sy) >= 12:
+                last_click_info = None
                 x1, x2 = min(sx, x), max(sx, x)
                 y1, y2 = min(sy, y), max(sy, y)
                 annotations[cur_fidx] = {
@@ -412,24 +453,24 @@ def run_annotator(args):
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 det = _find_det_near_point(dets, cx, cy, max_dist_px=60.0)
                 if det is not None:
+                    tracker.last_frame = img
+                    tracker.last_detections = dets
                     tracker.select_target_by_id(det.track_id)
+                _invalidate_future_cache(cur_fidx)
             else:
-                det = _find_det_near_point(dets, x, y)
+                cycle_id = None
+                if last_click_info is not None and last_click_info[0] == cur_fidx:
+                    dist_prev = ((last_click_info[1] - x) ** 2 + (last_click_info[2] - y) ** 2) ** 0.5
+                    if dist_prev <= 12.0:
+                        cycle_id = last_click_info[3]
+                det = _find_det_near_point(dets, x, y, cycle_after_id=cycle_id)
                 if det is not None:
-                    tracker.select_target_by_id(det.track_id)
-                    det.is_target = True
-                    annotations[cur_fidx] = {
-                        'frame_idx': cur_fidx,
-                        't_sec': rel_sec,
-                        'gt_present': 1,
-                        'bbox': tuple(int(v) for v in det.bbox),
-                        'corrected': 1,
-                        'source': 'click',
-                        'helper_track_id': int(det.track_id),
-                    }
-                    # cache 갱신
-                    frame_cache[cur_fidx] = (img, dets, det)
+                    _select_det_as_gt(cur_fidx, rel_sec, img, dets, det, 'click')
+                    last_click_info = (cur_fidx, x, y, int(det.track_id))
+                else:
+                    last_click_info = None
         elif event == cv2.EVENT_RBUTTONDOWN:
+            last_click_info = None
             annotations[cur_fidx] = {
                 'frame_idx': cur_fidx,
                 't_sec': rel_sec,
@@ -473,22 +514,49 @@ def run_annotator(args):
                 drag_rect,
                 tracker.metrics.adaptive_state,
                 corr_cnt,
+                id_input_buf=id_input_buf,
             )
             cv2.imshow(win_name, vis)
 
             key = cv2.waitKey(15 if not paused else 30) & 0xFF
-            if key in (ord('q'), 27):
+            if key == ord('q'):
                 break
+            elif key == 27:  # ESC: ID 입력 중이면 입력 취소, 아니면 저장 후 종료
+                if id_input_buf:
+                    id_input_buf = ''
+                else:
+                    break
+            elif ord('0') <= key <= ord('9'):
+                if len(id_input_buf) < 5:
+                    id_input_buf += chr(key)
+            elif key in (8, 127):  # Backspace
+                id_input_buf = id_input_buf[:-1]
+            elif key in (13, 10):  # Enter: 입력한 ID 선택
+                if id_input_buf:
+                    wanted_id = int(id_input_buf)
+                    id_input_buf = ''
+                    det = next((p for p in dets if p.track_id == wanted_id), None)
+                    if det is not None:
+                        _select_det_as_gt(cur_fidx, rel_sec, img, dets, det, 'id_select')
+                        last_click_info = None
+                    else:
+                        print(f'[Warn] f{cur_fidx}: ID:{wanted_id} 검출이 현재 프레임에 없습니다.')
             elif key == ord(' '):
                 paused = not paused
                 last_step_t = time.perf_counter()
             elif key in (ord('d'), 83):  # D or RightArrow
                 paused = True
+                id_input_buf = ''
+                last_click_info = None
                 cur_fidx = min(len(image_events), cur_fidx + 1)
             elif key in (ord('a'), 81):  # A or LeftArrow
                 paused = True
+                id_input_buf = ''
+                last_click_info = None
                 cur_fidx = max(1, cur_fidx - 1)
             elif key == ord('n'):
+                id_input_buf = ''
+                last_click_info = None
                 annotations[cur_fidx] = {
                     'frame_idx': cur_fidx,
                     't_sec': rel_sec,
@@ -501,7 +569,10 @@ def run_annotator(args):
                 if paused and cur_fidx < len(image_events):
                     cur_fidx += 1
             elif key == ord('c'):
+                id_input_buf = ''
+                last_click_info = None
                 tracker.select_target_by_id(None)
+                _invalidate_future_cache(cur_fidx)
             elif key == ord('s'):
                 st = save_gt_csv(out_csv, image_events, annotations)
                 print(f'[Saved] {out_csv} -> {st}')

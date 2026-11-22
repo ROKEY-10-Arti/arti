@@ -689,6 +689,7 @@ def _run_single_experiment(
             t_f0 = time.perf_counter()
             gt_entry = gt_map.get(total_imgs) if gt_map is not None else None
             eff_lock_point = lock_point
+            gt_lock_bbox = None
             if (
                 eff_lock_point is None
                 and not locked_once
@@ -696,8 +697,7 @@ def _run_single_experiment(
                 and gt_entry['present'] == 1
                 and gt_entry['bbox'] is not None
             ):
-                gx1, gy1, gx2, gy2 = gt_entry['bbox']
-                eff_lock_point = ((gx1 + gx2) // 2, (gy1 + gy2) // 2)
+                gt_lock_bbox = gt_entry['bbox']
 
             dets, tgt = tracker.process_frame(
                 frame,
@@ -705,13 +705,21 @@ def _run_single_experiment(
                 spatial_estimator=_spatial_est if loc is not None else None,
                 compute_all_sims=True,
             )
-            if eff_lock_point is not None and not locked_once and dets:
-                sel = tracker.select_target_by_point(eff_lock_point[0], eff_lock_point[1])
+            if not locked_once and dets:
+                sel = None
+                if eff_lock_point is not None:
+                    sel = tracker.select_target_by_point(eff_lock_point[0], eff_lock_point[1])
+                elif gt_lock_bbox is not None:
+                    best_det = max(dets, key=lambda p: _bbox_iou(p.bbox, gt_lock_bbox))
+                    if _bbox_iou(best_det.bbox, gt_lock_bbox) >= min(0.3, gt_iou_thresh):
+                        sel = tracker.select_target_by_id(best_det.track_id)
                 if sel is not None:
                     locked_once = True
                     tgt = next((p for p in dets if p.track_id == sel), None)
                     if tgt is not None:
                         tgt.is_target = True
+                elif tgt is not None:
+                    locked_once = True
             elif tgt is not None:
                 locked_once = True
 

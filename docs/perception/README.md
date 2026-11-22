@@ -12,12 +12,22 @@
 docs/perception/
 ├── README.md                  # 이 문서 (노트북 이어하기 · 사용법 · 결과 요약)
 ├── gt/
-│   └── pose_estimate2_gt.csv  # Human-in-the-Loop 클릭 교정 GT (2,403f 중 2,300f 라벨링)
+│   ├── pose_estimate2_gt.csv  # Human-in-the-Loop 클릭 교정 GT (2,403f 중 2,300f 라벨링)
+│   ├── one_man_gt.csv         # 단일 인물 이탈·재등장 GT (1,870f 전체 라벨링)
+│   ├── model_benchmark.csv    # model_benchmark 타겟 0 GT (2,184f 전체 라벨링)
+│   └── model_benchmark1~5.csv # model_benchmark 추가 5명 개별 타겟 GT (2,184f 중 1,565~1,960f)
 └── results/
-    ├── pose_estimate2_gt/     # [NEW] GT 적용 정량 평가 결과 (all9 + 5모드 + LiDAR)
-    ├── model_benchmark/       # 카메라 모델 9종 연산 분해 · 전경 분리 비교 (2,184f)
+    ├── pose_estimate2_gt/     # GT 적용 정량 평가 결과 (all9 + 5모드 + LiDAR)
+    ├── one_man_gt/            # [NEW] one_man GT 정량 평가 결과 (all9 + 5모드, RTX 4070)
+    ├── model_benchmark_gt/    # [NEW] model_benchmark 타겟 0 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark1_gt/   # [NEW] model_benchmark 타겟 1 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark2_gt/   # [NEW] model_benchmark 타겟 2 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark3_gt/   # [NEW] model_benchmark 타겟 3 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark4_gt/   # [NEW] model_benchmark 타겟 4 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark5_gt/   # [NEW] model_benchmark 타겟 5 GT 정량 평가 결과 (all9 + 5모드)
+    ├── model_benchmark/       # 카메라 모델 9종 연산 분해 · 전경 분리 비교 (2,184f, auto-lock)
     ├── pose_estimate2/        # 다인 교차 혼잡 시나리오 (2,403f, auto-lock 기준)
-    ├── one_man/               # 단일 인물 이탈·재등장 시나리오 (1,870f)
+    ├── one_man/               # 단일 인물 이탈·재등장 시나리오 (1,870f, auto-lock)
     ├── full/                  # /robot1 카메라+LiDAR+TF 통합 주행 (1,290f)
     ├── test_full/             # /robot1 통합 주행 (1,522f)
     ├── robot1_full/           # /robot1 근거리·가림 주행 (862f)
@@ -109,3 +119,68 @@ python3 src/person_tracker/research/bag_benchmark.py \
   --out ~/bench_results_laptop
 ```
 > 결과 비교 및 세부 CLI 옵션은 [`src/person_tracker/research/README.md`](../../src/person_tracker/research/README.md)에 정리되어 있습니다.
+
+---
+
+## 4. `one_man` · `model_benchmark` 6타겟 GT 정량 벤치마크 결과 (RTX 4070 Laptop GPU, `all9` × `5모드`)
+
+`--models all9 --modes 1,2,3,4,5 --device cuda:0 --reid-scale --gt-iou 0.5` 조건으로 신규 7개 GT를 일괄 평가했습니다.
+
+### A. GT 데이터셋 분포 요약
+| GT CSV | 대상 Bag | 평가 프레임 (`Pos / Neg / Unlabeled`) | 타겟 등장 구간 | 수동 교정 | 결과 폴더 |
+|---|---|---:|---|---:|---|
+| [`one_man_gt.csv`](gt/one_man_gt.csv) | `one_man` (1,870f) | `1,450 / 420 / 0` | `f1 ~ f1870` | 2 | [`results/one_man_gt`](results/one_man_gt/summary.md) |
+| [`model_benchmark.csv`](gt/model_benchmark.csv) | `model_benchmark` (2,184f) | `1,301 / 883 / 0` | `f1 ~ f2184` | 23 | [`results/model_benchmark_gt`](results/model_benchmark_gt/summary.md) |
+| [`model_benchmark1.csv`](gt/model_benchmark1.csv) | `model_benchmark` (2,184f) | `712 / 1,248 / 224` | `f225 ~ f1266` | 96 | [`results/model_benchmark1_gt`](results/model_benchmark1_gt/summary.md) |
+| [`model_benchmark2.csv`](gt/model_benchmark2.csv) | `model_benchmark` (2,184f) | `487 / 1,471 / 226` | `f227 ~ f1308` | 1,461 | [`results/model_benchmark2_gt`](results/model_benchmark2_gt/summary.md) |
+| [`model_benchmark3.csv`](gt/model_benchmark3.csv) | `model_benchmark` (2,184f) | `783 / 1,135 / 266` | `f267 ~ f1308` | 1,137 | [`results/model_benchmark3_gt`](results/model_benchmark3_gt/summary.md) |
+| [`model_benchmark4.csv`](gt/model_benchmark4.csv) | `model_benchmark` (2,184f) | `514 / 1,327 / 343` | `f344 ~ f946` | 1,334 | [`results/model_benchmark4_gt`](results/model_benchmark4_gt/summary.md) |
+| [`model_benchmark5.csv`](gt/model_benchmark5.csv) | `model_benchmark` (2,184f) | `241 / 1,324 / 619` | `f725 ~ f1324` | 1,298 | [`results/model_benchmark5_gt`](results/model_benchmark5_gt/summary.md) |
+
+### B. `one_man_gt` 핵심 결과 (`1,450` 양성 / `420` 음성)
+| Mode (`yolo26n-pose`) | GT True Lock % | GT Hijack % | GT Miss % | GT False Lock % | Mean IoU | Fail Episodes |
+|---|---:|---:|---:|---:|---:|---:|
+| `1:ByteTrack` | 25.6% | 0.0% | 74.4% | 0.2% | 0.969 | 7 |
+| `3:BoT-SORT` | 25.6% | 0.0% | 74.4% | 0.5% | 0.883 | 7 |
+| `2:Task-ReID` | **99.9%** | 0.0% | 0.1% | 3.3% | 0.972 | 10 |
+| `4:BoT+ReID` | **99.9%** | 0.1% | 0.0% | 4.5% | 0.890 | 10 |
+| **`5:Adaptive`** | **99.9%** | **0.0%** | **0.1%** | **2.1%** | **0.972** | 8 |
+
+- `5:Adaptive` 전 모델(`all9`) 기준: `v8n-det` `99.7%` ~ `26n-seg` **`100.0%`** (`Fail Episodes 0`), `26n-pose` **`99.9%`** (`GT Hijack 0.0%`, `Direct Sw 0`, `Recovered 5`).
+
+### C. `model_benchmark` 6명 개별 타겟 통합 결과 (`IoU >= 0.5`, 총 `4,038` 양성 프레임)
+
+#### 1) 모델별 6타겟 평균 정확도 (`5:Adaptive`)
+| Model | Pos 가중 평균 True Lock % | Macro 평균 True Lock % | Macro False Lock % | 타겟별 GT True Lock % (`T0 / T1 / T2 / T3 / T4 / T5`) | 평균 Infer / Total (ms) |
+|---|---:|---:|---:|---|---:|
+| `v8n-det` | 60.9% | 56.9% | 43.1% | 98.5% / 74.6% / 3.7% / 14.8% / 55.4% / 94.6% | 4.07 / 7.89 |
+| `v8n-seg` | 64.7% | 61.8% | 44.3% | 98.8% / 5.6% / 38.6% / **73.2%** / 56.0% / 98.8% | 4.44 / 9.63 |
+| `v8n-pose` | 62.9% | 55.0% | **5.4%** | 97.8% / 67.0% / 0.8% / 55.6% / 33.1% / 75.5% | 4.58 / 8.80 |
+| `11n-det` | 61.2% | 57.3% | 35.9% | 98.7% / 74.4% / 3.7% / 15.3% / 56.4% / 95.4% | 5.09 / 8.77 |
+| **`11n-seg`** | **66.0%** | **63.5%** | 44.1% | **98.8%** / 15.0% / **51.1%** / 66.3% / 52.5% / 97.5% | 5.74 / 11.08 |
+| `11n-pose` | 55.2% | 42.3% | **4.8%** | 97.7% / 68.7% / 1.0% / 18.9% / 56.2% / 11.2% | 6.23 / 10.81 |
+| `26n-det` | 64.3% | 60.9% | 39.1% | 98.7% / 72.5% / 3.9% / 25.3% / **67.3%** / 97.5% | 6.37 / 10.43 |
+| `26n-seg` | 56.3% | 52.2% | 42.2% | 98.7% / 4.9% / 4.7% / 55.0% / 50.8% / **99.2%** | 7.90 / 14.12 |
+| **`26n-pose`** | **65.8%** | 54.4% | **11.3%** | 97.8% / **75.4%** / 3.3% / 58.4% / 56.0% / 35.3% | 6.72 / 11.85 |
+
+#### 2) 추적 알고리즘별 6타겟 평균 (`yolo26n-pose`)
+| Mode | Pos 가중 평균 True Lock % | Macro 평균 True Lock % | Macro Hijack % | Macro False Lock % | 타겟별 GT True Lock % (`T0 / T1 / T2 / T3 / T4 / T5`) |
+|---|---:|---:|---:|---:|---|
+| `1:ByteTrack` | 26.5% | 24.7% | **4.6%** | **0.3%** | 17.1% / 13.3% / 3.3% / 56.8% / 56.2% / 1.2% |
+| `3:BoT-SORT` | 18.2% | 18.2% | 8.4% | **0.4%** | 17.1% / 13.5% / 3.7% / 10.5% / **59.7%** / 4.6% |
+| `2:Task-ReID` | 69.7% | 62.0% | 32.7% | 23.9% | **98.5%** / **76.4%** / **5.5%** / **65.8%** / 52.9% / 73.0% |
+| `4:BoT+ReID` | **70.1%** | **62.9%** | 26.4% | 22.0% | 98.1% / 76.1% / 5.3% / 65.6% / 57.0% / **75.1%** |
+| `5:Adaptive` | 65.8% | 54.4% | 32.1% | **11.3%** | 97.8% / 75.4% / 3.3% / 58.4% / 56.0% / 35.3% |
+
+- **주 타겟(`T0: model_benchmark_gt`)**: 모든 `5:Adaptive` 모델이 `97.7% ~ 98.8%`의 매우 높은 유지율을 보였습니다(`ByteTrack`/`BoT-SORT`는 `17.1%`).
+- **Pose vs Det/Seg 오잠금 방어 트레이드오프**: `Det`/`Seg` 계열은 부재(`gt_present=0`) 구간에서 타인을 타겟으로 오잠금하는 `Macro False Lock`이 `35.9% ~ 44.3%`로 높은 반면, **`Pose` 계열(`v8n-pose 5.4%`, `11n-pose 4.8%`, `26n-pose 11.3%`)은 오잠금을 1/3~1/8 수준으로 억제**합니다. 다만 `T2`/`T5`처럼 원거리·부분 가림으로 Pose 관절이 소실되는 타겟에서는 `Adaptive`의 보수적 임계치로 인해 `Task-ReID`/`BoT+ReID` 대비 재잠금률이 낮아지는 경향이 확인되었습니다.
+
+---
+
+## 5. 아직 GT 라벨링 미진행 Bag 목록 (후속 작업)
+- `~/Downloads/arti_benchmark_bags/complete_bag/robot1_full`
+- `~/Downloads/arti_benchmark_bags/complete_bag/test_full`
+- `~/Downloads/arti_benchmark_bags/follow_with_cam`
+- `~/Downloads/arti_benchmark_bags/follow_with_cam0`
+- `~/Downloads/bag3/pose_estimate`
+- `~/Downloads/bag3/robot4/full`
