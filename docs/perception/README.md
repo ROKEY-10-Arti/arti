@@ -184,3 +184,62 @@ python3 src/person_tracker/research/bag_benchmark.py \
 - `~/Downloads/arti_benchmark_bags/follow_with_cam0`
 - `~/Downloads/bag3/pose_estimate`
 - `~/Downloads/bag3/robot4/full`
+
+---
+
+## 6. Pose 마스킹(`edges`) · Seg(`geom_fast`) 개선안 랩탑 GT 검증 실행
+
+근접 추종·부분 가림 개선을 위해 `feature_extractors.py` / `multi_tracker_core.py`에 아래 2가지 기본값이 반영되었습니다.
+- **Pose (`--pose-mode edges --edge-score-mode max`)**: 상완(`5-7`, `6-8`)·측면 자세·단측 어깨/팔꿈치 근접 상체 마스크를 보강해 BBox 폴백을 줄이고, 마커 연결선별 1:1 유사도를 `max`로 결합
+- **Seg (`--seg-mode geom_fast`)**: `128px` ROI 다운스케일로 ReID 지연을 ~40% 단축하고, 화면 상/하단 잘림·종횡비 기반 해부학 분할로 근접 시 상의(`upper`) 오분류 감소
+
+랩탑(GPU)에서 최신 코드를 받아 바로 GT A/B 검증을 돌리는 명령어입니다.
+
+```bash
+# 1) 최신 코드 반영 & 빌드
+cd ~/arti
+git checkout feat/perception-benchmark && git pull origin feat/perception-benchmark
+source /opt/ros/jazzy/setup.bash && source ~/venvs/arti_venv/bin/activate
+colcon build --packages-select person_tracker --symlink-install
+source install/setup.bash
+
+# 2) 개선 기본값(Pose edges + Seg geom_fast) GT 벤치마크 — pose_estimate2 & one_man
+python3 src/person_tracker/research/bag_benchmark.py \
+  --bags ~/bag3/pose_estimate2 \
+  --models 26n-det,26n-seg,26n-pose \
+  --modes 1,3,5 --device cuda:0 --reid-scale --no-snapshots \
+  --gt docs/perception/gt/pose_estimate2_gt.csv --gt-iou 0.5 \
+  --out ~/bench_v2_pose_estimate2_gt
+
+python3 src/person_tracker/research/bag_benchmark.py \
+  --bags ~/Downloads/arti_benchmark_bags/one_man \
+  --models 26n-det,26n-seg,26n-pose \
+  --modes 5 --device cuda:0 --reid-scale --no-snapshots \
+  --gt docs/perception/gt/one_man_gt.csv --gt-iou 0.5 \
+  --out ~/bench_v2_one_man_gt
+
+# 3) model_benchmark 6타겟(T0~T5) 개선안 일괄 GT 평가 (결과 폴더에 타겟별 summary.md 생성)
+for idx in "" 1 2 3 4 5; do
+  gt_name="model_benchmark${idx}.csv"
+  out_name="T${idx:-0}"
+  python3 src/person_tracker/research/bag_benchmark.py \
+    --bags ~/Downloads/arti_benchmark_bags/model_benchmark \
+    --models 26n-det,26n-seg,26n-pose \
+    --modes 5 --device cuda:0 --reid-scale --no-snapshots \
+    --gt "docs/perception/gt/${gt_name}" --gt-iou 0.5 \
+    --out ~/bench_v2_model_benchmark/${out_name}
+done
+
+# 4) (선택) 기존 방식(baseline) vs 개선안(edges / geom_fast) 동일 GT 직접 대조
+python3 src/person_tracker/research/bag_benchmark.py \
+  --bags ~/Downloads/arti_benchmark_bags/model_benchmark \
+  --models 26n-seg,26n-pose --modes 5 --device cuda:0 --reid-scale --no-snapshots \
+  --pose-mode baseline --edge-score-mode none --seg-mode baseline \
+  --gt docs/perception/gt/model_benchmark2.csv --out ~/bench_ab_baseline_T2
+
+python3 src/person_tracker/research/bag_benchmark.py \
+  --bags ~/Downloads/arti_benchmark_bags/model_benchmark \
+  --models 26n-seg,26n-pose --modes 5 --device cuda:0 --reid-scale --no-snapshots \
+  --pose-mode edges --edge-score-mode max --seg-mode geom_fast \
+  --gt docs/perception/gt/model_benchmark2.csv --out ~/bench_ab_improved_T2
+```

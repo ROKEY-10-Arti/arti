@@ -1731,12 +1731,14 @@ def evaluate_bag(bag_dir: str, out_root: str, args):
     print(f'Loaded {n_imgs} image frames ({len(events)} total messages).')
 
     reid_kwargs = dict(REID_SCALE_KWARGS) if args.reid_scale else {}
+    reid_kwargs['pose_mode'] = args.pose_mode
+    reid_kwargs['edge_score_mode'] = args.edge_score_mode
+    reid_kwargs['seg_mode'] = args.seg_mode
     gt_map = None
     if getattr(args, 'gt', ''):
         gt_path = os.path.abspath(os.path.expanduser(args.gt))
         gt_map = _load_gt_csv(gt_path)
         print(f'Loaded GT annotations: {len(gt_map)} frames from {gt_path} (IoU >= {args.gt_iou})')
-
     lock_point = None
     if args.lock_point:
         px, py = args.lock_point.split(',')
@@ -1960,6 +1962,9 @@ def main():
         help='전·중·후 3프레임 시퀀스 비교 간격 Δ (기본 10프레임 -> f-10, f, f+10)',
     )
     parser.add_argument('--reid-scale', action='store_true', help='follow_test REID_SCALE 완화 파라미터 적용')
+    parser.add_argument('--pose-mode', default='edges', choices=['baseline', 'expanded', 'edges'], help='Pose 특징 마스킹 모드 (기본: edges)')
+    parser.add_argument('--edge-score-mode', default='max', choices=['none', 'max', 'blend', 'hybrid'], help='Pose 연결선 유사도 결합 방식 (기본: max)')
+    parser.add_argument('--seg-mode', default='geom_fast', choices=['baseline', 'geom_fast'], help='Seg 특징 분할·가속 모드 (기본: geom_fast)')
     parser.add_argument('--no-localizer-compare', dest='compare_localizer', action='store_false')
     parser.add_argument('--no-snapshots', dest='save_snapshots', action='store_false')
     parser.add_argument(

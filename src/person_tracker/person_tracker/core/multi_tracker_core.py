@@ -136,6 +136,9 @@ class MultiModelTrackerCore:
         ema_min_sim: float = 0.60,
         ema_alpha: float = 0.04,
         ema_require_single: bool = True,
+        pose_mode: str = 'edges',
+        edge_score_mode: Optional[str] = None,
+        seg_mode: str = 'geom_fast',
     ):
         self.family_idx = family_idx if family_idx in self.FAMILIES else 3
         self.task_idx = task_idx if task_idx in self.TASKS else 3
@@ -152,8 +155,10 @@ class MultiModelTrackerCore:
         # 태스크별 특징 추출기 플러그인 매핑
         self.extractors: Dict[str, BaseFeatureExtractor] = {
             'detect': BBoxFeatureExtractor(),
-            'segment': SegMaskFeatureExtractor(),
-            'pose': PoseKeypointFeatureExtractor(),
+            'segment': SegMaskFeatureExtractor(seg_mode=seg_mode),
+            'pose': PoseKeypointFeatureExtractor(
+                pose_mode=pose_mode, edge_score_mode=edge_score_mode
+            ),
         }
 
         # 모델 캐시 (한 번 로드한 모델은 메모리에 유지하여 즉시 전환)
@@ -443,6 +448,11 @@ class MultiModelTrackerCore:
                         self._backfill_streaks[part] = 0
                 else:
                     self._backfill_streaks[part] = 0
+            if t_bank.edges:
+                if extractor.backfill_edges(self.recent_bank, t_bank.edges):
+                    backfilled = True
+                if extractor.backfill_edges(self.anchor_bank, t_bank.edges):
+                    backfilled = True
             if backfilled:
                 current_target.similarity, current_target.part_sims = (
                     extractor.compute_dual_similarity_detail(

@@ -75,6 +75,9 @@ python3 ~/project/arti/src/person_tracker/research/bag_benchmark.py \
 | `--snap-frames` | 자동 선정 | Det/Seg/Pose·버전 비교 중심 프레임 번호 직접 지정 (예: `40,120,250`) |
 | `--seq-delta Δ` | `10` | 전·중·후 3프레임 시퀀스 비교 간격 (`f-Δ`, `f`, `f+Δ`) |
 | `--reid-scale` | 꺼짐 | `follow_test`의 REID 완화 파라미터(`ema_min_sim=0.52` 등) 적용 |
+| `--pose-mode` | `edges` | Pose 마스킹 방식 (`baseline`, `expanded`, `edges`: 상완·단측 어깨 보완 + 마커 연결선 1:1 비교) |
+| `--edge-score-mode` | `max` | Pose 마커 연결선 점수 결합 방식 (`none`, `max`, `blend`, `hybrid`) |
+| `--seg-mode` | `geom_fast` | Seg 분할·가속 방식 (`baseline`, `geom_fast`: 화면 잘림·종횡비 기반 해부학 분할 + 128px ROI 가속) |
 | `--no-localizer-compare` | 비교 켜짐 | LiDAR `Raw` vs `Kinematic+Map+EMA` 비교 생략 |
 | `--no-snapshots` | 저장 켜짐 | 대시보드 및 비교 스냅샷 PNG 저장 생략 |
 | `--gt PATH` | 비활성 | `gt_annotator.py`로 만든 정답 CSV 기반 진짜 Recall / Hijack / Miss / 개입 횟수 집계 |
