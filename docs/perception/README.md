@@ -291,6 +291,7 @@ python3 src/person_tracker/research/bag_benchmark.py \
 - **`pose_estimate2_gt`** ([summary.md](results/pose_estimate2_gt/summary.md)): `26n-pose + 5:Adaptive` `GT True Lock 96.1% → 96.1%` 유지 (`Fail Episodes 16 → 14`), `v8n-seg` `96.0% → 96.0%`, `11n-seg` `95.8% → 95.8%`, `26n-seg` `96.0% → 96.0%`. 단, `Seg geom_fast`는 근접/화면하단 잘림 판정으로 `M/L Valid %`가 `100% → 4.3%~12.5%`로 감소했습니다.
 - **`one_man_gt`** ([summary.md](results/one_man_gt/summary.md)): `all9` 전 모델이 `99.3% ~ 100.0%` 그대로 유지되면서, Pose 3종의 `Fallback %`가 `10.1%~19.2% → 1.1%~2.1%`로 크게 감소했고 Seg 3종의 `ReID` 지연시간은 `1.20~1.30ms → 0.71~0.80ms`로 약 `38~45%` 단축되었습니다.
 
-### E. 핵심 인사이트 및 후속 튜닝 포인트
+### E. 핵심 인사이트 및 최종 채택 결정
 1. **Pose `edges` 효과 확인**: BBox 폴백률이 8-GT 평균 `17.0%~21.4% → 2.4%~3.5%`로 급감했고, **`v8n-pose`는 8-GT 전체 1위(`83.3%`, `+4.4%p`), `model_benchmark` 6타겟 기준 `+8.4%p` 상승**을 기록했습니다. `26n-pose`에서도 `Task-ReID`(`+4.2%p`), `BoT+ReID`(`+3.5%p`), `T2`(`3.3% → 27.1%`)가 크게 개선되었습니다.
-2. **Seg `geom_fast` 트레이드오프**: 목표대로 `ReID` 연산 시간은 `~25~35%` 단축되었으나, 화면 경계 잘림(`clipped_bottom`/`clipped_top`) 및 `128px` 다운스케일 조건이 원거리·부분 가림 타겟(`T2`, `T4`, `T5`)의 `mid/lower` 유효율과 재식별 일관성을 낮춰 `Seg` 정확도가 `-3.7%~-10.5%p` 하락했습니다. 원거리·다인 혼잡 환경에서는 `--seg-mode baseline` 또는 `geom_fast` 임계치(`aspect < 1.85` / `max_roi_dim`) 보정이 필요합니다.
+2. **Seg `geom_fast` 트레이드오프 → `baseline` 기본값 복원**: `ReID` 연산 시간은 `~25~35%` 단축되었으나, 화면 경계 잘림(`clipped_bottom`/`clipped_top`) 및 `128px` 다운스케일 조건이 원거리·부분 가림 타겟(`T2`, `T4`, `T5`)의 `mid/lower` 유효율과 재식별 일관성을 낮춰 `Seg` 정확도가 `-3.7%~-10.5%p` 하락했습니다. 이에 **`Seg` 기본값은 `baseline`으로 복원**했습니다(`--seg-mode geom_fast` 옵션은 유지).
+3. **최종 기본 모델 변경 (`yolo26n-pose` → `yolov8n-pose`)**: 8종 GT 종합 정확도(`83.3%` 1위), 다수 타겟(`71.3%`, `False Lock 5.4%`), GPU 추론 속도 모두에서 우위를 확인해 기본 `tracker_family_idx=1`(`yolov8n-pose.pt`, `pose_mode='edges'`, `edge_score_mode='max'`)으로 전환했습니다.

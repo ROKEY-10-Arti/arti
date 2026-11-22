@@ -65,7 +65,7 @@ class BaseTrackerNode(Node):
     }
 
     TRACKER_PARAM_DEFAULTS = {
-        'tracker_family_idx': 3,
+        'tracker_family_idx': 1,
         'tracker_task_idx': 3,
         'tracker_mode': 5,
         'tracker_conf': 0.15,

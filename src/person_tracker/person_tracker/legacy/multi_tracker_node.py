@@ -66,7 +66,7 @@ class MultiModelTrackerNode(Node):
         self.declare_parameter('use_compressed', True)
         self.declare_parameter('image_topic', '')
         self.declare_parameter('depth_topic', '/oakd/stereo/image_raw')
-        self.declare_parameter('initial_family', 3)  # 1:v8n, 2:11n, 3:26n
+        self.declare_parameter('initial_family', 1)  # 1:v8n, 2:11n, 3:26n
         self.declare_parameter('initial_task', 3)    # 1:Det, 2:Seg, 3:Pose
         self.declare_parameter('initial_mode', 5)    # 1~5
         self.declare_parameter('imgsz', 320)

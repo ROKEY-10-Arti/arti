@@ -494,7 +494,7 @@ class SegMaskFeatureExtractor(BaseFeatureExtractor):
       - `seg_mode='geom_fast'`: 대용량 ROI 다운스케일 가속 + 화면 하/상단 잘림·종횡비 기반 해부학 부위 매핑(근접 시 상체 전용화, 전신 시 얼굴/머리 상단 제외)
     """
 
-    def __init__(self, seg_mode: str = 'geom_fast', max_roi_dim: int = 128):
+    def __init__(self, seg_mode: str = 'baseline', max_roi_dim: int = 128):
         self.seg_mode = seg_mode
         self.max_roi_dim = int(max_roi_dim)
 

@@ -1964,7 +1964,7 @@ def main():
     parser.add_argument('--reid-scale', action='store_true', help='follow_test REID_SCALE 완화 파라미터 적용')
     parser.add_argument('--pose-mode', default='edges', choices=['baseline', 'expanded', 'edges'], help='Pose 특징 마스킹 모드 (기본: edges)')
     parser.add_argument('--edge-score-mode', default='max', choices=['none', 'max', 'blend', 'hybrid'], help='Pose 연결선 유사도 결합 방식 (기본: max)')
-    parser.add_argument('--seg-mode', default='geom_fast', choices=['baseline', 'geom_fast'], help='Seg 특징 분할·가속 모드 (기본: geom_fast)')
+    parser.add_argument('--seg-mode', default='baseline', choices=['baseline', 'geom_fast'], help='Seg 특징 분할·가속 모드 (기본: baseline)')
     parser.add_argument('--no-localizer-compare', dest='compare_localizer', action='store_false')
     parser.add_argument('--no-snapshots', dest='save_snapshots', action='store_false')
     parser.add_argument(

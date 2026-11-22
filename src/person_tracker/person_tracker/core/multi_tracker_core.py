@@ -68,7 +68,7 @@ class UnifiedTrackedPerson:
 
 @dataclass
 class MultiTrackerMetrics:
-    model_label: str = 'yolo26n-pose.pt'
+    model_label: str = 'yolov8n-pose.pt'
     task: str = 'pose'
     device: str = 'CPU'
     preprocess_ms: float = 0.0
@@ -119,7 +119,7 @@ class MultiModelTrackerCore:
 
     def __init__(
         self,
-        family_idx: int = 3,   # 기본: 3 (YOLO26n)
+        family_idx: int = 1,   # 기본: 1 (YOLOv8n, 8-GT 종합 1위)
         task_idx: int = 3,     # 기본: 3 (Pose)
         mode: int = 5,         # 기본: 5 (Adaptive)
         imgsz: int = 320,
@@ -138,9 +138,9 @@ class MultiModelTrackerCore:
         ema_require_single: bool = True,
         pose_mode: str = 'edges',
         edge_score_mode: Optional[str] = None,
-        seg_mode: str = 'geom_fast',
+        seg_mode: str = 'baseline',
     ):
-        self.family_idx = family_idx if family_idx in self.FAMILIES else 3
+        self.family_idx = family_idx if family_idx in self.FAMILIES else 1
         self.task_idx = task_idx if task_idx in self.TASKS else 3
         self.mode = mode if mode in self.MODE_NAMES else 5
         self.imgsz = imgsz
